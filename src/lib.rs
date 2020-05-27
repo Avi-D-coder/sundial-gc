@@ -158,7 +158,7 @@ fn list_test() {
         });
         let one_two = lists.mark(one_two);
         drop(usizes);
-        let _ =one_two._t;
+        let _ = one_two._t;
     }
 }
 
@@ -190,9 +190,7 @@ fn churn() {
     let gced_usize = usizes.gc_alloc(1);
 
     let foos: Arena<Foo> = Arena::new();
-    let foo = foos.gc_alloc(Foo {
-        _bar: gced_usize,
-    });
+    let foo = foos.gc_alloc(Foo { _bar: gced_usize });
 
     let foos2: Arena<Foo> = Arena::new();
     // mark extends foos lifetime to that of the new arena foos2
@@ -206,4 +204,70 @@ fn churn() {
     drop(foos);
     drop(usizes);
     let _ = *foo2._bar + 1usize;
+}
+
+#[test]
+fn prevent_use_after_free() {
+    let strings: Arena<String> = Arena::new();
+    let gced = strings.gc_alloc(String::from("foo"));
+    let strs: Arena<&String> = Arena::new();
+    let str1 = strs.gc_alloc(&*gced);
+    let strs2: Arena<&String> = Arena::new();
+    let _str2 = strs2.mark(str1);
+    drop(strings); //~ cannot move out of `strings` because it is borrowed
+                   // let str3 = *str2;
+}
+
+#[test]
+fn prevent_use_after_free_correct() {
+    let strings: Arena<String> = Arena::new();
+    let gced = strings.gc_alloc(String::from("foo"));
+    let strs: Arena<String> = Arena::new();
+    let str1 = strs.mark(gced);
+    let strs2 = Arena::new();
+    let str2 = strs2.mark(str1);
+    drop(strings);
+    let _str3 = &*str2;
+}
+
+// Why did I think this is unsound without GAT Mark?
+#[test]
+fn hidden_lifetime_test() {
+    struct Bar<'b> {
+        _b: &'b str,
+    }
+    struct Foo2<'a, 'b> {
+        _bar: Gc<'a, Bar<'b>>,
+    }
+
+    unsafe impl<'a, 'b> Trace for Foo2<'a, 'b> {
+        fn trace(_: &Foo2<'a, 'b>) {}
+        const TRACE_FIELD_COUNT: u8 = 0;
+        const TRACE_TYPE_INFO: Option<GcTypeInfo> = None;
+        fn trace_child_type_info() -> HashSet<GcTypeInfo> {
+            HashSet::default()
+        }
+        fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
+            HashSet::default()
+        }
+    }
+
+    unsafe impl<'o, 'n, 'b> Mark<'o, 'n, Foo2<'o, 'b>, Foo2<'n, 'b>> for Arena<Foo2<'n, 'b>> {
+        fn mark(&'n self, o: Gc<'o, Foo2<'o, 'b>>) -> Gc<'n, Foo2<'n, 'b>> {
+            unsafe { std::mem::transmute(o) }
+        }
+    }
+
+    let foos = Arena::new();
+    let bars = Arena::new();
+    let string = String::from("bar");
+    let b = &*string;
+    let foo = foos.gc_alloc(Foo2 {
+        _bar: bars.gc_alloc(Bar { _b: b }),
+    });
+
+    let foos2 = Arena::new();
+    let foo2 = foos2.mark(foo);
+    // drop(string); //~ cannot move out of `string` because it is borrowed
+    let _ = *foo2._bar._b;
 }
