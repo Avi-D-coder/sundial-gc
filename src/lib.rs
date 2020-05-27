@@ -73,11 +73,13 @@ impl<T: Trace> Arena<T> {
 pub unsafe auto trait NoGc {}
 impl<'r, T> !NoGc for Gc<'r, T> {}
 
+/// Shallow immutability
 pub unsafe auto trait Immutable {}
 impl<T> !Immutable for &mut T {}
 impl<T> !Immutable for UnsafeCell<T> {}
+unsafe impl<T> Immutable for Box<T> {}
 
-unsafe impl<T: NoGc> Trace for T {
+unsafe impl<T: NoGc + Immutable> Trace for T {
     fn trace(_: &T) {}
     const TRACE_FIELD_COUNT: u8 = 0;
     const TRACE_TYPE_INFO: Option<GcTypeInfo> = None;
@@ -89,7 +91,7 @@ unsafe impl<T: NoGc> Trace for T {
     }
 }
 
-unsafe impl<'o, 'n, T: NoGc> Mark<'o, 'n, T, T> for Arena<T> {
+unsafe impl<'o, 'n, T: NoGc + Immutable> Mark<'o, 'n, T, T> for Arena<T> {
     fn mark(&'n self, o: Gc<'o, T>) -> Gc<'n, T> {
         unsafe { std::mem::transmute(o) }
     }
@@ -131,7 +133,9 @@ fn list_test() {
         }
     }
 
-    unsafe impl<'o, 'n, T: NoGc> Mark<'o, 'n, List<'o, T>, List<'n, T>> for Arena<List<'n, T>> {
+    unsafe impl<'o, 'n, T: NoGc + Immutable> Mark<'o, 'n, List<'o, T>, List<'n, T>>
+        for Arena<List<'n, T>>
+    {
         fn mark(&'n self, o: Gc<'o, List<'o, T>>) -> Gc<'n, List<'n, T>> {
             unsafe { std::mem::transmute(o) }
         }
@@ -270,4 +274,13 @@ fn hidden_lifetime_test() {
     let foo2 = foos2.mark(foo);
     // drop(string); //~ cannot move out of `string` because it is borrowed
     let _ = *foo2._bar._b;
+}
+
+#[test]
+fn immutable_test() {
+    use std::sync::Mutex;
+    //~ trait bound `std::cell::UnsafeCell<usize>: Immutable` is not satisfied
+    // let mutexes: Arena<Mutex<usize>> = Arena::new();
+
+    let _mutexes: Arena<Box<Mutex<usize>>> = Arena::new();
 }
