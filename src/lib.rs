@@ -8,6 +8,8 @@
 #![feature(negative_impls)]
 #![feature(const_raw_ptr_to_usize_cast)]
 #![feature(const_mut_refs)]
+#![feature(trivial_bounds)]
+
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -24,7 +26,7 @@ use std::thread_local;
 //     fn mark(&'n self, o: Gc<'o, Self::Struct<'o>>) -> Gc<'n, Self::Struct<'n>>;
 // }
 
-pub unsafe trait Mark<'o, 'n, O: Trace, N> {
+pub unsafe trait Mark<'o, 'n, O, N> {
     fn mark(&'n self, o: Gc<'o, O>) -> Gc<'n, N>;
 }
 
@@ -137,21 +139,8 @@ default unsafe impl<T> Trace for T {
 pub unsafe trait HasGc {}
 unsafe impl<'r, T> HasGc for Gc<'r, T> {}
 
-// TODO add unsafe back when rust-analyzer gains support for unsafe default
-pub trait Trace2 {}
-
-impl<T: Immutable> Trace2 for T {}
-
-impl<'r, T: Immutable + Trace2> Trace2 for Option<T> where Option<T>: Immutable {}
-
-impl<'r, T: Immutable + Trace2 + HasGc> Trace2 for Option<T> where Option<T>: Immutable {}
-
-impl<'r, T: 'r + Immutable + Trace2> Trace2 for List<'r, T> {}
-
-impl<'r, T: 'r + Immutable + Trace2 + HasGc> Trace2 for List<'r, T> {}
-
-unsafe impl<'o, 'n, T> Mark<'o, 'n, T, T> for Arena<T> {
-    fn mark(&'n self, o: Gc<'o, T>) -> Gc<'n, T> {
+default unsafe impl<'o, 'n, O: Trace, N> Mark<'o, 'n, O, N> for Arena<N> {
+    fn mark(&'n self, o: Gc<'o, O>) -> Gc<'n, N> {
         unsafe { std::mem::transmute(o) }
     }
 }
@@ -279,7 +268,7 @@ unsafe impl<'r, T: Immutable + Trace + 'r> Trace for List<'r, T> {
     }
 }
 
-// unsafe impl<'o, 'n, T: Trace + HasNoGc> Mark<'o, 'n, List<'o, T>, List<'n, T>>
+// unsafe impl<'o, 'n, T: Trace + HasGc> Mark<'o, 'n, List<'o, T>, List<'n, T>>
 //     for Arena<List<'n, T>>
 // {
 //     fn mark(&'n self, o: Gc<'o, List<'o, T>>) -> Gc<'n, List<'n, T>> {
@@ -291,6 +280,10 @@ unsafe impl<'o, 'n, O: Trace + HasGc, N> Mark<'o, 'n, List<'o, O>, List<'n, N>> 
     fn mark(&'n self, o: Gc<'o, List<'o, O>>) -> Gc<'n, List<'n, N>> {
         unsafe { std::mem::transmute(o) }
     }
+}
+
+unsafe impl<'r, T> HasGc for List<'r, T> {
+    
 }
 
 #[test]
@@ -308,7 +301,7 @@ fn _churn_list() {
     });
     let one_two = lists.mark(one_two);
     drop(usizes);
-    let _ = one_two._t;
+    let _ = (*one_two)._t;
 }
 
 struct Foo<'l> {
