@@ -123,17 +123,92 @@ impl<T> !Immutable for UnsafeCell<T> {}
 unsafe impl<T> Immutable for Box<T> {}
 
 // Needs negative impls
-// unsafe impl<T: NoGc + Immutable> Trace for T {
+// unsafe impl<T: HasNoGc + Immutable> Trace for T {
 //     fn trace(_: &T) {}
 //     const TRACE_FIELD_COUNT: u8 = 0;
 //     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<T>();
-//     fn trace_child_type_info() -> Vec<GcTypeInfo> {
-//         Vec::new()
-//     }
+//     const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
 //     fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
 //         HashSet::default()
 //     }
 // }
+
+// Alternative sterilization friendly formulation
+
+pub unsafe trait HasGc {}
+unsafe impl<'r, T> HasGc for Gc<'r, T> {}
+
+// TODO add unsafe back when rust-analyzer gains support for unsafe default
+pub trait Trace2 {
+    fn trace2(t: &Self);
+    const TRACE_FIELD_COUNT2: u8;
+    const TRACE_TYPE_INFO2: GcTypeInfo2;
+    const TRACE_CHILD_TYPE_INFO2: [Option<GcTypeInfo>; 8];
+    fn trace_transitive_type_info2() -> HashSet<GcTypeInfo>;
+}
+
+impl<T: Immutable> Trace2 for T {
+    fn trace2(_: &T) {}
+    const TRACE_FIELD_COUNT2: u8 = 0;
+    const TRACE_TYPE_INFO2: GcTypeInfo2 = GcTypeInfo2::new::<T>();
+    const TRACE_CHILD_TYPE_INFO2: [Option<GcTypeInfo>; 8] = [None; 8];
+    fn trace_transitive_type_info2() -> HashSet<GcTypeInfo> {
+        HashSet::default()
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GcTypeInfo2 {
+    trace_ptr: usize,
+    drop_ptr: usize,
+    needs_drop: bool,
+    byte_size: u16,
+    alignment: u16,
+}
+
+impl GcTypeInfo2 {
+    pub const fn new<T: Trace2>() -> Self {
+        Self {
+            trace_ptr: unsafe { T::trace2 as *const fn(&T) as usize },
+            drop_ptr: unsafe { ptr::drop_in_place::<T> as *const fn(*mut T) as usize },
+            needs_drop: needs_drop::<T>(),
+            byte_size: size_of::<T>() as u16,
+            alignment: align_of::<T>() as u16,
+        }
+    }
+}
+
+default impl<'r, T: Trace2> Trace2 for Option<T>
+where
+    Option<T>: Immutable,
+{
+    fn trace2(t: &Self) {
+        Trace2::trace2(t.deref())
+    }
+    const TRACE_FIELD_COUNT2: u8 = 0;
+    const TRACE_TYPE_INFO2: GcTypeInfo2 = GcTypeInfo2::new::<Option<T>>();
+    const TRACE_CHILD_TYPE_INFO2: [Option<GcTypeInfo>; 8] = [None; 8];
+
+    fn trace_transitive_type_info2() -> HashSet<GcTypeInfo> {
+        HashSet::new()
+    }
+}
+
+impl<'r, T: Trace2 + HasGc> Trace2 for Option<T>
+where
+    Option<T>: Immutable,
+{
+    fn trace2(t: &Self) {
+        Trace2::trace2(t.deref())
+    }
+    const TRACE_FIELD_COUNT2: u8 = 0;
+    const TRACE_TYPE_INFO2: GcTypeInfo2 = GcTypeInfo2::new::<Option<T>>();
+    const TRACE_CHILD_TYPE_INFO2: [Option<GcTypeInfo>; 8] = [None; 8];
+
+    fn trace_transitive_type_info2() -> HashSet<GcTypeInfo> {
+        HashSet::new()
+    }
+}
 
 unsafe impl<T: HasNoGc + Immutable> Trace for NoGc<T> {
     fn trace(_: &Self) {}
@@ -249,13 +324,35 @@ struct List<'r, T> {
 
 // These three impls will be derived with a procedural macro
 
+// unsafe impl<'r, T: 'r + Trace> Trace for List<'r, T> {
+//     fn trace(_: &List<'r, T>) {}
+//     const TRACE_FIELD_COUNT: u8 = 0;
+//     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
+//     const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [
+//         Some(GcTypeInfo::new::<T>()),
+//         Some(GcTypeInfo::new::<Option<Gc<'r, List<'r, T>>>>()),
+//         None,
+//         None,
+//         None,
+//         None,
+//         None,
+//         None,
+//     ];
+
+//     fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
+//         let mut tti = HashSet::from_iter(Self::TRACE_CHILD_TYPE_INFO.iter().filter_map(|o| *o));
+//         tti.extend(T::trace_transitive_type_info().iter());
+//         tti
+//     }
+// }
+
 unsafe impl<'r, T: 'r + Trace> Trace for List<'r, T> {
     fn trace(_: &List<'r, T>) {}
     const TRACE_FIELD_COUNT: u8 = 0;
     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
     const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [
+        Some(GcTypeInfo::new::<T>()),
         Some(GcTypeInfo::new::<Option<Gc<'r, List<'r, T>>>>()),
-        None,
         None,
         None,
         None,
@@ -271,16 +368,16 @@ unsafe impl<'r, T: 'r + Trace> Trace for List<'r, T> {
     }
 }
 
-// unsafe impl<'o, 'n, T: NoGc + Immutable> Mark<'o, 'n, List<'o, T>, List<'n, T>>
-//     for Arena<List<'n, T>>
-// {
-//     fn mark(&'n self, o: Gc<'o, List<'o, T>>) -> Gc<'n, List<'n, T>> {
-//         unsafe { std::mem::transmute(o) }
-//     }
-// }
+unsafe impl<'o, 'n, T: Trace + HasNoGc> Mark<'o, 'n, List<'o, T>, List<'n, T>>
+    for Arena<List<'n, T>>
+{
+    fn mark(&'n self, o: Gc<'o, List<'o, T>>) -> Gc<'n, List<'n, T>> {
+        unsafe { std::mem::transmute(o) }
+    }
+}
 
 unsafe impl<'o, 'n, O: Trace, N> Mark<'o, 'n, List<'o, O>, List<'n, N>> for Arena<List<'n, N>> {
-    fn mark(&'n self, o: Gc<'o, List<'o, O>>) -> Gc<'n, List<'n, N>> {
+    default fn mark(&'n self, o: Gc<'o, List<'o, O>>) -> Gc<'n, List<'n, N>> {
         unsafe { std::mem::transmute(o) }
     }
 }
