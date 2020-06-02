@@ -118,15 +118,6 @@ impl<T> !Immutable for &mut T {}
 impl<T> !Immutable for UnsafeCell<T> {}
 unsafe impl<T> Immutable for Box<T> {}
 
-pub unsafe trait HasGc_ {}
-unsafe impl<'r, T> HasGc_ for Gc<'r, T> {}
-
-
-pub unsafe auto trait HasGc {}
-impl<'r, T: NoGc> !HasGc for T {}
-
-
-
 unsafe impl<T: NoGc + Immutable> Trace for T {
     fn trace(_: &T) {}
     const TRACE_FIELD_COUNT: u8 = 0;
