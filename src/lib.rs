@@ -22,11 +22,11 @@ use std::thread_local;
 //     fn mark(&'n self, o: Gc<'o, Self::Struct<'o>>) -> Gc<'n, Self::Struct<'n>>;
 // }
 
-pub trait Mark<'o, 'n, O, N> {
+pub unsafe trait Mark<'o, 'n, O, N> {
     fn mark(&'n self, o: Gc<'o, O>) -> Gc<'n, N>;
 }
 
-pub trait Trace {
+pub unsafe trait Trace {
     fn trace(t: &Self);
     const TRACE_FIELD_COUNT: u8;
     const TRACE_TYPE_INFO: GcTypeInfo;
@@ -112,16 +112,31 @@ impl<T: Trace> Arena<T> {
 pub unsafe auto trait NoGc {}
 impl<'r, T> !NoGc for Gc<'r, T> {}
 
+struct NGc<T: NoGc + Immutable>(T);
+
 /// Shallow immutability
 pub unsafe auto trait Immutable {}
 impl<T> !Immutable for &mut T {}
 impl<T> !Immutable for UnsafeCell<T> {}
 unsafe impl<T> Immutable for Box<T> {}
 
-default impl<T: Immutable + NoGc> Trace for T {
-    fn trace(_: &T) {}
+// Needs negative impls
+// unsafe impl<T: NoGc + Immutable> Trace for T {
+//     fn trace(_: &T) {}
+//     const TRACE_FIELD_COUNT: u8 = 0;
+//     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<T>();
+//     fn trace_child_type_info() -> Vec<GcTypeInfo> {
+//         Vec::new()
+//     }
+//     fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
+//         HashSet::default()
+//     }
+// }
+
+unsafe impl<T: NoGc + Immutable> Trace for NGc<T> {
+    fn trace(_: &Self) {}
     const TRACE_FIELD_COUNT: u8 = 0;
-    const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<T>();
+    const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
     fn trace_child_type_info() -> Vec<GcTypeInfo> {
         Vec::new()
     }
@@ -130,13 +145,13 @@ default impl<T: Immutable + NoGc> Trace for T {
     }
 }
 
-impl<'o, 'n, T> Mark<'o, 'n, T, T> for Arena<T> {
+unsafe impl<'o, 'n, T: NoGc + Immutable> Mark<'o, 'n, T, T> for Arena<T> {
     fn mark(&'n self, o: Gc<'o, T>) -> Gc<'n, T> {
         unsafe { std::mem::transmute(o) }
     }
 }
 
-impl<'r, T: Trace> Trace for Gc<'r, T> {
+unsafe impl<'r, T: Trace> Trace for Gc<'r, T> {
     fn trace(t: &Self) {
         Trace::trace(t.deref())
     }
@@ -150,8 +165,7 @@ impl<'r, T: Trace> Trace for Gc<'r, T> {
     }
 }
 
-// NoGc is a lie
-impl<'r, T: Immutable + NoGc + Trace> Trace for Option<T> {
+unsafe impl<'r, T: Trace> Trace for Option<T> {
     fn trace(t: &Self) {
         Trace::trace(t.deref())
     }
@@ -162,6 +176,71 @@ impl<'r, T: Immutable + NoGc + Trace> Trace for Option<T> {
     }
     fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
         T::trace_transitive_type_info()
+    }
+}
+
+unsafe impl Trace for usize {
+    fn trace(_: &Self) {}
+    const TRACE_FIELD_COUNT: u8 = 0;
+    const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
+    fn trace_child_type_info() -> Vec<GcTypeInfo> {
+        Vec::new()
+    }
+
+    fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
+        HashSet::default()
+    }
+}
+
+unsafe impl Trace for String {
+    fn trace(_: &Self) {}
+    const TRACE_FIELD_COUNT: u8 = 0;
+    const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
+    fn trace_child_type_info() -> Vec<GcTypeInfo> {
+        Vec::new()
+    }
+
+    fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
+        HashSet::default()
+    }
+}
+
+unsafe impl Trace for isize {
+    fn trace(_: &Self) {}
+    const TRACE_FIELD_COUNT: u8 = 0;
+    const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
+    fn trace_child_type_info() -> Vec<GcTypeInfo> {
+        Vec::new()
+    }
+
+    fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
+        HashSet::default()
+    }
+}
+
+unsafe impl<T: Trace> Trace for &T {
+    fn trace(_: &Self) {}
+    const TRACE_FIELD_COUNT: u8 = 0;
+    const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<&T>();
+    fn trace_child_type_info() -> Vec<GcTypeInfo> {
+        Vec::new()
+    }
+
+    fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
+        HashSet::default()
+    }
+}
+
+unsafe impl<T: Trace> Trace for Box<T> {
+    fn trace(_: &Self) {}
+    const TRACE_FIELD_COUNT: u8 = 0;
+    const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<&T>();
+    fn trace_child_type_info() -> Vec<GcTypeInfo> {
+        Vec::new()
+    }
+
+    fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
+        HashSet::default()
     }
 }
 
@@ -173,7 +252,7 @@ struct List<'r, T> {
 
 // These three impls will be derived with a procedural macro
 
-impl<'r, T: 'r + Immutable + NoGc> Trace for List<'r, T> {
+unsafe impl<'r, T: 'r> Trace for List<'r, T> {
     fn trace(_: &List<'r, T>) {}
     const TRACE_FIELD_COUNT: u8 = 0;
     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
@@ -186,9 +265,7 @@ impl<'r, T: 'r + Immutable + NoGc> Trace for List<'r, T> {
     }
 }
 
-unsafe impl<'r, T> NoGc for List<'r, T> {}
-
-// unsafe impl<'o, 'n, T> Mark<'o, 'n, List<'o, T>, List<'n, T>>
+// unsafe impl<'o, 'n, T: NoGc + Immutable> Mark<'o, 'n, List<'o, T>, List<'n, T>>
 //     for Arena<List<'n, T>>
 // {
 //     fn mark(&'n self, o: Gc<'o, List<'o, T>>) -> Gc<'n, List<'n, T>> {
@@ -196,7 +273,7 @@ unsafe impl<'r, T> NoGc for List<'r, T> {}
 //     }
 // }
 
-default impl<'o, 'n, O, N> Mark<'o, 'n, List<'o, O>, List<'n, N>> for Arena<List<'n, N>> {
+unsafe impl<'o, 'n, O: Trace, N> Mark<'o, 'n, List<'o, O>, List<'n, N>> for Arena<List<'n, N>> {
     fn mark(&'n self, o: Gc<'o, List<'o, O>>) -> Gc<'n, List<'n, N>> {
         unsafe { std::mem::transmute(o) }
     }
@@ -224,7 +301,7 @@ struct Foo<'l> {
     _bar: Gc<'l, usize>,
 }
 
-impl<'r> Trace for Foo<'r> {
+unsafe impl<'r> Trace for Foo<'r> {
     fn trace(_: &Foo<'r>) {}
     const TRACE_FIELD_COUNT: u8 = 0;
     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
@@ -236,7 +313,7 @@ impl<'r> Trace for Foo<'r> {
     }
 }
 
-impl<'o, 'n> Mark<'o, 'n, Foo<'o>, Foo<'n>> for Arena<Foo<'n>> {
+unsafe impl<'o, 'n> Mark<'o, 'n, Foo<'o>, Foo<'n>> for Arena<Foo<'n>> {
     fn mark(&'n self, o: Gc<'o, Foo<'o>>) -> Gc<'n, Foo<'n>> {
         unsafe { std::mem::transmute(o) }
     }
@@ -299,7 +376,7 @@ fn hidden_lifetime_test() {
     }
 
     // This may not be trivail to implement as a proc macro
-    impl<'a, 'b: 'a> Trace for Foo2<'a, 'b> {
+    unsafe impl<'a, 'b: 'a> Trace for Foo2<'a, 'b> {
         fn trace(_: &Foo2<'a, 'b>) {}
         const TRACE_FIELD_COUNT: u8 = 0;
         const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
@@ -311,9 +388,22 @@ fn hidden_lifetime_test() {
         }
     }
 
-    impl<'o, 'n, 'b> Mark<'o, 'n, Foo2<'o, 'b>, Foo2<'n, 'b>> for Arena<Foo2<'n, 'b>> {
+    unsafe impl<'o, 'n, 'b> Mark<'o, 'n, Foo2<'o, 'b>, Foo2<'n, 'b>> for Arena<Foo2<'n, 'b>> {
         fn mark(&'n self, o: Gc<'o, Foo2<'o, 'b>>) -> Gc<'n, Foo2<'n, 'b>> {
             unsafe { std::mem::transmute(o) }
+        }
+    }
+
+    unsafe impl<'b> Trace for Bar<'b> {
+        fn trace(_: &Self) {}
+        const TRACE_FIELD_COUNT: u8 = 0;
+        const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
+        fn trace_child_type_info() -> Vec<GcTypeInfo> {
+            Vec::new()
+        }
+
+        fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
+            HashSet::default()
         }
     }
 
@@ -337,5 +427,5 @@ fn immutable_test() {
     //~ trait bound `std::cell::UnsafeCell<usize>: Immutable` is not satisfied
     // let mutexes: Arena<Mutex<usize>> = Arena::new();
 
-    let _mutexes: Arena<Box<Mutex<usize>>> = Arena::new();
+    let _mutexes: Arena<NGc<Box<Mutex<usize>>>> = Arena::new();
 }
