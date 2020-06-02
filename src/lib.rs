@@ -6,6 +6,7 @@
 #![feature(const_transmute)]
 #![feature(specialization)]
 #![feature(negative_impls)]
+#![feature(const_raw_ptr_to_usize_cast)]
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -43,10 +44,10 @@ pub struct GcTypeInfo {
 }
 
 impl GcTypeInfo {
-    pub fn new<T: Trace>() -> Self {
+    pub const fn new<T: Trace>() -> Self {
         Self {
-            trace_ptr: T::trace as *const fn(&T) as usize,
-            drop_ptr: drop_in_place as *const fn(*mut T) as usize,
+            trace_ptr: unsafe { T::trace as *const fn(&T) as usize },
+            drop_ptr: unsafe { drop_in_place::<T> as *const fn(*mut T) as usize },
             needs_drop: needs_drop::<T>(),
             byte_size: size_of::<T>() as u16,
             alignment: align_of::<T>() as u16,
@@ -117,6 +118,15 @@ impl<T> !Immutable for &mut T {}
 impl<T> !Immutable for UnsafeCell<T> {}
 unsafe impl<T> Immutable for Box<T> {}
 
+pub unsafe trait HasGc_ {}
+unsafe impl<'r, T> HasGc_ for Gc<'r, T> {}
+
+
+pub unsafe auto trait HasGc {}
+impl<'r, T: NoGc> !HasGc for T {}
+
+
+
 unsafe impl<T: NoGc + Immutable> Trace for T {
     fn trace(_: &T) {}
     const TRACE_FIELD_COUNT: u8 = 0;
@@ -149,59 +159,71 @@ unsafe impl<'r, T: Trace> Trace for Gc<'r, T> {
     }
 }
 
+unsafe impl<'r, T: Immutable + Trace> Trace for Option<T> {
+    fn trace(t: &Self) {
+        Trace::trace(t.deref())
+    }
+    const TRACE_FIELD_COUNT: u8 = 0;
+    const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<T>();
+    fn trace_child_type_info() -> Vec<GcTypeInfo> {
+        T::trace_child_type_info()
+    }
+    fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
+        T::trace_transitive_type_info()
+    }
+}
+
+// #[derive(Trace, Mark)
+struct List<'r, T> {
+    _t: T,
+    _next: Option<Gc<'r, List<'r, T>>>,
+}
+
+// These three impls will be derived with a procedural macro
+
+unsafe impl<'r, T: 'r> Trace for List<'r, T> {
+    fn trace(_: &List<'r, T>) {}
+    const TRACE_FIELD_COUNT: u8 = 0;
+    const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
+    fn trace_child_type_info() -> Vec<GcTypeInfo> {
+        vec![GcTypeInfo::new::<Option<Gc<'r, List<'r, T>>>>()]
+    }
+
+    fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
+        HashSet::default()
+    }
+}
+
+unsafe impl<'o, 'n, T: NoGc + Immutable> Mark<'o, 'n, List<'o, T>, List<'n, T>>
+    for Arena<List<'n, T>>
+{
+    fn mark(&'n self, o: Gc<'o, List<'o, T>>) -> Gc<'n, List<'n, T>> {
+        unsafe { std::mem::transmute(o) }
+    }
+}
+
+unsafe impl<'o, 'n, O: Trace, N> Mark<'o, 'n, List<'o, O>, List<'n, N>> for Arena<List<'n, N>> {
+    default fn mark(&'n self, o: Gc<'o, List<'o, O>>) -> Gc<'n, List<'n, N>> {
+        unsafe { std::mem::transmute(o) }
+    }
+}
+
 #[test]
-fn list_test() {
-    // #[derive(Trace, Mark)
-    struct List<'r, T> {
-        _t: T,
-        _next: Option<Gc<'r, List<'r, T>>>,
-    }
+fn _churn_list() {
+    let usizes: Arena<usize> = Arena::new();
+    let gc_one = usizes.gc_alloc(1);
 
-    // These three impls will be derived with a procedural macro
-
-    unsafe impl<'r, T> Trace for List<'r, T> {
-        fn trace(_: &List<'r, T>) {}
-        const TRACE_FIELD_COUNT: u8 = 0;
-        const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-        fn trace_child_type_info() -> Vec<GcTypeInfo> {
-            Vec::new()
-        }
-        fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
-            HashSet::default()
-        }
-    }
-
-    unsafe impl<'o, 'n, T: NoGc + Immutable> Mark<'o, 'n, List<'o, T>, List<'n, T>>
-        for Arena<List<'n, T>>
-    {
-        fn mark(&'n self, o: Gc<'o, List<'o, T>>) -> Gc<'n, List<'n, T>> {
-            unsafe { std::mem::transmute(o) }
-        }
-    }
-
-    unsafe impl<'o, 'n, O: Trace, N> Mark<'o, 'n, List<'o, O>, List<'n, N>> for Arena<List<'n, N>> {
-        default fn mark(&'n self, o: Gc<'o, List<'o, O>>) -> Gc<'n, List<'n, N>> {
-            unsafe { std::mem::transmute(o) }
-        }
-    }
-
-    #[test]
-    fn _churn_list() {
-        let usizes: Arena<usize> = Arena::new();
-        let gc_one = usizes.gc_alloc(1);
-
-        let lists: Arena<List<Gc<usize>>> = Arena::new();
-        let one_two = lists.gc_alloc(List {
-            _t: gc_one,
-            _next: Some(lists.gc_alloc(List {
-                _t: usizes.gc_alloc(2),
-                _next: None,
-            })),
-        });
-        let one_two = lists.mark(one_two);
-        drop(usizes);
-        let _ = one_two._t;
-    }
+    let lists: Arena<List<Gc<usize>>> = Arena::new();
+    let one_two = lists.gc_alloc(List {
+        _t: gc_one,
+        _next: Some(lists.gc_alloc(List {
+            _t: usizes.gc_alloc(2),
+            _next: None,
+        })),
+    });
+    let one_two = lists.mark(one_two);
+    drop(usizes);
+    let _ = one_two._t;
 }
 
 struct Foo<'l> {
@@ -211,7 +233,7 @@ struct Foo<'l> {
 unsafe impl<'r> Trace for Foo<'r> {
     fn trace(_: &Foo<'r>) {}
     const TRACE_FIELD_COUNT: u8 = 0;
-    const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<T>();
+    const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
     fn trace_child_type_info() -> Vec<GcTypeInfo> {
         Vec::new()
     }
@@ -282,10 +304,11 @@ fn hidden_lifetime_test() {
         _bar: Gc<'a, Bar<'b>>,
     }
 
-    unsafe impl<'a, 'b> Trace for Foo2<'a, 'b> {
+    // This may not be trivail to implement as a proc macro
+    unsafe impl<'a, 'b: 'a> Trace for Foo2<'a, 'b> {
         fn trace(_: &Foo2<'a, 'b>) {}
         const TRACE_FIELD_COUNT: u8 = 0;
-        const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<T>();
+        const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
         fn trace_child_type_info() -> Vec<GcTypeInfo> {
             Vec::new()
         }
