@@ -7,13 +7,14 @@
 #![feature(specialization)]
 #![feature(negative_impls)]
 #![feature(const_raw_ptr_to_usize_cast)]
+#![feature(const_mut_refs)]
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::iter::FromIterator;
 use std::mem::*;
 use std::ops::Deref;
-use std::ptr::drop_in_place;
+use std::ptr;
 use std::sync::Mutex;
 use std::thread_local;
 
@@ -31,7 +32,7 @@ pub unsafe trait Trace {
     fn trace(t: &Self);
     const TRACE_FIELD_COUNT: u8;
     const TRACE_TYPE_INFO: GcTypeInfo;
-    const TRACE_CHILD_TYPE_INFO: Vec<GcTypeInfo>;
+    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8];
     fn trace_transitive_type_info() -> HashSet<GcTypeInfo>;
 }
 
@@ -48,7 +49,7 @@ impl GcTypeInfo {
     pub const fn new<T: Trace>() -> Self {
         Self {
             trace_ptr: unsafe { T::trace as *const fn(&T) as usize },
-            drop_ptr: unsafe { drop_in_place::<T> as *const fn(*mut T) as usize },
+            drop_ptr: unsafe { ptr::drop_in_place::<T> as *const fn(*mut T) as usize },
             needs_drop: needs_drop::<T>(),
             byte_size: size_of::<T>() as u16,
             alignment: align_of::<T>() as u16,
@@ -96,11 +97,11 @@ impl<T: Trace> Arena<T> {
     pub fn new() -> Self {
         // GC_BUS.with(|type_map| T::TRACE_TYPE_INFOtype_map.entry());
         Self {
-            high_ptr: todo!(),
+            high_ptr: ptr::null(),
             capacity: 1000,
         }
     }
-    pub fn gc_alloc<'r>(&'r self, t: T) -> Gc<'r, T> {
+    pub fn gc_alloc<'r>(&'r self, _t: T) -> Gc<'r, T> {
         unimplemented!()
     }
 
@@ -138,7 +139,7 @@ unsafe impl<T: NoGc + Immutable> Trace for NGc<T> {
     fn trace(_: &Self) {}
     const TRACE_FIELD_COUNT: u8 = 0;
     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-    const TRACE_CHILD_TYPE_INFO: Vec<GcTypeInfo> = Vec::new();
+    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
     fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
         HashSet::default()
     }
@@ -156,7 +157,16 @@ unsafe impl<'r, T: Trace> Trace for Gc<'r, T> {
     }
     const TRACE_FIELD_COUNT: u8 = 0;
     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<T>();
-    const TRACE_CHILD_TYPE_INFO: Vec<GcTypeInfo> = vec![GcTypeInfo::new::<T>()];
+    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [
+        Some(GcTypeInfo::new::<T>()),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ];
     fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
         T::trace_transitive_type_info()
     }
@@ -168,9 +178,8 @@ unsafe impl<'r, T: Trace> Trace for Option<T> {
     }
     const TRACE_FIELD_COUNT: u8 = 0;
     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<T>();
-    fn trace_child_type_info() -> Vec<GcTypeInfo> {
-        T::trace_child_type_info()
-    }
+    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
+
     fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
         T::trace_transitive_type_info()
     }
@@ -180,9 +189,8 @@ unsafe impl Trace for usize {
     fn trace(_: &Self) {}
     const TRACE_FIELD_COUNT: u8 = 0;
     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-    fn trace_child_type_info() -> Vec<GcTypeInfo> {
-        Vec::new()
-    }
+
+    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
 
     fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
         HashSet::default()
@@ -193,7 +201,7 @@ unsafe impl Trace for String {
     fn trace(_: &Self) {}
     const TRACE_FIELD_COUNT: u8 = 0;
     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-    const TRACE_CHILD_TYPE_INFO: Vec<GcTypeInfo> = Vec::new();
+    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
 
     fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
         HashSet::default()
@@ -204,7 +212,7 @@ unsafe impl Trace for isize {
     fn trace(_: &Self) {}
     const TRACE_FIELD_COUNT: u8 = 0;
     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-    const TRACE_CHILD_TYPE_INFO: Vec<GcTypeInfo> = Vec::new();
+    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
 
     fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
         HashSet::default()
@@ -215,9 +223,7 @@ unsafe impl<T: Trace> Trace for &T {
     fn trace(_: &Self) {}
     const TRACE_FIELD_COUNT: u8 = 0;
     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<&T>();
-    fn trace_child_type_info() -> Vec<GcTypeInfo> {
-        Vec::new()
-    }
+    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
 
     fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
         HashSet::default()
@@ -228,7 +234,7 @@ unsafe impl<T: Trace> Trace for Box<T> {
     fn trace(_: &Self) {}
     const TRACE_FIELD_COUNT: u8 = 0;
     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<&T>();
-    const TRACE_CHILD_TYPE_INFO: Vec<GcTypeInfo> = Vec::new();
+    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
 
     fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
         HashSet::default()
@@ -247,12 +253,20 @@ unsafe impl<'r, T: 'r + Trace> Trace for List<'r, T> {
     fn trace(_: &List<'r, T>) {}
     const TRACE_FIELD_COUNT: u8 = 0;
     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-    const TRACE_CHILD_TYPE_INFO: Vec<GcTypeInfo> =
-        vec![GcTypeInfo::new::<Option<Gc<'r, List<'r, T>>>>()];
+    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [
+        Some(GcTypeInfo::new::<Option<Gc<'r, List<'r, T>>>>()),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ];
 
     fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
-        let mut tti = HashSet::from_iter(Self::TRACE_CHILD_TYPE_INFO.into_iter());
-        tti.extend(T::trace_transitive_type_info().into_iter());
+        let mut tti = HashSet::from_iter(Self::TRACE_CHILD_TYPE_INFO.iter().filter_map(|o| *o));
+        tti.extend(T::trace_transitive_type_info().iter());
         tti
     }
 }
@@ -297,7 +311,7 @@ unsafe impl<'r> Trace for Foo<'r> {
     fn trace(_: &Foo<'r>) {}
     const TRACE_FIELD_COUNT: u8 = 0;
     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-    const TRACE_CHILD_TYPE_INFO: Vec<GcTypeInfo> = Vec::new();
+    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
 
     fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
         HashSet::default()
@@ -371,7 +385,7 @@ fn hidden_lifetime_test() {
         fn trace(_: &Foo2<'a, 'b>) {}
         const TRACE_FIELD_COUNT: u8 = 0;
         const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-        const TRACE_CHILD_TYPE_INFO: Vec<GcTypeInfo> = Vec::new();
+        const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
         fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
             HashSet::default()
         }
@@ -387,7 +401,7 @@ fn hidden_lifetime_test() {
         fn trace(_: &Self) {}
         const TRACE_FIELD_COUNT: u8 = 0;
         const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-        const TRACE_CHILD_TYPE_INFO: Vec<GcTypeInfo> = Vec::new();
+        const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
 
         fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
             HashSet::default()
