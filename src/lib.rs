@@ -111,10 +111,10 @@ impl<T: Trace> Arena<T> {
 }
 
 // Auto traits
-pub unsafe auto trait NoGc {}
-impl<'r, T> !NoGc for Gc<'r, T> {}
+pub unsafe auto trait HasNoGc {}
+impl<'r, T> !HasNoGc for Gc<'r, T> {}
 
-struct NGc<T: NoGc + Immutable>(T);
+struct NoGc<T: HasNoGc + Immutable>(T);
 
 /// Shallow immutability
 pub unsafe auto trait Immutable {}
@@ -135,7 +135,7 @@ unsafe impl<T> Immutable for Box<T> {}
 //     }
 // }
 
-unsafe impl<T: NoGc + Immutable> Trace for NGc<T> {
+unsafe impl<T: HasNoGc + Immutable> Trace for NoGc<T> {
     fn trace(_: &Self) {}
     const TRACE_FIELD_COUNT: u8 = 0;
     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
@@ -145,7 +145,7 @@ unsafe impl<T: NoGc + Immutable> Trace for NGc<T> {
     }
 }
 
-unsafe impl<'o, 'n, T: NoGc + Immutable> Mark<'o, 'n, T, T> for Arena<T> {
+unsafe impl<'o, 'n, T: HasNoGc + Immutable> Mark<'o, 'n, T, T> for Arena<T> {
     fn mark(&'n self, o: Gc<'o, T>) -> Gc<'n, T> {
         unsafe { std::mem::transmute(o) }
     }
@@ -428,5 +428,5 @@ fn immutable_test() {
     //~ trait bound `std::cell::UnsafeCell<usize>: Immutable` is not satisfied
     // let mutexes: Arena<Mutex<usize>> = Arena::new();
 
-    let _mutexes: Arena<NGc<Box<Mutex<usize>>>> = Arena::new();
+    let _mutexes: Arena<NoGc<Box<Mutex<usize>>>> = Arena::new();
 }
