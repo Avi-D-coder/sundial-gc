@@ -114,8 +114,23 @@ impl<T: Trace> Arena<T> {
 // Auto traits
 pub unsafe auto trait HasNoGc {}
 impl<'r, T> !HasNoGc for Gc<'r, T> {}
+unsafe impl<'r, T: HasNoGc> HasNoGc for Box<T> {}
 
 struct NoGc<T: HasNoGc + Immutable>(T);
+
+impl<'r, T: Immutable + HasNoGc> Deref for NoGc<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+
+impl<'r, T: Immutable + HasNoGc> From<T> for NoGc<T> {
+    fn from(t: T) -> Self {
+        NoGc(t)
+    }
+}
 
 /// Shallow immutability
 pub unsafe auto trait Immutable {}
@@ -124,12 +139,20 @@ impl<T> !Immutable for UnsafeCell<T> {}
 unsafe impl<T> Immutable for Box<T> {}
 
 // Needs negative impls
-default unsafe impl<T: Immutable> Trace for T {
-    fn trace(_: &T) {}
-    const TRACE_FIELD_COUNT: u8 = 0;
-    const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<T>();
-     const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
-    fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
+// TODO Blanket impl seems to be safe, since Mark's blanket requires HasNoGc
+// If you only implement Mark and not Trace CHILD_TYPE_INFO will all be const None
+unsafe impl<T: Immutable> Trace for T {
+    default fn trace(_: &T) {}
+    default const TRACE_FIELD_COUNT: u8 = 0;
+    default const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo {
+        alignment: 0,
+        byte_size: 0,
+        drop_ptr: 0,
+        trace_ptr: 0,
+        needs_drop: true,
+    };
+    default const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
+    default fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
         HashSet::default()
     }
 }
@@ -172,60 +195,28 @@ unsafe impl<'r, T: Immutable + Trace> Trace for Gc<'r, T> {
 }
 
 unsafe impl<'r, T: Immutable + Trace> Trace for Option<T> {
-    fn trace(t: &Self) {
+    default fn trace(t: &Self) {
         Trace::trace(t.deref())
     }
-    const TRACE_FIELD_COUNT: u8 = 0;
-    const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<T>();
-    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
+    default const TRACE_FIELD_COUNT: u8 = 0;
+    default const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<T>();
+    default const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
 
-    fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
+    default fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
         T::trace_transitive_type_info()
     }
 }
 
-unsafe impl Trace for usize {
-    fn trace(_: &Self) {}
-    const TRACE_FIELD_COUNT: u8 = 0;
-    const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-
-    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
-
-    fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
-        HashSet::default()
+unsafe impl<'r, T: Immutable + Trace + HasNoGc> Trace for Option<T> {
+    fn trace(t: &Self) {
+        Trace::trace(t.deref())
     }
-}
+     const TRACE_FIELD_COUNT: u8 = 0;
+     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<T>();
+     const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
 
-unsafe impl Trace for String {
-    fn trace(_: &Self) {}
-    const TRACE_FIELD_COUNT: u8 = 0;
-    const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
-
-    fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
-        HashSet::default()
-    }
-}
-
-unsafe impl Trace for isize {
-    fn trace(_: &Self) {}
-    const TRACE_FIELD_COUNT: u8 = 0;
-    const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
-
-    fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
-        HashSet::default()
-    }
-}
-
-unsafe impl<T: Immutable + Trace> Trace for &T {
-    fn trace(_: &Self) {}
-    const TRACE_FIELD_COUNT: u8 = 0;
-    const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<&T>();
-    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
-
-    fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
-        HashSet::default()
+     fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
+        T::trace_transitive_type_info()
     }
 }
 
@@ -236,7 +227,7 @@ unsafe impl<T: Immutable + Trace> Trace for Box<T> {
     const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
 
     fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
-        HashSet::default()
+        T::trace_transitive_type_info()
     }
 }
 
@@ -247,7 +238,6 @@ struct List<'r, T> {
 }
 
 // These three impls will be derived with a procedural macro
-
 unsafe impl<'r, T: 'r + Trace + Immutable> Trace for List<'r, T> {
     fn trace(_: &List<'r, T>) {}
     const TRACE_FIELD_COUNT: u8 = 0;
@@ -423,9 +413,9 @@ fn hidden_lifetime_test() {
 
 #[test]
 fn immutable_test() {
-    use std::sync::Mutex;
+    // use std::sync::Mutex;
     //~ trait bound `std::cell::UnsafeCell<usize>: Immutable` is not satisfied
     // let mutexes: Arena<Mutex<usize>> = Arena::new();
 
-    let _mutexes: Arena<NoGc<Box<Mutex<usize>>>> = Arena::new();
+    let _mutexes: Arena<NoGc<Box<std::sync::Arc<usize>>>> = Arena::new();
 }
