@@ -50,7 +50,7 @@ impl Tti {
         }
     }
 
-    pub fn add_direct<T:Trace>(&mut self) {
+    pub fn add_direct<T: Trace>(&mut self) {
         self.type_info
             .extend(T::TRACE_CHILD_TYPE_INFO.iter().filter_map(|o| *o));
     }
@@ -80,6 +80,19 @@ impl GcTypeInfo {
             byte_size: size_of::<T>() as u16,
             alignment: align_of::<T>() as u16,
         }
+    }
+
+    pub(crate) const fn one_child<T: Trace>() -> [Option<GcTypeInfo>; 8] {
+        [
+            Some(GcTypeInfo::new::<T>()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ]
     }
 }
 
@@ -193,16 +206,7 @@ unsafe impl<'r, T: Immutable + Trace> Trace for Option<T> {
     }
     default const TRACE_FIELD_COUNT: u8 = 0;
     default const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-    default const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [
-        Some(GcTypeInfo::new::<T>()),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    ];
+    default const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = GcTypeInfo::one_child::<T>();
     default fn trace_transitive_type_info(tti: &mut Tti) {
         tti.add_direct::<Self>();
         tti.add_trans(T::trace_transitive_type_info);
@@ -216,7 +220,6 @@ unsafe impl<'r, T: Immutable + Trace + HasNoGc> Trace for Option<T> {
     const TRACE_FIELD_COUNT: u8 = 0;
     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
     const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
-
     fn trace_transitive_type_info(_: &mut Tti) {}
 }
 
@@ -224,17 +227,7 @@ unsafe impl<T: Immutable + Trace> Trace for Box<T> {
     fn trace(_: &Self) {}
     const TRACE_FIELD_COUNT: u8 = 0;
     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [
-        Some(GcTypeInfo::new::<T>()),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    ];
-
+    default const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = GcTypeInfo::one_child::<T>();
     fn trace_transitive_type_info(tti: &mut Tti) {
         tti.add_direct::<Self>();
         tti.add_trans(T::trace_transitive_type_info);
@@ -310,16 +303,8 @@ unsafe impl<'r> Trace for Foo<'r> {
     fn trace(_: &Foo<'r>) {}
     const TRACE_FIELD_COUNT: u8 = 0;
     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [
-        Some(GcTypeInfo::new::<Gc<'r, usize>>()),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    ];
+    default const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] =
+        GcTypeInfo::one_child::<Gc<'r, usize>>();
     fn trace_transitive_type_info(tti: &mut Tti) {
         tti.add_direct::<Self>();
         tti.add_trans(Gc::<'r, usize>::trace_transitive_type_info);
@@ -393,16 +378,8 @@ fn hidden_lifetime_test() {
         fn trace(_: &Foo2<'a, 'b>) {}
         const TRACE_FIELD_COUNT: u8 = 0;
         const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-        const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [
-            Some(GcTypeInfo::new::<Gc<'a, Bar<'b>>>()),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        ];
+        const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] =
+            GcTypeInfo::one_child::<Gc<'a, Bar<'b>>>();
         fn trace_transitive_type_info(tti: &mut Tti) {
             tti.add_direct::<Self>();
             tti.add_trans(Gc::<'a, Bar<'b>>::trace_transitive_type_info);
