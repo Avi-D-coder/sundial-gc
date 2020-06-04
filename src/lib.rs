@@ -52,7 +52,7 @@ struct List<'r, T> {
 
 // These three impls will be derived with a procedural macro
 unsafe impl<'r, T: 'r + Trace + Immutable> Trace for List<'r, T> {
-    fn trace(_: &List<'r, T>) {}
+    fn trace(_: usize) {}
     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
     const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [
         Some(GcTypeInfo::new::<T>()),
@@ -107,7 +107,7 @@ struct Foo<'r> {
 }
 
 unsafe impl<'r> Trace for Foo<'r> {
-    fn trace(_: &Foo<'r>) {}
+    fn trace(_: usize) {}
     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
     const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = GcTypeInfo::one_child::<Gc<'r, usize>>();
     fn trace_transitive_type_info(tti: &mut Tti) {
@@ -180,7 +180,7 @@ fn hidden_lifetime_test() {
 
     // This may not be trivail to implement as a proc macro
     unsafe impl<'a, 'b: 'a> Trace for Foo2<'a, 'b> {
-        fn trace(_: &Foo2<'a, 'b>) {}
+        fn trace(_: usize) {}
         const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
         const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] =
             GcTypeInfo::one_child::<Gc<'a, Bar<'b>>>();
