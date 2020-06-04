@@ -10,7 +10,6 @@
 #![feature(const_mut_refs)]
 #![feature(trivial_bounds)]
 
-
 use sundial_gc::arena::*;
 use sundial_gc::auto_traits::*;
 use sundial_gc::gc::*;
@@ -45,13 +44,7 @@ unsafe impl<'r, T: 'r + Trace + Immutable> Trace for List<'r, T> {
     }
 }
 
-unsafe impl<'o, 'n, T: Trace + NoGc> Mark<'o, 'n, List<'o, T>, List<'n, T>> for Arena<List<'n, T>> {
-    fn mark(&'n self, o: Gc<'o, List<'o, T>>) -> Gc<'n, List<'n, T>> {
-        unsafe { std::mem::transmute(o) }
-    }
-}
-
-unsafe impl<'o, 'n, O: Trace, N> Mark<'o, 'n, List<'o, O>, List<'n, N>> for Arena<List<'n, N>> {
+unsafe impl<'o, 'n, O: Trace, N> Mark<'o, 'n, List<'o, O>, List<'n, N>> for ArenaGc<List<'n, N>> {
     default fn mark(&'n self, o: Gc<'o, List<'o, O>>) -> Gc<'n, List<'n, N>> {
         unsafe { std::mem::transmute(o) }
     }
@@ -62,7 +55,7 @@ fn _churn_list() {
     let usizes: Arena<usize> = Arena::new();
     let gc_one = usizes.gc_alloc(1);
 
-    let lists: Arena<List<Gc<usize>>> = Arena::new();
+    let lists: ArenaGc<List<Gc<usize>>> = ArenaGc::new();
     let one_two = lists.gc_alloc(List {
         _t: gc_one,
         _next: Some(lists.gc_alloc(List {
@@ -89,7 +82,7 @@ unsafe impl<'r> Trace for Foo<'r> {
     }
 }
 
-unsafe impl<'o, 'n> Mark<'o, 'n, Foo<'o>, Foo<'n>> for Arena<Foo<'n>> {
+unsafe impl<'o, 'n> Mark<'o, 'n, Foo<'o>, Foo<'n>> for ArenaGc<Foo<'n>> {
     fn mark(&'n self, o: Gc<'o, Foo<'o>>) -> Gc<'n, Foo<'n>> {
         unsafe { std::mem::transmute(o) }
     }
@@ -100,10 +93,10 @@ fn churn() {
     let usizes: Arena<usize> = Arena::new();
     let gced_usize = usizes.gc_alloc(1);
 
-    let foos: Arena<Foo> = Arena::new();
+    let foos: ArenaGc<Foo> = ArenaGc::new();
     let foo = foos.gc_alloc(Foo { _bar: gced_usize });
 
-    let foos2: Arena<Foo> = Arena::new();
+    let foos2: ArenaGc<Foo> = ArenaGc::new();
     // mark extends foos lifetime to that of the new arena foos2
     // This does not copy foo into the new arena.
     // In this case it is simply transmuting a lifetime.
@@ -163,13 +156,13 @@ fn hidden_lifetime_test() {
         }
     }
 
-    unsafe impl<'o, 'n, 'b> Mark<'o, 'n, Foo2<'o, 'b>, Foo2<'n, 'b>> for Arena<Foo2<'n, 'b>> {
+    unsafe impl<'o, 'n, 'b> Mark<'o, 'n, Foo2<'o, 'b>, Foo2<'n, 'b>> for ArenaGc<Foo2<'n, 'b>> {
         fn mark(&'n self, o: Gc<'o, Foo2<'o, 'b>>) -> Gc<'n, Foo2<'n, 'b>> {
             unsafe { std::mem::transmute(o) }
         }
     }
 
-    let foos = Arena::new();
+    let foos = ArenaGc::new();
     let bars = Arena::new();
     let string = String::from("bar");
     let b = &*string;
@@ -177,7 +170,7 @@ fn hidden_lifetime_test() {
         _bar: bars.gc_alloc(Bar { _b: b }),
     });
 
-    let foos2 = Arena::new();
+    let foos2 = ArenaGc::new();
     let foo2 = foos2.mark(foo);
     // drop(string); //~ cannot move out of `string` because it is borrowed
     let _ = *foo2._bar._b;

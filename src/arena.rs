@@ -10,7 +10,7 @@ pub struct Arena<T> {
     capacity: u16,
 }
 
-impl<T: Trace> Arena<T> {
+impl<T: NoGc + Trace> Arena<T> {
     pub fn new() -> Self {
         // GC_BUS.with(|type_map| T::TRACE_TYPE_INFOtype_map.entry());
         Self {
@@ -33,5 +33,31 @@ impl<T: Trace> Arena<T> {
 unsafe impl<'o, 'n, T: NoGc + Immutable> Mark<'o, 'n, T, T> for Arena<T> {
     default fn mark(&'n self, o: Gc<'o, T>) -> Gc<'n, T> {
         unsafe { std::mem::transmute(o) }
+    }
+}
+
+pub struct ArenaGc<T> {
+    // roots: usize,
+    high_ptr: *const T,
+    capacity: u16,
+}
+
+impl<T: Trace> ArenaGc<T> {
+    pub fn new() -> Self {
+        // GC_BUS.with(|type_map| T::TRACE_TYPE_INFOtype_map.entry());
+        Self {
+            high_ptr: ptr::null(),
+            capacity: 1000,
+        }
+    }
+    pub fn gc_alloc<'r>(&'r self, _t: T) -> Gc<'r, T>
+    where
+        T: 'r,
+    {
+        unimplemented!()
+    }
+
+    pub fn advance(&mut self) -> Self {
+        unimplemented!()
     }
 }

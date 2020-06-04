@@ -39,7 +39,7 @@ impl GcTypeInfo {
         }
     }
 
-    pub(crate) const fn one_child<T: Trace>() -> [Option<GcTypeInfo>; 8] {
+    pub const fn one_child<T: Trace>() -> [Option<GcTypeInfo>; 8] {
         [
             Some(GcTypeInfo::new::<T>()),
             None,
