@@ -153,13 +153,7 @@ unsafe impl<T> Immutable for Box<T> {}
 unsafe impl<T: Immutable> Trace for T {
     default fn trace(_: &T) {}
     default const TRACE_FIELD_COUNT: u8 = 0;
-    default const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo {
-        alignment: 0,
-        byte_size: 0,
-        drop_ptr: 0,
-        trace_ptr: 0,
-        needs_drop: true,
-    };
+    default const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
     default const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
     default fn trace_transitive_type_info(_: &mut Tti) {}
 }
