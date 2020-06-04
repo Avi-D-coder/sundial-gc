@@ -360,17 +360,6 @@ fn hidden_lifetime_test() {
         }
     }
 
-    unsafe impl<'b> Trace for Bar<'b> {
-        fn trace(_: &Self) {}
-        const TRACE_FIELD_COUNT: u8 = 0;
-        const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-        const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
-
-        fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
-            HashSet::default()
-        }
-    }
-
     let foos = Arena::new();
     let bars = Arena::new();
     let string = String::from("bar");
