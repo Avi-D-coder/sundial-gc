@@ -139,7 +139,10 @@ impl<T: Trace> Arena<T> {
             capacity: 1000,
         }
     }
-    pub fn gc_alloc<'r>(&'r self, _t: T) -> Gc<'r, T> {
+    pub fn gc_alloc<'r>(&'r self, _t: T) -> Gc<'r, T>
+    where
+        T: 'r,
+    {
         unimplemented!()
     }
 
@@ -302,8 +305,7 @@ struct Foo<'r> {
 unsafe impl<'r> Trace for Foo<'r> {
     fn trace(_: &Foo<'r>) {}
     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] =
-        GcTypeInfo::one_child::<Gc<'r, usize>>();
+    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = GcTypeInfo::one_child::<Gc<'r, usize>>();
     fn trace_transitive_type_info(tti: &mut Tti) {
         tti.add_direct::<Self>();
         tti.add_trans(Gc::<'r, usize>::trace_transitive_type_info);
