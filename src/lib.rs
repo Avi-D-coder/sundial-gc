@@ -116,22 +116,6 @@ pub unsafe auto trait HasNoGc {}
 impl<'r, T> !HasNoGc for Gc<'r, T> {}
 unsafe impl<'r, T: HasNoGc> HasNoGc for Box<T> {}
 
-struct NoGc<T: HasNoGc + Immutable>(T);
-
-impl<'r, T: Immutable + HasNoGc> Deref for NoGc<T> {
-    type Target = T;
-    fn deref(&self) -> &T {
-        &self.0
-    }
-}
-
-
-impl<'r, T: Immutable + HasNoGc> From<T> for NoGc<T> {
-    fn from(t: T) -> Self {
-        NoGc(t)
-    }
-}
-
 /// Shallow immutability
 pub unsafe auto trait Immutable {}
 impl<T> !Immutable for &mut T {}
@@ -153,16 +137,6 @@ unsafe impl<T: Immutable> Trace for T {
     };
     default const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
     default fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
-        HashSet::default()
-    }
-}
-
-unsafe impl<T: HasNoGc + Immutable> Trace for NoGc<T> {
-    fn trace(_: &Self) {}
-    const TRACE_FIELD_COUNT: u8 = 0;
-    const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
-    fn trace_transitive_type_info() -> HashSet<GcTypeInfo> {
         HashSet::default()
     }
 }
@@ -417,5 +391,5 @@ fn immutable_test() {
     //~ trait bound `std::cell::UnsafeCell<usize>: Immutable` is not satisfied
     // let mutexes: Arena<Mutex<usize>> = Arena::new();
 
-    let _mutexes: Arena<NoGc<Box<std::sync::Arc<usize>>>> = Arena::new();
+    let _mutexes: Arena<Box<std::sync::Arc<usize>>> = Arena::new();
 }
