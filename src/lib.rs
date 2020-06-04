@@ -228,7 +228,7 @@ unsafe impl<T: Immutable + Trace> Trace for Box<T> {
 unsafe impl<T: Immutable + Trace + HasNoGc> Trace for Box<T> {
     fn trace(_: &Self) {}
     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-    default const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = GcTypeInfo::one_child::<T>();
+    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = GcTypeInfo::one_child::<T>();
     fn trace_transitive_type_info(tti: &mut Tti) {
         tti.add_direct::<Self>();
         tti.add_trans(T::trace_transitive_type_info);
@@ -302,7 +302,7 @@ struct Foo<'r> {
 unsafe impl<'r> Trace for Foo<'r> {
     fn trace(_: &Foo<'r>) {}
     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-    default const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] =
+    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] =
         GcTypeInfo::one_child::<Gc<'r, usize>>();
     fn trace_transitive_type_info(tti: &mut Tti) {
         tti.add_direct::<Self>();
