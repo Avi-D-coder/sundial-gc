@@ -10,95 +10,21 @@
 #![feature(const_mut_refs)]
 #![feature(trivial_bounds)]
 
+mod arena;
+mod auto_traits;
+mod gc;
 mod mark;
+mod trace;
 
-use std::cell::UnsafeCell;
+use arena::*;
+use auto_traits::*;
+use gc::*;
+use mark::*;
+use trace::*;
+
 use std::collections::HashMap;
-use std::collections::HashSet;
-use std::mem::*;
-use std::ops::Deref;
-use std::ptr;
 use std::sync::Mutex;
 use std::thread_local;
-
-pub unsafe trait Trace {
-    fn trace(t: &Self);
-    const TRACE_TYPE_INFO: GcTypeInfo;
-    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8];
-    fn trace_transitive_type_info(tti: &mut Tti);
-}
-
-pub struct Tti {
-    /// Holds fn ptr of trace_transitive_type_info calls
-    parrents: HashSet<usize>,
-    type_info: HashSet<GcTypeInfo>,
-}
-
-impl Tti {
-    pub fn new() -> Self {
-        Self {
-            parrents: HashSet::new(),
-            type_info: HashSet::new(),
-        }
-    }
-
-    pub fn add_direct<T: Trace>(&mut self) {
-        self.type_info
-            .extend(T::TRACE_CHILD_TYPE_INFO.iter().filter_map(|o| *o));
-    }
-
-    pub fn add_trans(&mut self, tti: fn(&mut Tti)) {
-        if self.parrents.insert(tti as *const fn(&mut Tti) as usize) {
-            tti(self)
-        }
-    }
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct GcTypeInfo {
-    trace_ptr: usize,
-    drop_ptr: usize,
-    needs_drop: bool,
-    byte_size: u16,
-    alignment: u16,
-}
-
-impl GcTypeInfo {
-    pub const fn new<T: Trace>() -> Self {
-        Self {
-            trace_ptr: unsafe { T::trace as *const fn(&T) as usize },
-            drop_ptr: unsafe { ptr::drop_in_place::<T> as *const fn(*mut T) as usize },
-            needs_drop: needs_drop::<T>(),
-            byte_size: size_of::<T>() as u16,
-            alignment: align_of::<T>() as u16,
-        }
-    }
-
-    pub(crate) const fn one_child<T: Trace>() -> [Option<GcTypeInfo>; 8] {
-        [
-            Some(GcTypeInfo::new::<T>()),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        ]
-    }
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Gc<'r, T> {
-    ptr: &'r T,
-}
-
-impl<'r, T: Trace> Deref for Gc<'r, T> {
-    type Target = T;
-    fn deref(&self) -> &T {
-        self.ptr
-    }
-}
 
 thread_local! {
     /// Map from type to GC communication bus.
@@ -116,119 +42,6 @@ struct BusMsg {
     /// Only 8 GCed fields per struct are supported
     /// TODO do enums with GCed fields count as one (conservative), or N fields.
     grey_feilds: u16,
-}
-
-pub struct Arena<T> {
-    // roots: usize,
-    high_ptr: *const T,
-    capacity: u16,
-}
-
-impl<T: Trace> Arena<T> {
-    pub fn new() -> Self {
-        // GC_BUS.with(|type_map| T::TRACE_TYPE_INFOtype_map.entry());
-        Self {
-            high_ptr: ptr::null(),
-            capacity: 1000,
-        }
-    }
-    pub fn gc_alloc<'r>(&'r self, _t: T) -> Gc<'r, T>
-    where
-        T: 'r,
-    {
-        unimplemented!()
-    }
-
-    pub fn advance(&mut self) -> Self {
-        unimplemented!()
-    }
-}
-
-// Auto traits
-pub unsafe auto trait HasNoGc {}
-impl<'r, T> !HasNoGc for Gc<'r, T> {}
-unsafe impl<'r, T: HasNoGc> HasNoGc for Box<T> {}
-
-/// Shallow immutability
-pub unsafe auto trait Immutable {}
-impl<T> !Immutable for &mut T {}
-impl<T> !Immutable for UnsafeCell<T> {}
-unsafe impl<T> Immutable for Box<T> {}
-
-// Needs negative impls
-// TODO Blanket impl seems to be safe, since Mark's blanket requires HasNoGc
-// If you only implement Mark and not Trace CHILD_TYPE_INFO will all be const None
-unsafe impl<T: Immutable> Trace for T {
-    default fn trace(_: &T) {}
-    default const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-    default const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
-    default fn trace_transitive_type_info(_: &mut Tti) {}
-}
-
-unsafe impl<'o, 'n, T: HasNoGc + Immutable> Mark<'o, 'n, T, T> for Arena<T> {
-    fn mark(&'n self, o: Gc<'o, T>) -> Gc<'n, T> {
-        unsafe { std::mem::transmute(o) }
-    }
-}
-
-unsafe impl<'r, T: 'r + Immutable + Trace> Trace for Gc<'r, T> {
-    fn trace(t: &Self) {
-        Trace::trace(t.deref())
-    }
-    // A Gc<Gc<T>> is equvlent to Gc<T>
-    const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<T>();
-    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [
-        Some(GcTypeInfo::new::<T>()),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    ];
-    fn trace_transitive_type_info(tti: &mut Tti) {
-        tti.add_direct::<Self>();
-        T::trace_transitive_type_info(tti)
-    }
-}
-
-unsafe impl<'r, T: Immutable + Trace> Trace for Option<T> {
-    default fn trace(t: &Self) {
-        Trace::trace(t.deref())
-    }
-    default const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-    default const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = GcTypeInfo::one_child::<T>();
-    default fn trace_transitive_type_info(tti: &mut Tti) {
-        tti.add_direct::<Self>();
-        tti.add_trans(T::trace_transitive_type_info);
-    }
-}
-
-unsafe impl<'r, T: Immutable + Trace + HasNoGc> Trace for Option<T> {
-    fn trace(t: &Self) {
-        Trace::trace(t.deref())
-    }
-    const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
-    fn trace_transitive_type_info(_: &mut Tti) {}
-}
-
-unsafe impl<T: Immutable + Trace> Trace for Box<T> {
-    default fn trace(_: &Self) {}
-    default const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-    default const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
-    default fn trace_transitive_type_info(_: &mut Tti) {}
-}
-
-unsafe impl<T: Immutable + Trace + HasNoGc> Trace for Box<T> {
-    fn trace(_: &Self) {}
-    const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = GcTypeInfo::one_child::<T>();
-    fn trace_transitive_type_info(tti: &mut Tti) {
-        tti.add_direct::<Self>();
-        tti.add_trans(T::trace_transitive_type_info);
-    }
 }
 
 // #[derive(Trace, Mark)
@@ -259,9 +72,7 @@ unsafe impl<'r, T: 'r + Trace + Immutable> Trace for List<'r, T> {
     }
 }
 
-unsafe impl<'o, 'n, T: Trace + HasNoGc> Mark<'o, 'n, List<'o, T>, List<'n, T>>
-    for Arena<List<'n, T>>
-{
+unsafe impl<'o, 'n, T: Trace + NoGc> Mark<'o, 'n, List<'o, T>, List<'n, T>> for Arena<List<'n, T>> {
     fn mark(&'n self, o: Gc<'o, List<'o, T>>) -> Gc<'n, List<'n, T>> {
         unsafe { std::mem::transmute(o) }
     }
