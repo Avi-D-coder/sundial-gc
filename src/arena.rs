@@ -31,7 +31,7 @@ impl<T: Trace> Arena<T> {
 }
 
 unsafe impl<'o, 'n, T: NoGc + Immutable> Mark<'o, 'n, T, T> for Arena<T> {
-    fn mark(&'n self, o: Gc<'o, T>) -> Gc<'n, T> {
+    default fn mark(&'n self, o: Gc<'o, T>) -> Gc<'n, T> {
         unsafe { std::mem::transmute(o) }
     }
 }
