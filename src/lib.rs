@@ -9,6 +9,9 @@
 #![feature(const_raw_ptr_to_usize_cast)]
 #![feature(const_mut_refs)]
 #![feature(trivial_bounds)]
+
+mod mark;
+
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -17,16 +20,6 @@ use std::ops::Deref;
 use std::ptr;
 use std::sync::Mutex;
 use std::thread_local;
-
-// GAT Mark
-// pub unsafe trait Mark<'o, 'n, O> {
-//     type Struct<'l>;
-//     fn mark(&'n self, o: Gc<'o, Self::Struct<'o>>) -> Gc<'n, Self::Struct<'n>>;
-// }
-
-pub unsafe trait Mark<'o, 'n, O, N> {
-    fn mark(&'n self, o: Gc<'o, O>) -> Gc<'n, N>;
-}
 
 pub unsafe trait Trace {
     fn trace(t: &Self);
