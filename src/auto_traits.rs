@@ -1,5 +1,5 @@
-use std::cell::UnsafeCell;
 use super::gc::*;
+use std::cell::UnsafeCell;
 
 pub unsafe auto trait NoGc {}
 impl<'r, T> !NoGc for Gc<'r, T> {}
