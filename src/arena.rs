@@ -3,8 +3,11 @@ use super::gc::*;
 use super::trace::*;
 use super::Mark;
 
-use std::ptr;
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::UnsafeCell;
 use std::collections::HashMap;
+use std::ops::Range;
+use std::ptr;
 use std::sync::Mutex;
 use std::thread_local;
 
@@ -12,14 +15,49 @@ pub struct Arena<T> {
     // roots: usize,
     high_ptr: *const T,
     capacity: u16,
+    grey_feilds: u8,
 }
 
 impl<T: NoGc + Trace> Arena<T> {
     pub fn new() -> Self {
-        // GC_BUS.with(|type_map| T::TRACE_TYPE_INFOtype_map.entry());
-        Self {
-            high_ptr: ptr::null(),
-            capacity: 1000,
+        let bus = GC_BUS.with(|tm| {
+            let tm = unsafe { &mut *tm.get() };
+            let key = (
+                T::TRACE_TYPE_INFO,
+                ptr::drop_in_place::<T> as *const fn(*mut T) as usize,
+            );
+            tm.entry(key).or_insert_with(|| {
+                Box::new(Mutex::new(BusMsg {
+                    from_gc: true,
+                    worker_read: false,
+                    high_ptr: unsafe {
+                        System.alloc_zeroed(Layout::new::<(Header, [T; 1000])>()) as usize
+                    },
+                    capacity: 1000,
+                    grey_feilds: 0b0000_0000,
+                    white_region: 0..1,
+                }))
+            })
+        });
+
+        let mut msg = bus.lock().unwrap();
+        if let BusMsg {
+            from_gc: true,
+            worker_read: false,
+            high_ptr,
+            capacity,
+            grey_feilds,
+            ..
+        } = *msg
+        {
+            msg.worker_read = true;
+            Self {
+                high_ptr: high_ptr as *const T,
+                capacity,
+                grey_feilds,
+            }
+        } else {
+            todo!()
         }
     }
     pub fn gc_alloc<'r>(&'r self, _t: T) -> Gc<'r, T>
@@ -44,16 +82,49 @@ pub struct ArenaGc<T> {
     // roots: usize,
     high_ptr: *const T,
     capacity: u16,
-    grey_types: u8,
+    grey_feilds: u8,
 }
 
 impl<T: Trace> ArenaGc<T> {
     pub fn new() -> Self {
-        // GC_BUS.with(|type_map| T::TRACE_TYPE_INFOtype_map.entry());
-        Self {
-            high_ptr: ptr::null(),
-            capacity: 1000,
-            grey_types: 0,
+        let bus = GC_BUS.with(|tm| {
+            let tm = unsafe { &mut *tm.get() };
+            let key = (
+                T::TRACE_TYPE_INFO,
+                ptr::drop_in_place::<T> as *const fn(*mut T) as usize,
+            );
+            tm.entry(key).or_insert_with(|| {
+                Box::new(Mutex::new(BusMsg {
+                    from_gc: true,
+                    worker_read: false,
+                    high_ptr: unsafe {
+                        System.alloc_zeroed(Layout::new::<(Header, [T; 1000])>()) as usize
+                    },
+                    capacity: 1000,
+                    grey_feilds: 0b0000_0000,
+                    white_region: 0..1,
+                }))
+            })
+        });
+
+        let mut msg = bus.lock().unwrap();
+        if let BusMsg {
+            from_gc: true,
+            worker_read: false,
+            high_ptr,
+            capacity,
+            grey_feilds,
+            ..
+        } = *msg
+        {
+            msg.worker_read = true;
+            Self {
+                high_ptr: high_ptr as *const T,
+                capacity,
+                grey_feilds,
+            }
+        } else {
+            todo!()
         }
     }
     pub fn gc_alloc<'r>(&'r self, _t: T) -> Gc<'r, T>
@@ -68,20 +139,30 @@ impl<T: Trace> ArenaGc<T> {
     }
 }
 
+struct Header {
+    // evacuated: HashMap<u16, *const T>,
+// roots: HashMap<u16, *const Box<UnsafeCell<*const T>>>,
+// finalizers: TODO
+}
+
 thread_local! {
     /// Map from type to GC communication bus.
-    static GC_BUS: HashMap<GcTypeInfo, Box<Mutex<BusMsg>>> = HashMap::new();
+    static GC_BUS: UnsafeCell<HashMap<(GcTypeInfo, usize), Box<Mutex<BusMsg>>>> = UnsafeCell::new(HashMap::new());
 }
 
-// TODO replace with atomic 64 byte encoding.
-struct BusMsg {
-    from_gc: bool,
-    high_ptr: usize,
-    capacity: u16,
+// TODO replace with atomic 64 byte header encoding.
+// Plus variable length condemned region messages.
+// TODO allow multiple messages and therefore Arenas of T.
+pub struct BusMsg {
+    pub from_gc: bool,
+    pub worker_read: bool,
+    pub high_ptr: usize,
+    pub capacity: u16,
     /// The 8 bits correspond to GCed fields.
-    /// Only 8 GCed fields per struct are supported
+    /// Only 8 GCed fields per struct are supported.
     /// TODO do enums with GCed fields count as one (conservative), or N fields.
-    /// TODO unpack bits from composite types tuples, inline structs, enums
-    grey_feilds: u8,
+    /// TODO unpack bits from composite types tuples, inline structs, enums.
+    pub grey_feilds: u8,
+    /// TODO support multiple field specific regions in future encoding
+    pub white_region: Range<usize>,
 }
-
