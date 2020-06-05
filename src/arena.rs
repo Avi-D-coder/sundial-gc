@@ -70,6 +70,7 @@ impl<T: NoGc + Trace> Arena<T> {
 }
 
 unsafe impl<'o, 'n, T: NoGc + Immutable> Mark<'o, 'n, T, T> for Arena<T> {
+    #[inline(always)]
     default fn mark(&'n self, o: Gc<'o, T>) -> Gc<'n, T> {
         unsafe { std::mem::transmute(o) }
     }
@@ -126,7 +127,7 @@ impl<T: Trace> ArenaGc<T> {
     where
         T: 'r,
     {
-        unimplemented!()
+        todo!()
     }
 
     pub fn advance(&mut self) -> Self {

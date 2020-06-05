@@ -16,10 +16,12 @@ use sundial_gc::gc::*;
 use sundial_gc::mark::*;
 use sundial_gc::trace::*;
 
+use std::ops::Range;
+
 // #[derive(Trace, Mark)
 struct List<'r, T> {
-    _t: T,
-    _next: Option<Gc<'r, List<'r, T>>>,
+    t: T,
+    next: Option<Gc<'r, List<'r, T>>>,
 }
 
 // These three impls will be derived with a procedural macro
@@ -50,6 +52,29 @@ unsafe impl<'o, 'n, O: Trace, N> Mark<'o, 'n, List<'o, O>, List<'n, N>> for Aren
     }
 }
 
+unsafe impl<'r, T: Condemned> Condemned for List<'r, T> {
+    default fn feilds(x: &List<'r, T>, grey_feilds: u8, condemned: Range<usize>) -> u8 {
+        let mut bloom = 0b0000000;
+        if 0b1000_0000 == grey_feilds & 0b1000_0000 {
+            bloom |= Condemned::feilds(&x.t, grey_feilds, condemned.clone())
+        };
+
+        // When a fields Gc is at the top level (not hidden in a generic),
+        // the proc macro will generate specific code.
+        // Here it's hidden in Option
+        if 0b0100_0000 == grey_feilds & 0b0100_0000 {
+            bloom |= Condemned::feilds(&x.next, grey_feilds, condemned)
+        };
+        bloom
+    }
+}
+
+unsafe impl<'r, T: NoGc> Condemned for List<'r, T> {
+    fn feilds(_: &List<'r, T>, _: u8, _: Range<usize>) -> u8 {
+        0b0000000
+    }
+}
+
 #[test]
 fn _churn_list() {
     let usizes: Arena<usize> = Arena::new();
@@ -57,15 +82,15 @@ fn _churn_list() {
 
     let lists: ArenaGc<List<Gc<usize>>> = ArenaGc::new();
     let one_two = lists.gc_alloc(List {
-        _t: gc_one,
-        _next: Some(lists.gc_alloc(List {
-            _t: usizes.gc_alloc(2),
-            _next: None,
+        t: gc_one,
+        next: Some(lists.gc_alloc(List {
+            t: usizes.gc_alloc(2),
+            next: None,
         })),
     });
     let one_two = lists.mark(one_two);
     drop(usizes);
-    let _ = one_two._t;
+    let _ = one_two.t;
 }
 
 struct Foo<'r> {
