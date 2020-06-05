@@ -19,25 +19,3 @@ pub mod trace;
 use gc::*;
 use mark::*;
 use trace::*;
-
-use std::collections::HashMap;
-use std::sync::Mutex;
-use std::thread_local;
-
-thread_local! {
-    /// Map from type to GC communication bus.
-    static GC_BUS: HashMap<GcTypeInfo, Box<Mutex<BusMsg>>> = HashMap::new();
-}
-
-// TODO replace with atomic 64 byte encoding.
-struct BusMsg {
-    from_gc: bool,
-    high_ptr: usize,
-    capacity: u16,
-    /// The first 8 bits correspond to GCed fields.
-    /// The last 8 bits are reserved.
-    ///
-    /// Only 8 GCed fields per struct are supported
-    /// TODO do enums with GCed fields count as one (conservative), or N fields.
-    grey_feilds: u16,
-}
