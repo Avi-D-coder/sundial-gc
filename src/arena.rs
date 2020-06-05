@@ -16,6 +16,7 @@ pub struct Arena<T> {
     high_ptr: *const T,
     capacity: u16,
     grey_feilds: u8,
+    white_region: Range<usize>,
 }
 
 impl<T: NoGc + Trace> Arena<T> {
@@ -41,20 +42,13 @@ impl<T: NoGc + Trace> Arena<T> {
         });
 
         let mut msg = bus.lock().unwrap();
-        if let BusMsg {
-            from_gc: true,
-            worker_read: false,
-            high_ptr,
-            capacity,
-            grey_feilds,
-            ..
-        } = *msg
-        {
+        if msg.from_gc && !msg.worker_read {
             msg.worker_read = true;
             Self {
-                high_ptr: high_ptr as *const T,
-                capacity,
-                grey_feilds,
+                high_ptr: msg.high_ptr as *const T,
+                capacity: msg.capacity,
+                grey_feilds: msg.grey_feilds,
+                white_region: msg.white_region.clone(),
             }
         } else {
             todo!()
@@ -83,6 +77,7 @@ pub struct ArenaGc<T> {
     high_ptr: *const T,
     capacity: u16,
     grey_feilds: u8,
+    white_region: Range<usize>,
 }
 
 impl<T: Trace> ArenaGc<T> {
@@ -108,22 +103,17 @@ impl<T: Trace> ArenaGc<T> {
         });
 
         let mut msg = bus.lock().unwrap();
-        if let BusMsg {
-            from_gc: true,
-            worker_read: false,
-            high_ptr,
-            capacity,
-            grey_feilds,
-            ..
-        } = *msg
-        {
+
+        if msg.from_gc && !msg.worker_read {
             msg.worker_read = true;
             Self {
-                high_ptr: high_ptr as *const T,
-                capacity,
-                grey_feilds,
+                high_ptr: msg.high_ptr as *const T,
+                capacity: msg.capacity,
+                grey_feilds: msg.grey_feilds,
+                white_region: msg.white_region.clone(),
             }
         } else {
+
             todo!()
         }
     }
