@@ -15,6 +15,7 @@ pub struct Arena<T> {
     // roots: usize,
     high_ptr: *const T,
     capacity: u16,
+    grey_self: bool,
     grey_feilds: u8,
     white_region: Range<usize>,
 }
@@ -35,6 +36,7 @@ impl<T: NoGc + Trace> Arena<T> {
                         System.alloc_zeroed(Layout::new::<(Header, [T; 1000])>()) as usize
                     },
                     capacity: 1000,
+                    grey_self: false,
                     grey_feilds: 0b0000_0000,
                     white_region: 0..1,
                 }))
@@ -47,6 +49,7 @@ impl<T: NoGc + Trace> Arena<T> {
             Self {
                 high_ptr: msg.high_ptr as *const T,
                 capacity: msg.capacity,
+                grey_self: msg.grey_self,
                 grey_feilds: msg.grey_feilds,
                 white_region: msg.white_region.clone(),
             }
@@ -76,6 +79,7 @@ pub struct ArenaGc<T> {
     // roots: usize,
     high_ptr: *const T,
     capacity: u16,
+    grey_self: bool,
     grey_feilds: u8,
     white_region: Range<usize>,
 }
@@ -96,6 +100,7 @@ impl<T: Trace> ArenaGc<T> {
                         System.alloc_zeroed(Layout::new::<(Header, [T; 1000])>()) as usize
                     },
                     capacity: 1000,
+                    grey_self: false,
                     grey_feilds: 0b0000_0000,
                     white_region: 0..1,
                 }))
@@ -109,11 +114,11 @@ impl<T: Trace> ArenaGc<T> {
             Self {
                 high_ptr: msg.high_ptr as *const T,
                 capacity: msg.capacity,
+                grey_self: msg.grey_self,
                 grey_feilds: msg.grey_feilds,
                 white_region: msg.white_region.clone(),
             }
         } else {
-
             todo!()
         }
     }
@@ -148,6 +153,8 @@ pub struct BusMsg {
     pub worker_read: bool,
     pub high_ptr: usize,
     pub capacity: u16,
+    /// Is a Self Arena being condemned.
+    grey_self: bool,
     /// The 8 bits correspond to GCed fields.
     /// Only 8 GCed fields per struct are supported.
     /// TODO do enums with GCed fields count as one (conservative), or N fields.
