@@ -9,6 +9,7 @@
 #![feature(const_raw_ptr_to_usize_cast)]
 #![feature(const_mut_refs)]
 #![feature(trivial_bounds)]
+#![feature(associated_type_bounds)]
 
 use sundial_gc::arena::*;
 use sundial_gc::auto_traits::*;
@@ -19,7 +20,7 @@ use sundial_gc::trace::*;
 use std::ops::Range;
 
 // #[derive(Trace, Mark)
-struct List<'r, T> {
+struct List<'r, T: 'r> {
     t: T,
     next: Option<Gc<'r, List<'r, T>>>,
 }
@@ -46,8 +47,20 @@ unsafe impl<'r, T: 'r + Trace + Immutable> Trace for List<'r, T> {
     }
 }
 
-unsafe impl<'o, 'n, O: Trace, N> Mark<'o, 'n, List<'o, O>, List<'n, N>> for ArenaGc<List<'n, N>> {
+unsafe impl<'o, 'n, O: Trace + 'o, N: 'n> Mark<'o, 'n, List<'o, O>, List<'n, N>>
+    for ArenaGc<List<'n, N>>
+{
     default fn mark(&'n self, o: Gc<'o, List<'o, O>>) -> Gc<'n, List<'n, N>> {
+        unsafe { std::mem::transmute(o) }
+    }
+}
+
+struct ArenaList<'r, T: 'r>(ArenaGc<List<'r, T>>);
+
+unsafe impl<'o, 'n, O: 'o, N: 'n> Mark2<'o, 'n, O> for ArenaList<'n, N> {
+    type Old = List<'o, O>;
+    type New = List<'n, N>;
+    fn mark(&'n self, o: Gc<'o, Self::Old>) -> Gc<'n, Self::New> {
         unsafe { std::mem::transmute(o) }
     }
 }
@@ -76,7 +89,7 @@ unsafe impl<'r, T: NoGc> Condemned for List<'r, T> {
 }
 
 #[test]
-fn _churn_list() {
+fn churn_list() {
     let usizes: Arena<usize> = Arena::new();
     let gc_one = usizes.gc_alloc(1);
 
@@ -88,7 +101,26 @@ fn _churn_list() {
             next: None,
         })),
     });
-    let one_two = lists.mark(one_two);
+    // let one_two = lists.mark(one_two);
+    let one_two: Gc<List<Gc<usize>>> = unsafe { std::mem::transmute(one_two) };
+    drop(usizes);
+    let _ = one_two.t;
+}
+
+#[test]
+fn churn_list2() {
+    let usizes: Arena<usize> = Arena::new();
+    let gc_one = usizes.gc_alloc(1);
+
+    let lists: ArenaList<Gc<usize>> = ArenaList(ArenaGc::new());
+    let one_two = lists.0.gc_alloc(List {
+        t: gc_one,
+        next: Some(lists.0.gc_alloc(List {
+            t: usizes.gc_alloc(2),
+            next: None,
+        })),
+    });
+    let one_two: Gc<List<Gc<usize>>> = unsafe { std::mem::transmute(lists.mark(one_two)) };
     drop(usizes);
     let _ = one_two.t;
 }
@@ -166,7 +198,7 @@ fn hidden_lifetime_test() {
         _b: &'b str,
     }
     struct Foo2<'a, 'b> {
-        _bar: Gc<'a, Bar<'b>>,
+        _bar: Option<Gc<'a, Bar<'b>>>,
     }
 
     // This may not be trivail to implement as a proc macro
@@ -192,13 +224,15 @@ fn hidden_lifetime_test() {
     let string = String::from("bar");
     let b = &*string;
     let foo = foos.gc_alloc(Foo2 {
-        _bar: bars.gc_alloc(Bar { _b: b }),
+        _bar: Some(bars.gc_alloc(Bar { _b: b })),
     });
 
     let foos2 = ArenaGc::new();
     let foo2 = foos2.mark(foo);
+    drop(foos);
+    drop(bars);
     // drop(string); //~ cannot move out of `string` because it is borrowed
-    let _ = *foo2._bar._b;
+    let _: Option<&str> = foo2._bar.as_ref().map(|b| b._b);
 }
 
 #[test]

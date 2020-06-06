@@ -6,10 +6,11 @@ pub unsafe trait Mark<'o, 'n, O, N> {
 }
 
 // GAT Mark
-// pub unsafe trait Mark<'o, 'n, O> {
-//     type Struct<'l>;
-//     fn mark(&'n self, o: Gc<'o, Self::Struct<'o>>) -> Gc<'n, Self::Struct<'n>>;
-// }
+pub unsafe trait Mark2<'o, 'n, O: 'o> {
+    type Old: 'o;
+    type New: 'n;
+    fn mark(&'n self, o: Gc<'o, Self::Old>) -> Gc<'n, Self::New>;
+}
 
 // Blanket Arena<T> impl is in src/arena.rs
 
