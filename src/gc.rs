@@ -5,7 +5,7 @@ use std::ops::Deref;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Gc<'r, T> {
-    ptr: &'r T,
+    pub(crate) ptr: &'r T,
 }
 
 impl<'r, T: Trace> Deref for Gc<'r, T> {

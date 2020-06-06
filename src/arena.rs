@@ -11,14 +11,29 @@ use std::ptr;
 use std::sync::Mutex;
 use std::thread_local;
 
+// TODO Arena trait to abstract over Arena and ArenaGc
 pub struct Arena<T> {
-    // roots: usize,
-    high_ptr: *const T,
-    capacity: u16,
+    // TODO compact representation of arenas
+    header: *const Header,
+    arr_ptr: *const T,
     grey_self: bool,
     grey_feilds: u8,
     white_region: Range<usize>,
+    next: UnsafeCell<*mut T>,
 }
+
+/// An arena allocator for allocating GCed objects containing GCed fields.
+pub struct ArenaGc<T> {
+    // TODO compact representation of arenas
+    header: *const Header,
+    arr_ptr: *const T,
+    grey_self: bool,
+    grey_feilds: u8,
+    white_region: Range<usize>,
+    next: UnsafeCell<*mut T>,
+}
+
+type ArenaLayout<T> = (Header, [T; 1000]);
 
 impl<T: NoGc + Trace> Arena<T> {
     pub fn new() -> Self {
@@ -28,13 +43,12 @@ impl<T: NoGc + Trace> Arena<T> {
                 T::TRACE_TYPE_INFO,
                 ptr::drop_in_place::<T> as *const fn(*mut T) as usize,
             );
+            let mem_ptr = unsafe { System.alloc_zeroed(Layout::new::<ArenaLayout<T>>()) as usize };
             tm.entry(key).or_insert_with(|| {
                 Box::new(Mutex::new(BusMsg {
                     from_gc: true,
                     worker_read: false,
-                    high_ptr: unsafe {
-                        System.alloc_zeroed(Layout::new::<(Header, [T; 1000])>()) as usize
-                    },
+                    mem_ptr,
                     capacity: 1000,
                     grey_self: false,
                     grey_feilds: 0b0000_0000,
@@ -47,8 +61,9 @@ impl<T: NoGc + Trace> Arena<T> {
         if msg.from_gc && !msg.worker_read {
             msg.worker_read = true;
             Self {
-                high_ptr: msg.high_ptr as *const T,
-                capacity: msg.capacity,
+                arr_ptr: todo!(),
+                header: todo!(),
+                next: todo!(),
                 grey_self: msg.grey_self,
                 grey_feilds: msg.grey_feilds,
                 white_region: msg.white_region.clone(),
@@ -72,17 +87,9 @@ impl<T: NoGc + Trace> Arena<T> {
 unsafe impl<'o, 'n, T: NoGc + Immutable> Mark<'o, 'n, T, T> for Arena<T> {
     #[inline(always)]
     default fn mark(&'n self, o: Gc<'o, T>) -> Gc<'n, T> {
+        if self.grey_self && self.white_region.contains(&(o.ptr as *const _ as usize)) {}
         unsafe { std::mem::transmute(o) }
     }
-}
-
-pub struct ArenaGc<T> {
-    // roots: usize,
-    high_ptr: *const T,
-    capacity: u16,
-    grey_self: bool,
-    grey_feilds: u8,
-    white_region: Range<usize>,
 }
 
 impl<T: Trace> ArenaGc<T> {
@@ -93,13 +100,12 @@ impl<T: Trace> ArenaGc<T> {
                 T::TRACE_TYPE_INFO,
                 ptr::drop_in_place::<T> as *const fn(*mut T) as usize,
             );
+            let mem_ptr = unsafe { System.alloc_zeroed(Layout::new::<ArenaLayout<T>>()) as usize };
             tm.entry(key).or_insert_with(|| {
                 Box::new(Mutex::new(BusMsg {
                     from_gc: true,
                     worker_read: false,
-                    high_ptr: unsafe {
-                        System.alloc_zeroed(Layout::new::<(Header, [T; 1000])>()) as usize
-                    },
+                    mem_ptr,
                     capacity: 1000,
                     grey_self: false,
                     grey_feilds: 0b0000_0000,
@@ -109,12 +115,12 @@ impl<T: Trace> ArenaGc<T> {
         });
 
         let mut msg = bus.lock().unwrap();
-
         if msg.from_gc && !msg.worker_read {
             msg.worker_read = true;
             Self {
-                high_ptr: msg.high_ptr as *const T,
-                capacity: msg.capacity,
+                arr_ptr: todo!(),
+                header: todo!(),
+                next: todo!(),
                 grey_self: msg.grey_self,
                 grey_feilds: msg.grey_feilds,
                 white_region: msg.white_region.clone(),
@@ -136,9 +142,9 @@ impl<T: Trace> ArenaGc<T> {
 }
 
 struct Header {
-    // evacuated: HashMap<u16, *const T>,
-// roots: HashMap<u16, *const Box<UnsafeCell<*const T>>>,
-// finalizers: TODO
+    evacuated: HashMap<u16, usize>,
+    // roots: HashMap<u16, *const Box<UnsafeCell<*const T>>>,
+    // finalizers: TODO
 }
 
 thread_local! {
@@ -152,7 +158,7 @@ thread_local! {
 pub struct BusMsg {
     pub from_gc: bool,
     pub worker_read: bool,
-    pub high_ptr: usize,
+    pub mem_ptr: usize,
     pub capacity: u16,
     /// Is a Self Arena being condemned.
     grey_self: bool,
