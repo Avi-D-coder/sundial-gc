@@ -129,10 +129,7 @@ impl<T: Trace> ArenaGc<T> {
             todo!()
         }
     }
-    pub fn gc_alloc<'r>(&'r self, _t: T) -> Gc<'r, T>
-    where
-        T: 'r,
-    {
+    pub fn gc_alloc<'r>(&'r self, _t: T) -> Gc<'r, T> {
         todo!()
     }
 

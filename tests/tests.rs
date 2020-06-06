@@ -95,14 +95,22 @@ fn churn_list() {
 
     let lists: ArenaGc<List<Gc<usize>>> = ArenaGc::new();
     let one_two = lists.gc_alloc(List {
-        t: gc_one,
-        next: Some(lists.gc_alloc(List {
-            t: usizes.gc_alloc(2),
-            next: None,
-        })),
+        t: unsafe { std::mem::transmute(gc_one) },
+        next: {
+            // TODO use a macro or a proc maco to generate this until GAT
+            // This preserves type while transmute liftimes
+            // TODO remove transmute from mark
+            let f: Option<Gc<List<Gc<usize>>>> = Some(lists.gc_alloc(List {
+                t: usizes.gc_alloc(2),
+                next: None,
+            }));
+            unsafe { std::mem::transmute(f) }
+        },
     });
-    // let one_two = lists.mark(one_two);
-    let one_two: Gc<List<Gc<usize>>> = unsafe { std::mem::transmute(one_two) };
+
+    let lists2: ArenaGc<List<Gc<usize>>> = ArenaGc::new();
+    let one_two = lists2.mark(one_two);
+    drop(lists);
     drop(usizes);
     let _ = one_two.t;
 }
@@ -120,7 +128,9 @@ fn churn_list2() {
             next: None,
         })),
     });
-    let one_two: Gc<List<Gc<usize>>> = unsafe { std::mem::transmute(lists.mark(one_two)) };
+    let lists2: ArenaGc<List<Gc<usize>>> = ArenaGc::new();
+    let one_two = lists2.mark(one_two);
+    // drop(lists);
     drop(usizes);
     let _ = one_two.t;
 }

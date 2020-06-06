@@ -19,5 +19,7 @@ pub unsafe trait Condemned {
 }
 
 unsafe impl<T> Condemned for T {
-    default fn feilds(_: &Self, _: u8, _: Range<usize>) -> u8 {0b0000_0000}
+    default fn feilds(_: &Self, _: u8, _: Range<usize>) -> u8 {
+        0b0000_0000
+    }
 }
