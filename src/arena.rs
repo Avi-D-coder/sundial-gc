@@ -11,19 +11,16 @@ use std::ptr;
 use std::sync::Mutex;
 use std::thread_local;
 
-// TODO Arena trait to abstract over Arena and ArenaGc
-pub struct Arena<T> {
-    // TODO compact representation of arenas
-    header: *const Header,
-    arr_ptr: *const T,
-    grey_self: bool,
-    grey_feilds: u8,
-    white_region: Range<usize>,
-    next: UnsafeCell<*mut T>,
+pub struct ArenaPrim<T> {
+    intern: ArenaInternals<T>,
 }
 
 /// An arena allocator for allocating GCed objects containing GCed fields.
 pub struct ArenaGc<T> {
+    intern: ArenaInternals<T>,
+}
+
+struct ArenaInternals<T> {
     // TODO compact representation of arenas
     header: *const Header,
     arr_ptr: *const T,
@@ -33,107 +30,94 @@ pub struct ArenaGc<T> {
     next: UnsafeCell<*mut T>,
 }
 
+pub trait Arena<T> {
+    fn new() -> Self;
+    fn advance(&mut self) -> Self;
+    fn gc_alloc<'r>(&'r self, _t: T) -> Gc<'r, T>
+    where
+        T: 'r;
+}
+
 type ArenaLayout<T> = (Header, [T; 1000]);
 
-impl<T: NoGc + Trace> Arena<T> {
-    pub fn new() -> Self {
-        let bus = GC_BUS.with(|tm| {
-            let tm = unsafe { &mut *tm.get() };
-            let key = (
-                T::TRACE_TYPE_INFO,
-                ptr::drop_in_place::<T> as *const fn(*mut T) as usize,
-            );
-            let mem_ptr = unsafe { System.alloc_zeroed(Layout::new::<ArenaLayout<T>>()) as usize };
-            tm.entry(key).or_insert_with(|| {
-                Box::new(Mutex::new(BusMsg {
-                    from_gc: true,
-                    worker_read: false,
-                    mem_ptr,
-                    capacity: 1000,
-                    grey_self: false,
-                    grey_feilds: 0b0000_0000,
-                    white_region: 0..1,
-                }))
-            })
-        });
-
-        let mut msg = bus.lock().unwrap();
-        if msg.from_gc && !msg.worker_read {
-            msg.worker_read = true;
-            Self {
-                arr_ptr: todo!(),
-                header: todo!(),
-                next: todo!(),
-                grey_self: msg.grey_self,
-                grey_feilds: msg.grey_feilds,
-                white_region: msg.white_region.clone(),
-            }
-        } else {
-            todo!()
-        }
+impl<T: NoGc + Trace> Arena<T> for ArenaPrim<T> {
+    fn new() -> Self {
+        Self { intern: new() }
     }
-    pub fn gc_alloc<'r>(&'r self, _t: T) -> Gc<'r, T>
+    fn gc_alloc<'r>(&'r self, _t: T) -> Gc<'r, T>
     where
         T: 'r,
     {
         unimplemented!()
     }
 
-    pub fn advance(&mut self) -> Self {
+    fn advance(&mut self) -> Self {
         unimplemented!()
     }
 }
 
-unsafe impl<'o, 'n, T: NoGc + Immutable> Mark<'o, 'n, T, T> for Arena<T> {
+unsafe impl<'o, 'n, T: NoGc + Immutable> Mark<'o, 'n, T, T> for ArenaPrim<T> {
     #[inline(always)]
     default fn mark(&'n self, o: Gc<'o, T>) -> Gc<'n, T> {
-        if self.grey_self && self.white_region.contains(&(o.ptr as *const _ as usize)) {}
+        if self.intern.grey_self
+            && self
+                .intern
+                .white_region
+                .contains(&(o.ptr as *const _ as usize))
+        {}
         unsafe { std::mem::transmute(o) }
     }
 }
 
-impl<T: Trace> ArenaGc<T> {
-    pub fn new() -> Self {
-        let bus = GC_BUS.with(|tm| {
-            let tm = unsafe { &mut *tm.get() };
-            let key = (
-                T::TRACE_TYPE_INFO,
-                ptr::drop_in_place::<T> as *const fn(*mut T) as usize,
-            );
-            let mem_ptr = unsafe { System.alloc_zeroed(Layout::new::<ArenaLayout<T>>()) as usize };
-            tm.entry(key).or_insert_with(|| {
-                Box::new(Mutex::new(BusMsg {
-                    from_gc: true,
-                    worker_read: false,
-                    mem_ptr,
-                    capacity: 1000,
-                    grey_self: false,
-                    grey_feilds: 0b0000_0000,
-                    white_region: 0..1,
-                }))
-            })
-        });
+fn new<T: Trace>() -> ArenaInternals<T> {
+    let bus = GC_BUS.with(|tm| {
+        let tm = unsafe { &mut *tm.get() };
+        let key = (
+            T::TRACE_TYPE_INFO,
+            ptr::drop_in_place::<T> as *const fn(*mut T) as usize,
+        );
+        let mem_ptr = unsafe { System.alloc_zeroed(Layout::new::<ArenaLayout<T>>()) as usize };
+        tm.entry(key).or_insert_with(|| {
+            Box::new(Mutex::new(BusMsg {
+                from_gc: true,
+                worker_read: false,
+                mem_ptr,
+                capacity: 1000,
+                grey_self: false,
+                grey_feilds: 0b0000_0000,
+                white_region: 0..1,
+            }))
+        })
+    });
 
-        let mut msg = bus.lock().unwrap();
-        if msg.from_gc && !msg.worker_read {
-            msg.worker_read = true;
-            Self {
-                arr_ptr: todo!(),
-                header: todo!(),
-                next: todo!(),
-                grey_self: msg.grey_self,
-                grey_feilds: msg.grey_feilds,
-                white_region: msg.white_region.clone(),
-            }
-        } else {
-            todo!()
+    let mut msg = bus.lock().unwrap();
+    if msg.from_gc && !msg.worker_read {
+        msg.worker_read = true;
+        ArenaInternals {
+            arr_ptr: todo!(),
+            header: todo!(),
+            next: todo!(),
+            grey_self: msg.grey_self,
+            grey_feilds: msg.grey_feilds,
+            white_region: msg.white_region.clone(),
         }
+    } else {
+        todo!()
     }
-    pub fn gc_alloc<'r>(&'r self, _t: T) -> Gc<'r, T> {
+}
+
+impl<T: Trace> Arena<T> for ArenaGc<T> {
+    fn new() -> Self {
+        Self { intern: new() }
+    }
+    fn gc_alloc<'r>(&'r self, _t: T) -> Gc<'r, T>
+    where
+        T: 'r,
+    {
         todo!()
     }
 
-    pub fn advance(&mut self) -> Self {
+    fn advance(&mut self) -> Self {
         unimplemented!()
     }
 }

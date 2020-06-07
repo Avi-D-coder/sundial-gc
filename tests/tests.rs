@@ -90,7 +90,7 @@ unsafe impl<'r, T: NoGc> Condemned for List<'r, T> {
 
 #[test]
 fn churn_list() {
-    let usizes: Arena<usize> = Arena::new();
+    let usizes: ArenaPrim<usize> = ArenaPrim::new();
     let gc_one = usizes.gc_alloc(1);
 
     let lists: ArenaGc<List<Gc<usize>>> = ArenaGc::new();
@@ -117,7 +117,7 @@ fn churn_list() {
 
 #[test]
 fn churn_list2() {
-    let usizes: Arena<usize> = Arena::new();
+    let usizes: ArenaPrim<usize> = ArenaPrim::new();
     let gc_one = usizes.gc_alloc(1);
 
     let lists: ArenaList<Gc<usize>> = ArenaList(ArenaGc::new());
@@ -157,7 +157,7 @@ unsafe impl<'o, 'n> Mark<'o, 'n, Foo<'o>, Foo<'n>> for ArenaGc<Foo<'n>> {
 
 #[test]
 fn churn() {
-    let usizes: Arena<usize> = Arena::new();
+    let usizes: ArenaPrim<usize> = ArenaPrim::new();
     let gced_usize = usizes.gc_alloc(1);
 
     let foos: ArenaGc<Foo> = ArenaGc::new();
@@ -179,11 +179,11 @@ fn churn() {
 
 #[test]
 fn prevent_use_after_free() {
-    let strings: Arena<String> = Arena::new();
+    let strings: ArenaPrim<String> = ArenaPrim::new();
     let gced = strings.gc_alloc(String::from("foo"));
-    let strs: Arena<&String> = Arena::new();
+    let strs: ArenaPrim<&String> = ArenaPrim::new();
     let str1 = strs.gc_alloc(&*gced);
-    let strs2: Arena<&String> = Arena::new();
+    let strs2: ArenaPrim<&String> = ArenaPrim::new();
     let _str2 = strs2.mark(str1);
     drop(strings); //~ cannot move out of `strings` because it is borrowed
                    // let str3 = *str2;
@@ -191,11 +191,11 @@ fn prevent_use_after_free() {
 
 #[test]
 fn prevent_use_after_free_correct() {
-    let strings: Arena<String> = Arena::new();
+    let strings: ArenaPrim<String> = ArenaPrim::new();
     let gced = strings.gc_alloc(String::from("foo"));
-    let strs: Arena<String> = Arena::new();
+    let strs: ArenaPrim<String> = ArenaPrim::new();
     let str1 = strs.mark(gced);
-    let strs2 = Arena::new();
+    let strs2 = ArenaPrim::new();
     let str2 = strs2.mark(str1);
     drop(strings);
     let _str3 = &*str2;
@@ -230,7 +230,7 @@ fn hidden_lifetime_test() {
     }
 
     let foos = ArenaGc::new();
-    let bars = Arena::new();
+    let bars = ArenaPrim::new();
     let string = String::from("bar");
     let b = &*string;
     let foo = foos.gc_alloc(Foo2 {
@@ -249,7 +249,7 @@ fn hidden_lifetime_test() {
 fn immutable_test() {
     // use std::sync::Mutex;
     //~ trait bound `std::cell::UnsafeCell<usize>: Immutable` is not satisfied
-    // let mutexes: Arena<Mutex<usize>> = Arena::new();
+    // let mutexes: ArenaPrim<Mutex<usize>> = ArenaPrim::new();
 
-    let _mutexes: Arena<Box<std::sync::Arc<usize>>> = Arena::new();
+    let _mutexes: ArenaPrim<Box<std::sync::Arc<usize>>> = ArenaPrim::new();
 }
