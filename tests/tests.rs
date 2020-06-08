@@ -217,13 +217,16 @@ fn churn() {
 
 #[test]
 fn prevent_use_after_free() {
+    let strs2 = { 
     let strings: ArenaPrim<String> = ArenaPrim::new();
     let gced = strings.gc_alloc(String::from("foo"));
     let strs: ArenaPrim<&String> = ArenaPrim::new();
-    let str1 = strs.gc_alloc(&*gced);
+    let str1: Gc<&String> = strs.gc_alloc(&*gced);
     let strs2: ArenaPrim<&String> = ArenaPrim::new();
-    let _str2 = strs2.mark(str1);
-    drop(strings); //~ cannot move out of `strings` because it is borrowed
+    strs2.mark(str1);
+    strs2
+    };
+    // drop(strings); //~ cannot move out of `strings` because it is borrowed
                    // let str3 = *str2;
 }
 

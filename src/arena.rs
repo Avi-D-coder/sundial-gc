@@ -44,6 +44,10 @@ pub trait Arena<T> {
         T: 'r;
 }
 
+impl<T> Drop for ArenaPrim<T> {
+    fn drop(&mut self) {}
+}
+
 impl<T: NoGc + Trace> Arena<T> for ArenaPrim<T> {
     fn new() -> Self {
         Self { intern: new() }
