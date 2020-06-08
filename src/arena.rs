@@ -23,7 +23,7 @@ pub struct ArenaGc<T> {
 
 struct ArenaInternals<T> {
     // TODO compact representation of arenas
-    header: *const Header,
+    header: *const Header<T>,
     grey_self: bool,
     grey_feilds: u8,
     white_region: Range<usize>,
@@ -67,14 +67,34 @@ unsafe impl<'o, 'n, T: NoGc + Immutable> Mark<'o, 'n, T, T> for ArenaPrim<T> {
                 .intern
                 .white_region
                 .contains(&(o.ptr as *const _ as usize))
-        {}
-        unsafe { std::mem::transmute(o) }
+        {
+            let next = self.intern.next.get();
+            unsafe { ptr::copy(o.ptr as *const T, *next, 1) };
+            let mut new_gc = next as *const T;
+            let old_addr = o.ptr as *const T as usize;
+            let offset = old_addr % 16384;
+            let old_header = unsafe { &*((old_addr - offset) as *const Header<T>) };
+            let evacuated = old_header.evacuated.lock();
+            evacuated
+                .unwrap()
+                .entry((offset / size_of::<T>()) as u16)
+                .and_modify(|gc| new_gc = *gc)
+                .or_insert_with(|| {
+                    unsafe { *next = ((*next as usize) - size_of::<T>()) as *mut T };
+                    new_gc
+                });
+            Gc {
+                ptr: unsafe { &*new_gc },
+            }
+        } else {
+            unsafe { std::mem::transmute(o) }
+        }
     }
 }
 
 const fn header_size<T>() -> usize {
     let align = align_of::<T>();
-    let header = size_of::<Header>();
+    let header = size_of::<Header<T>>();
     header + ((align - (header % align)) % align)
 }
 
@@ -104,7 +124,7 @@ fn new<T: Trace>() -> ArenaInternals<T> {
         // TODO const assert layout details
         let capacity = (16384 - (msg.mem_ptr + header_size::<T>())) / size_of::<T>();
         ArenaInternals {
-            header: msg.mem_ptr as *const Header,
+            header: msg.mem_ptr as *const Header<T>,
             next: UnsafeCell::new((capacity * size_of::<T>()) as *mut T),
             grey_self: msg.grey_self,
             grey_feilds: msg.grey_feilds,
@@ -131,8 +151,8 @@ impl<T: Trace> Arena<T> for ArenaGc<T> {
     }
 }
 
-struct Header {
-    evacuated: HashMap<u16, usize>,
+struct Header<T> {
+    evacuated: Mutex<HashMap<u16, *const T>>,
     // roots: HashMap<u16, *const Box<UnsafeCell<*const T>>>,
     // finalizers: TODO
     roots: usize,
