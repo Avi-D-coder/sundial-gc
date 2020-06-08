@@ -13,16 +13,16 @@ use std::ptr;
 use std::sync::Mutex;
 use std::thread_local;
 
-pub struct ArenaPrim<T> {
+pub struct ArenaPrim<T: Trace> {
     intern: ArenaInternals<T>,
 }
 
 /// An arena allocator for allocating GCed objects containing GCed fields.
-pub struct ArenaGc<T> {
+pub struct ArenaGc<T: Trace> {
     pub intern: ArenaInternals<T>,
 }
 
-pub struct ArenaInternals<T> {
+pub struct ArenaInternals<T: Trace> {
     // TODO compact representation of arenas
     // TODO make all these private by wrapping up needed functionality.
     pub header: *const Header<T>,
@@ -56,8 +56,16 @@ impl<T: NoGc + Trace> Arena<T> for ArenaPrim<T> {
     }
 }
 
-impl<T> Drop for ArenaInternals<T> {
-    fn drop(&mut self) {}
+impl<T: Trace> Drop for ArenaInternals<T> {
+    fn drop(&mut self) {
+        let bus = GC_BUS.with(|tm| {
+            let tm = unsafe { &mut *tm.get() };
+            let key = (
+                T::TRACE_TYPE_INFO,
+                ptr::drop_in_place::<T> as *const fn(*mut T) as usize,
+            );
+        });
+    }
 }
 
 unsafe impl<'o, 'n, 'r: 'n, O: NoGc + Immutable, N: NoGc + Immutable + 'r> Mark<'o, 'n, 'r, O, N>

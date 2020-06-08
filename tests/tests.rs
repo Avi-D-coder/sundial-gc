@@ -27,9 +27,9 @@ struct List<'r, T: 'r> {
 
 // These three impls will be derived with a procedural macro
 unsafe impl<'r, T: 'r + Trace + Immutable> Trace for List<'r, T> {
-    fn trace(_: usize) {}
-    const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [
+    default fn trace(_: usize) {}
+    default const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
+    default const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [
         Some(GcTypeInfo::new::<T>()),
         Some(GcTypeInfo::new::<Option<Gc<'r, List<'r, T>>>>()),
         None,
@@ -40,15 +40,37 @@ unsafe impl<'r, T: 'r + Trace + Immutable> Trace for List<'r, T> {
         None,
     ];
 
-    fn trace_transitive_type_info(tti: &mut Tti) {
+    default fn trace_transitive_type_info(tti: &mut Tti) {
         tti.add_direct::<Self>();
         tti.add_trans(T::trace_transitive_type_info);
         tti.add_trans(Option::<Gc<'r, List<'r, T>>>::trace_transitive_type_info);
     }
 }
 
-unsafe impl<'o, 'n, 'r: 'n, O: Trace, N: Trace + 'r> Mark<'o, 'n, 'r, List<'o, O>, List<'r, N>>
+unsafe impl<'r, T: 'r + Trace + Immutable + NoGc> Trace for List<'r, T> {
+    fn trace(_: usize) {}
+    const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
+    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [
+        Some(GcTypeInfo::new::<Option<Gc<'r, List<'r, T>>>>()),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ];
+
+    fn trace_transitive_type_info(tti: &mut Tti) {
+        tti.add_direct::<Self>();
+        tti.add_trans(Option::<Gc<'r, List<'r, T>>>::trace_transitive_type_info);
+    }
+}
+
+unsafe impl<'o, 'n, 'r: 'n, O: Trace, N: 'r + Trace> Mark<'o, 'n, 'r, List<'o, O>, List<'r, N>>
     for ArenaGc<List<'r, N>>
+where
+    List<'r, N>: Trace,
 {
     fn mark(&'n self, o: Gc<'o, List<'o, O>>) -> Gc<'r, List<'r, N>> {
         let condemned_self = self.intern.grey_self
