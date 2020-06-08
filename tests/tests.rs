@@ -104,37 +104,31 @@ unsafe impl<'r, T: NoGc> Condemned for List<'r, T> {
     }
 }
 
-// #[test]
-fn churn_list<'l>() -> ArenaGc<List<'l, Gc<'l, usize>>> {
-    let lists2: ArenaGc<List<Gc<usize>>> = ArenaGc::new();
+#[test]
+fn churn_list() {
     let usizes: ArenaPrim<usize> = ArenaPrim::new();
     let gc_one = usizes.gc_alloc(1);
 
     let lists: ArenaGc<List<Gc<usize>>> = ArenaGc::new();
     let one_two = lists.gc_alloc(List {
         t: gc_one,
-        next: Some(mark(&lists, unsafe {
-            Mark::ptr(
-                &lists as *const _,
-                &*lists.gc_alloc(List {
-                    t: usizes.gc_alloc(2),
-                    next: None,
-                }) as *const _,
-            )
+        next: Some(lists.gc_alloc(List {
+            t: usizes.gc_alloc(2),
+            next: None,
         })),
     });
 
     fn mark<'n, A, O, N>(_: &'n A, o: *const O) -> Gc<'n, N> {
         unsafe { std::mem::transmute(o) }
     }
-    // lists2.mark(one_two);
+    // // lists2.mark(one_two);
+    let lists2: ArenaGc<List<Gc<usize>>> = ArenaGc::new();
     let one_two: Gc<List<Gc<usize>>> = mark(&lists2, unsafe {
         Mark::ptr(&lists2 as *const _, &*one_two as *const _)
     });
     drop(lists);
     drop(usizes);
     let _ = one_two.t;
-    lists2
 }
 
 struct Foo<'r> {

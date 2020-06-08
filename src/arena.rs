@@ -40,15 +40,14 @@ struct Mem {
 pub trait Arena<T> {
     fn new() -> Self;
     fn advance(&mut self) -> Self;
-    fn gc_alloc<'r>(&'r self, _t: T) -> Gc<'r, T>;
+    fn gc_alloc<'a, 'r: 'a>(&'a self, _t: T) -> Gc<'r, T>;
 }
 
 impl<T: NoGc + Trace> Arena<T> for ArenaPrim<T> {
     fn new() -> Self {
         Self { intern: new() }
     }
-    fn gc_alloc<'r>(&'r self, _t: T) -> Gc<'r, T>
-    {
+    fn gc_alloc<'a, 'r: 'a>(&'a self, _t: T) -> Gc<'r, T> {
         unimplemented!()
     }
 
@@ -66,13 +65,8 @@ unsafe impl<'n, O: NoGc + Immutable, N: NoGc + Immutable> Mark<'n, O, N> for Are
     default unsafe fn ptr(a: *const Self, o: *const O) -> *const N {
         // TODO make const https://github.com/rust-lang/rfcs/pull/2632
         assert_eq!(type_name::<O>(), type_name::<N>());
-        let a = unsafe {&*a};
-        if a.intern.grey_self
-            && a
-                .intern
-                .white_region
-                .contains(&(o as *const _ as usize))
-        {
+        let a = unsafe { &*a };
+        if a.intern.grey_self && a.intern.white_region.contains(&(o as *const _ as usize)) {
             let next = a.intern.next.get();
             unsafe { ptr::copy(transmute(o), *next, 1) };
             let mut new_gc = next as *const N;
@@ -88,7 +82,7 @@ unsafe impl<'n, O: NoGc + Immutable, N: NoGc + Immutable> Mark<'n, O, N> for Are
                     unsafe { *next = ((*next as usize) - size_of::<N>()) as *mut N };
                     new_gc
                 });
-             new_gc
+            new_gc
         } else {
             unsafe { std::mem::transmute(o) }
         }
@@ -143,8 +137,7 @@ impl<T: Trace> Arena<T> for ArenaGc<T> {
     fn new() -> Self {
         Self { intern: new() }
     }
-    fn gc_alloc<'r>(&'r self, _t: T) -> Gc<'r, T>
-    {
+    fn gc_alloc<'a, 'r: 'a>(&'a self, _t: T) -> Gc<'r, T> {
         todo!()
     }
 
