@@ -4,9 +4,10 @@ use super::trace::*;
 use super::Mark;
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::any::type_name;
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
-use std::mem::{align_of, size_of};
+use std::mem::{align_of, size_of, transmute};
 use std::ops::Range;
 use std::ptr;
 use std::sync::Mutex;
@@ -60,9 +61,15 @@ impl<T: NoGc + Trace> Arena<T> for ArenaPrim<T> {
     }
 }
 
-unsafe impl<'o, 'n, T: NoGc + Immutable> Mark<'o, 'n, T, T> for ArenaPrim<T> {
+impl<T> Drop for ArenaInternals<T> {
+    fn drop(&mut self) {}
+}
+
+unsafe impl<'o, 'n, O: NoGc + Immutable, N: NoGc + Immutable> Mark<'n, O, N> for ArenaPrim<N> {
     #[inline(always)]
-    default fn mark(&'n self, o: Gc<'o, T>) -> Gc<'n, T> {
+    default fn mark(&'n self, o: Gc<O>) -> *const N {
+        // TODO make const https://github.com/rust-lang/rfcs/pull/2632
+        assert_eq!(type_name::<O>(), type_name::<N>());
         if self.intern.grey_self
             && self
                 .intern
@@ -70,23 +77,21 @@ unsafe impl<'o, 'n, T: NoGc + Immutable> Mark<'o, 'n, T, T> for ArenaPrim<T> {
                 .contains(&(o.ptr as *const _ as usize))
         {
             let next = self.intern.next.get();
-            unsafe { ptr::copy(o.ptr as *const T, *next, 1) };
-            let mut new_gc = next as *const T;
-            let old_addr = o.ptr as *const T as usize;
+            unsafe { ptr::copy(transmute(o.ptr), *next, 1) };
+            let mut new_gc = next as *const N;
+            let old_addr = o.ptr as *const O as usize;
             let offset = old_addr % 16384;
-            let old_header = unsafe { &*((old_addr - offset) as *const Header<T>) };
+            let old_header = unsafe { &*((old_addr - offset) as *const Header<N>) };
             let evacuated = old_header.evacuated.lock();
             evacuated
                 .unwrap()
-                .entry((offset / size_of::<T>()) as u16)
+                .entry((offset / size_of::<N>()) as u16)
                 .and_modify(|gc| new_gc = *gc)
                 .or_insert_with(|| {
-                    unsafe { *next = ((*next as usize) - size_of::<T>()) as *mut T };
+                    unsafe { *next = ((*next as usize) - size_of::<N>()) as *mut N };
                     new_gc
                 });
-            Gc {
-                ptr: unsafe { &*new_gc },
-            }
+             new_gc
         } else {
             unsafe { std::mem::transmute(o) }
         }
