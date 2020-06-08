@@ -60,17 +60,23 @@ impl<T> Drop for ArenaInternals<T> {
     fn drop(&mut self) {}
 }
 
-unsafe impl<'n, O: NoGc + Immutable, N: NoGc + Immutable> Mark<'n, O, N> for ArenaPrim<N> {
+unsafe impl<'o, 'n, 'r: 'n, O: NoGc + Immutable, N: NoGc + Immutable + 'r> Mark<'o, 'n, 'r, O, N>
+    for ArenaPrim<N>
+{
     #[inline(always)]
-    default unsafe fn ptr(a: *const Self, o: *const O) -> *const N {
+    default fn mark(&'n self, o: Gc<'o, O>) -> Gc<'r, N> {
         // TODO make const https://github.com/rust-lang/rfcs/pull/2632
         assert_eq!(type_name::<O>(), type_name::<N>());
-        let a = unsafe { &*a };
-        if a.intern.grey_self && a.intern.white_region.contains(&(o as *const _ as usize)) {
-            let next = a.intern.next.get();
+        if self.intern.grey_self
+            && self
+                .intern
+                .white_region
+                .contains(&(&*o as *const _ as usize))
+        {
+            let next = self.intern.next.get();
             unsafe { ptr::copy(transmute(o), *next, 1) };
             let mut new_gc = next as *const N;
-            let old_addr = o as *const O as usize;
+            let old_addr = &*o as *const O as usize;
             let offset = old_addr % 16384;
             let old_header = unsafe { &*((old_addr - offset) as *const Header<N>) };
             let evacuated = old_header.evacuated.lock();
@@ -82,7 +88,9 @@ unsafe impl<'n, O: NoGc + Immutable, N: NoGc + Immutable> Mark<'n, O, N> for Are
                     unsafe { *next = ((*next as usize) - size_of::<N>()) as *mut N };
                     new_gc
                 });
-            new_gc
+            Gc {
+                ptr: unsafe { &*new_gc },
+            }
         } else {
             unsafe { std::mem::transmute(o) }
         }

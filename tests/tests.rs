@@ -47,34 +47,39 @@ unsafe impl<'r, T: 'r + Trace + Immutable> Trace for List<'r, T> {
     }
 }
 
-unsafe impl<'o, 'n, O: Trace + 'o, N: 'n> Mark<'n, List<'o, O>, List<'n, N>>
-    for ArenaGc<List<'n, N>>
+unsafe impl<'o, 'n, 'r: 'n, O: Trace, N: Trace + 'r> Mark<'o, 'n, 'r, List<'o, O>, List<'r, N>>
+    for ArenaGc<List<'r, N>>
 {
-    unsafe fn ptr(a: *const Self, o: *const List<O>) -> *const List<'n, N> {
-        let a = unsafe { &*a };
-        let condemned_self = a.intern.grey_self && a.intern.white_region.contains(&(o as usize));
-        let grey_feilds = unsafe { &mut *a.intern.grey_feilds.get() };
-        let cf = Condemned::feilds(unsafe { &*o }, *grey_feilds, a.intern.white_region.clone());
+    fn mark(&'n self, o: Gc<'o, List<'o, O>>) -> Gc<'r, List<'r, N>> {
+        let condemned_self = self.intern.grey_self
+            && self
+                .intern
+                .white_region
+                .contains(&(&*o as *const _ as usize));
+        let grey_feilds = unsafe { &mut *self.intern.grey_feilds.get() };
+        let cf = Condemned::feilds(&*o, *grey_feilds, self.intern.white_region.clone());
         *grey_feilds |= cf;
         if condemned_self || (0b0000_0000 != cf) {
-            let next = a.intern.next.get();
-            unsafe { std::ptr::copy(std::mem::transmute::<_, *const List<'n, N>>(o), *next, 1) };
-            let mut new_gc = next as *const List<'_, N>;
-            let old_addr = o as *const _ as usize;
+            let next = self.intern.next.get();
+            unsafe { std::ptr::copy(std::mem::transmute::<_, *const List<N>>(o), *next, 1) };
+            let mut new_gc: *const List<'r, N> = next as _;
+            let old_addr = &*o as *const _ as usize;
             let offset = old_addr % 16384;
             let old_header = unsafe { &*((old_addr - offset) as *const Header<List<'n, N>>) };
             let evacuated = old_header.evacuated.lock();
             evacuated
                 .unwrap()
-                .entry((offset / std::mem::size_of::<List<'n, N>>()) as u16)
-                .and_modify(|gc| new_gc = *gc)
+                .entry((offset / std::mem::size_of::<List<N>>()) as u16)
+                .and_modify(|gc| new_gc = unsafe { std::mem::transmute(*gc) })
                 .or_insert_with(|| {
                     unsafe {
-                        *next = ((*next as usize) - std::mem::size_of::<List<'n, N>>()) as *mut _
+                        *next = ((*next as usize) - std::mem::size_of::<List<N>>()) as *mut _
                     };
                     new_gc
                 });
-            new_gc
+            Gc {
+                ptr: unsafe { &*new_gc },
+            }
         } else {
             unsafe { std::mem::transmute(o) }
         }
@@ -118,14 +123,8 @@ fn churn_list() {
         })),
     });
 
-    fn mark<'n, A, O, N>(_: &'n A, o: *const O) -> Gc<'n, N> {
-        unsafe { std::mem::transmute(o) }
-    }
-    // // lists2.mark(one_two);
     let lists2: ArenaGc<List<Gc<usize>>> = ArenaGc::new();
-    let one_two: Gc<List<Gc<usize>>> = mark(&lists2, unsafe {
-        Mark::ptr(&lists2 as *const _, &*one_two as *const _)
-    });
+    let one_two = lists2.mark(one_two);
     drop(lists);
     drop(usizes);
     let _ = one_two.t;
@@ -145,105 +144,107 @@ unsafe impl<'r> Trace for Foo<'r> {
     }
 }
 
-// unsafe impl<'o, 'n> Mark<'n, Foo<'o>, Foo<'n>> for ArenaGc<Foo<'n>> {
-//     fn mark(&'n self, o: *const Foo) -> *const Foo {
-//         // TODO fillout
-//         unsafe { std::mem::transmute(o) }
-//     }
-// }
+unsafe impl<'o, 'n, 'r: 'n> Mark<'o, 'n, 'r, Foo<'o>, Foo<'r>> for ArenaGc<Foo<'r>> {
+    fn mark(&'n self, o: Gc<'o, Foo<'o>>) -> Gc<'r, Foo<'r>> {
+        // TODO fill out
+        unsafe { std::mem::transmute(o) }
+    }
+}
 
-// #[test]
-// fn churn() {
-//     let usizes: ArenaPrim<usize> = ArenaPrim::new();
-//     let gced_usize = usizes.gc_alloc(1);
-//
-//     let foos: ArenaGc<Foo> = ArenaGc::new();
-//     let foo = foos.gc_alloc(Foo { _bar: gced_usize });
-//
-//     let foos2: ArenaGc<Foo> = ArenaGc::new();
-//     // mark extends foos lifetime to that of the new arena foos2
-//     // This does not copy foo into the new arena.
-//     // In this case it is simply transmuting a lifetime.
-//     //
-//     // If the Gc owned foos or usizes and wanted to free it,
-//     // mark would copy the head of it's structure to foos2.
-//     // The Gc would then copy the tail of the structure into a older generation.
-//     let foo2 = foos2.mark(foo);
-//     drop(foos);
-//     drop(usizes);
-//     let _ = *foo2._bar + 1usize;
-// }
-//
-// #[test]
-// fn prevent_use_after_free() {
-//     let strings: ArenaPrim<String> = ArenaPrim::new();
-//     let gced = strings.gc_alloc(String::from("foo"));
-//     let strs: ArenaPrim<&String> = ArenaPrim::new();
-//     let str1 = strs.gc_alloc(&*gced);
-//     let strs2: ArenaPrim<&String> = ArenaPrim::new();
-//     let _str2: Gc<&String> = strs2.mark(str1);
-//     // drop(strings); //~ cannot move out of `strings` because it is borrowed
-//     // let str3 = *str2;
-// }
-//
-// #[test]
-// fn prevent_use_after_free_correct() {
-//     let strings: ArenaPrim<String> = ArenaPrim::new();
-//     let gced = strings.gc_alloc(String::from("foo"));
-//     let strs: ArenaPrim<String> = ArenaPrim::new();
-//     let str1 = strs.mark(gced);
-//     let strs2: ArenaPrim<&String> = ArenaPrim::new();
-//     let str2 = strs2.mark(str1);
-//     drop(strings);
-//     let _str3 = &*str2;
-// }
+#[test]
+fn churn() {
+    let usizes: ArenaPrim<usize> = ArenaPrim::new();
+    let gced_usize = usizes.gc_alloc(1);
+
+    let foos: ArenaGc<Foo> = ArenaGc::new();
+    let foo = foos.gc_alloc(Foo { _bar: gced_usize });
+
+    let foos2: ArenaGc<Foo> = ArenaGc::new();
+    // mark extends foos lifetime to that of the new arena foos2
+    // This does not copy foo into the new arena.
+    // In this case it is simply transmuting a lifetime.
+    //
+    // If the Gc owned foos or usizes and wanted to free it,
+    // mark would copy the head of it's structure to foos2.
+    // The Gc would then copy the tail of the structure into a older generation.
+    let foo2 = foos2.mark(foo);
+    drop(foos);
+    drop(usizes);
+    let _ = *foo2._bar + 1usize;
+}
+
+#[test]
+fn prevent_use_after_free() {
+    let strings: ArenaPrim<String> = ArenaPrim::new();
+    let gced = strings.gc_alloc(String::from("foo"));
+    let strs: ArenaPrim<&String> = ArenaPrim::new();
+    let str1 = strs.gc_alloc(&*gced);
+    let strs2: ArenaPrim<&String> = ArenaPrim::new();
+    let _str2: Gc<&String> = strs2.mark(str1);
+    // drop(strings); //~ cannot move out of `strings` because it is borrowed
+    // let str3 = *str2;
+}
+
+#[test]
+fn prevent_use_after_free_correct() {
+    let strings: ArenaPrim<String> = ArenaPrim::new();
+    let gced = strings.gc_alloc(String::from("foo"));
+    let strs: ArenaPrim<String> = ArenaPrim::new();
+    let str1 = strs.mark(gced);
+    let strs2: ArenaPrim<&String> = ArenaPrim::new();
+    let str2 = strs2.mark(str1);
+    drop(strings);
+    let _str3 = &*str2;
+}
 
 // Why did I think this is unsound without GAT Mark?
-// #[test]
-// fn hidden_lifetime_test() {
-//     struct Bar<'b> {
-//         _b: &'b str,
-//     }
-//     struct Foo2<'a, 'b> {
-//         _bar: Option<Gc<'a, Bar<'b>>>,
-//     }
-//
-//     // This may not be trivail to implement as a proc macro
-//     unsafe impl<'a, 'b: 'a> Trace for Foo2<'a, 'b> {
-//         fn trace(_: usize) {}
-//         const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-//         const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] =
-//             GcTypeInfo::one_child::<Gc<'a, Bar<'b>>>();
-//         fn trace_transitive_type_info(tti: &mut Tti) {
-//             tti.add_direct::<Self>();
-//             tti.add_trans(Gc::<'a, Bar<'b>>::trace_transitive_type_info);
-//         }
-//     }
-//
-//     unsafe impl<'o, 'n, 'b> Mark<'o, 'n, Foo2<'o, 'b>, Foo2<'n, 'b>> for ArenaGc<Foo2<'n, 'b>> {
-//         fn mark(&'n self, o: Gc<'o, Foo2<'o, 'b>>) -> *const Foo2<'n, 'b> {
-//             // TODO fillout
-//             unsafe { std::mem::transmute(o) }
-//         }
-//     }
-//
-//     // TODO This errors now in an unexpectec place.
-//     // There should be an error, triggered by drop
-//     let string = String::from("bar");
-//     let foos = ArenaGc::new();
-//     let bars = ArenaPrim::new();
-//     let _b = &*string;
-//     let foo = foos.gc_alloc(Foo2 {
-//         _bar: Some(bars.gc_alloc(Bar { _b })),
-//     });
-//
-//     let foos2 = ArenaGc::new();
-//     let foo2 = foos2.mark(foo);
-//     drop(foos);
-//     drop(bars);
-//     // drop(string); //~ cannot move out of `string` because it is borrowed
-//     let _: Option<&str> = foo2._bar.as_ref().map(|b| b._b);
-// }
+#[test]
+fn hidden_lifetime_test() {
+    struct Bar<'b> {
+        _b: &'b str,
+    }
+    struct Foo2<'a, 'b> {
+        _bar: Option<Gc<'a, Bar<'b>>>,
+    }
+
+    // This may not be trivail to implement as a proc macro
+    unsafe impl<'a, 'b: 'a> Trace for Foo2<'a, 'b> {
+        fn trace(_: usize) {}
+        const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
+        const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] =
+            GcTypeInfo::one_child::<Gc<'a, Bar<'b>>>();
+        fn trace_transitive_type_info(tti: &mut Tti) {
+            tti.add_direct::<Self>();
+            tti.add_trans(Gc::<'a, Bar<'b>>::trace_transitive_type_info);
+        }
+    }
+
+    unsafe impl<'o, 'n, 'r: 'n, 'b> Mark<'o, 'n, 'r, Foo2<'o, 'b>, Foo2<'r, 'b>>
+        for ArenaGc<Foo2<'r, 'b>>
+    {
+        fn mark(&'n self, o: Gc<'o, Foo2<'o, 'b>>) -> Gc<'r, Foo2<'r, 'b>> {
+            // TODO fillout
+            unsafe { std::mem::transmute(o) }
+        }
+    }
+
+    // TODO This errors now in an unexpectec place.
+    // There should be an error, triggered by drop
+    let string = String::from("bar");
+    let foos = ArenaGc::new();
+    let bars = ArenaPrim::new();
+    let _b = &*string;
+    let foo = foos.gc_alloc(Foo2 {
+        _bar: Some(bars.gc_alloc(Bar { _b })),
+    });
+
+    let foos2 = ArenaGc::new();
+    let foo2 = foos2.mark(foo);
+    drop(foos);
+    drop(bars);
+    // drop(string); //~ cannot move out of `string` because it is borrowed
+    let _: Option<&str> = foo2._bar.as_ref().map(|b| b._b);
+}
 
 #[test]
 fn immutable_test() {

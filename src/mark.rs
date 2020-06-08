@@ -1,7 +1,8 @@
+use super::gc::*;
 use std::ops::Range;
 
-pub unsafe trait Mark<'n, O, N> {
-    unsafe fn ptr(a: *const Self, o: *const O) -> *const N;
+pub unsafe trait Mark<'o, 'n, 'r: 'n, O, N: 'r> {
+    fn mark(&'n self, o: Gc<'o, O>) -> Gc<'r, N>;
 }
 
 // Blanket Arena<T> impl is in src/arena.rs
