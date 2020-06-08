@@ -6,6 +6,7 @@ use super::Mark;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
+use std::mem::{align_of, size_of};
 use std::ops::Range;
 use std::ptr;
 use std::sync::Mutex;
@@ -23,11 +24,15 @@ pub struct ArenaGc<T> {
 struct ArenaInternals<T> {
     // TODO compact representation of arenas
     header: *const Header,
-    arr_ptr: *const T,
     grey_self: bool,
     grey_feilds: u8,
     white_region: Range<usize>,
     next: UnsafeCell<*mut T>,
+}
+
+#[repr(align(16384))]
+struct Mem {
+    _mem: [u8; 16384],
 }
 
 pub trait Arena<T> {
@@ -37,8 +42,6 @@ pub trait Arena<T> {
     where
         T: 'r;
 }
-
-type ArenaLayout<T> = (Header, [T; 1000]);
 
 impl<T: NoGc + Trace> Arena<T> for ArenaPrim<T> {
     fn new() -> Self {
@@ -69,6 +72,12 @@ unsafe impl<'o, 'n, T: NoGc + Immutable> Mark<'o, 'n, T, T> for ArenaPrim<T> {
     }
 }
 
+const fn header_size<T>() -> usize {
+    let align = align_of::<T>();
+    let header = size_of::<Header>();
+    header + ((align - (header % align)) % align)
+}
+
 fn new<T: Trace>() -> ArenaInternals<T> {
     let bus = GC_BUS.with(|tm| {
         let tm = unsafe { &mut *tm.get() };
@@ -76,13 +85,12 @@ fn new<T: Trace>() -> ArenaInternals<T> {
             T::TRACE_TYPE_INFO,
             ptr::drop_in_place::<T> as *const fn(*mut T) as usize,
         );
-        let mem_ptr = unsafe { System.alloc_zeroed(Layout::new::<ArenaLayout<T>>()) as usize };
+        let mem_ptr = unsafe { System.alloc_zeroed(Layout::new::<Mem>()) as usize };
         tm.entry(key).or_insert_with(|| {
             Box::new(Mutex::new(BusMsg {
                 from_gc: true,
                 worker_read: false,
                 mem_ptr,
-                capacity: 1000,
                 grey_self: false,
                 grey_feilds: 0b0000_0000,
                 white_region: 0..1,
@@ -93,10 +101,11 @@ fn new<T: Trace>() -> ArenaInternals<T> {
     let mut msg = bus.lock().unwrap();
     if msg.from_gc && !msg.worker_read {
         msg.worker_read = true;
+        // TODO const assert layout details
+        let capacity = (16384 - (msg.mem_ptr + header_size::<T>())) / size_of::<T>();
         ArenaInternals {
-            arr_ptr: todo!(),
-            header: todo!(),
-            next: todo!(),
+            header: msg.mem_ptr as *const Header,
+            next: UnsafeCell::new((capacity * size_of::<T>()) as *mut T),
             grey_self: msg.grey_self,
             grey_feilds: msg.grey_feilds,
             white_region: msg.white_region.clone(),
@@ -126,6 +135,8 @@ struct Header {
     evacuated: HashMap<u16, usize>,
     // roots: HashMap<u16, *const Box<UnsafeCell<*const T>>>,
     // finalizers: TODO
+    roots: usize,
+    finalizers: usize,
 }
 
 thread_local! {
@@ -140,7 +151,6 @@ pub struct BusMsg {
     pub from_gc: bool,
     pub worker_read: bool,
     pub mem_ptr: usize,
-    pub capacity: u16,
     /// Is a Self Arena being condemned.
     grey_self: bool,
     /// The 8 bits correspond to GCed fields.
