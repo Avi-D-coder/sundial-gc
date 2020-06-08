@@ -50,20 +50,21 @@ unsafe impl<'r, T: 'r + Trace + Immutable> Trace for List<'r, T> {
 unsafe impl<'o, 'n, O: Trace + 'o, N: 'n> Mark<'n, List<'o, O>, List<'n, N>>
     for ArenaGc<List<'n, N>>
 {
-    fn mark(&'n self, o: *const List<O>) -> *const List<N> {
+    unsafe fn ptr(a: *const Self, o: *const List<O>) -> *const List<'n, N> {
+        let a = unsafe {&*a};
         let condemned_self =
-            self.intern.grey_self && self.intern.white_region.contains(&(o as usize));
-        let grey_feilds = unsafe { &mut *self.intern.grey_feilds.get() };
+            a.intern.grey_self && a.intern.white_region.contains(&(o as usize));
+        let grey_feilds = unsafe { &mut *a.intern.grey_feilds.get() };
         let cf = Condemned::feilds(
             unsafe { &*o },
             *grey_feilds,
-            self.intern.white_region.clone(),
+            a.intern.white_region.clone(),
         );
         *grey_feilds |= cf;
         if condemned_self || (0b0000_0000 != cf) {
-            let next = self.intern.next.get();
+            let next = a.intern.next.get();
             unsafe { std::ptr::copy(std::mem::transmute::<_, *const List<'n, N>>(o), *next, 1) };
-            let mut new_gc = next as *const List<'n, N>;
+            let mut new_gc = next as *const List<'_, N>;
             let old_addr = o as *const _ as usize;
             let offset = old_addr % 16384;
             let old_header = unsafe { &*((old_addr - offset) as *const Header<List<'n, N>>) };
@@ -133,7 +134,7 @@ fn churn_list<'l>() -> ArenaGc<List<'l, Gc<'l, usize>>> {
         unsafe { std::mem::transmute(o) }
     }
     // lists2.mark(one_two);
-    let one_two: Gc<List<Gc<usize>>> = mark(&lists2, lists2.mark(&*one_two as *const _));
+    let one_two: Gc<List<Gc<usize>>> = mark(&lists2, unsafe {Mark::ptr(&lists2 as *const _, &*one_two as *const _)});
     drop(lists);
     drop(usizes);
     let _ = one_two.t;
@@ -154,12 +155,12 @@ unsafe impl<'r> Trace for Foo<'r> {
     }
 }
 
-unsafe impl<'o, 'n> Mark<'n, Foo<'o>, Foo<'n>> for ArenaGc<Foo<'n>> {
-    fn mark(&'n self, o: *const Foo) -> *const Foo {
-        // TODO fillout
-        unsafe { std::mem::transmute(o) }
-    }
-}
+// unsafe impl<'o, 'n> Mark<'n, Foo<'o>, Foo<'n>> for ArenaGc<Foo<'n>> {
+//     fn mark(&'n self, o: *const Foo) -> *const Foo {
+//         // TODO fillout
+//         unsafe { std::mem::transmute(o) }
+//     }
+// }
 
 // #[test]
 // fn churn() {

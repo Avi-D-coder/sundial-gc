@@ -67,16 +67,17 @@ impl<T> Drop for ArenaInternals<T> {
 
 unsafe impl<'n, O: NoGc + Immutable, N: NoGc + Immutable> Mark<'n, O, N> for ArenaPrim<N> {
     #[inline(always)]
-    default fn mark(&'n self, o: *const O) -> *const N {
+    default unsafe fn ptr(a: *const Self, o: *const O) -> *const N {
         // TODO make const https://github.com/rust-lang/rfcs/pull/2632
         assert_eq!(type_name::<O>(), type_name::<N>());
-        if self.intern.grey_self
-            && self
+        let a = unsafe {&*a};
+        if a.intern.grey_self
+            && a
                 .intern
                 .white_region
                 .contains(&(o as *const _ as usize))
         {
-            let next = self.intern.next.get();
+            let next = a.intern.next.get();
             unsafe { ptr::copy(transmute(o), *next, 1) };
             let mut new_gc = next as *const N;
             let old_addr = o as *const O as usize;
@@ -128,6 +129,7 @@ fn new<T: Trace>() -> ArenaInternals<T> {
     if msg.from_gc && !msg.worker_read {
         msg.worker_read = true;
         // TODO const assert layout details
+        // FIXME attempt to subtract with overflow
         let capacity = (16384 - (msg.mem_ptr + header_size::<T>())) / size_of::<T>();
         ArenaInternals {
             header: msg.mem_ptr as *const Header<T>,

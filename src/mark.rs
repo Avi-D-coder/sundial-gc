@@ -1,7 +1,7 @@
 use std::ops::Range;
 
 pub unsafe trait Mark<'n, O, N> {
-    fn mark(&'n self, o: *const O) -> *const N;
+    unsafe fn ptr(a: *const Self, o: *const O) -> *const N;
 }
 
 // Blanket Arena<T> impl is in src/arena.rs
