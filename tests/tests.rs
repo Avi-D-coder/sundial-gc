@@ -51,7 +51,44 @@ unsafe impl<'o, 'n, O: Trace + 'o, N: 'n> Mark<'o, 'n, List<'o, O>, List<'n, N>>
     for ArenaGc<List<'n, N>>
 {
     default fn mark(&'n self, o: Gc<'o, List<'o, O>>) -> Gc<'n, List<'n, N>> {
-        unsafe { std::mem::transmute(o) }
+        let condemned_self = self.intern.grey_self
+            && self
+                .intern
+                .white_region
+                .contains(&(o.ptr as *const _ as usize));
+        let grey_feilds = unsafe { &mut *self.intern.grey_feilds.get() };
+        let cf = Condemned::feilds(&*o, *grey_feilds, self.intern.white_region.clone());
+        *grey_feilds |= cf;
+        if condemned_self || (0b0000_0000 != cf) {
+            let next = self.intern.next.get();
+            unsafe {
+                std::ptr::copy(
+                    std::mem::transmute::<&List<'o, O>, *const List<'n, N>>(o.ptr),
+                    *next,
+                    1,
+                )
+            };
+            let mut new_gc = next as *const List<'n, N>;
+            let old_addr = o.ptr as *const _ as usize;
+            let offset = old_addr % 16384;
+            let old_header = unsafe { &*((old_addr - offset) as *const Header<List<'n, N>>) };
+            let evacuated = old_header.evacuated.lock();
+            evacuated
+                .unwrap()
+                .entry((offset / std::mem::size_of::<List<'n, N>>()) as u16)
+                .and_modify(|gc| new_gc = *gc)
+                .or_insert_with(|| {
+                    unsafe {
+                        *next = ((*next as usize) - std::mem::size_of::<List<'n, N>>()) as *mut _
+                    };
+                    new_gc
+                });
+            Gc {
+                ptr: unsafe { &*new_gc },
+            }
+        } else {
+            unsafe { std::mem::transmute(o) }
+        }
     }
 }
 
@@ -151,6 +188,7 @@ unsafe impl<'r> Trace for Foo<'r> {
 
 unsafe impl<'o, 'n> Mark<'o, 'n, Foo<'o>, Foo<'n>> for ArenaGc<Foo<'n>> {
     fn mark(&'n self, o: Gc<'o, Foo<'o>>) -> Gc<'n, Foo<'n>> {
+        // TODO fillout
         unsafe { std::mem::transmute(o) }
     }
 }
@@ -225,6 +263,7 @@ fn hidden_lifetime_test() {
 
     unsafe impl<'o, 'n, 'b> Mark<'o, 'n, Foo2<'o, 'b>, Foo2<'n, 'b>> for ArenaGc<Foo2<'n, 'b>> {
         fn mark(&'n self, o: Gc<'o, Foo2<'o, 'b>>) -> Gc<'n, Foo2<'n, 'b>> {
+            // TODO fillout
             unsafe { std::mem::transmute(o) }
         }
     }

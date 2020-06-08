@@ -5,10 +5,11 @@ use std::ops::Deref;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Gc<'r, T> {
-    pub(crate) ptr: &'r T,
+    // TODO pub(crate)
+    pub ptr: &'r T,
 }
 
-impl<'r, T: Trace> Deref for Gc<'r, T> {
+impl<'r, T> Deref for Gc<'r, T> {
     type Target = T;
     fn deref(&self) -> &T {
         self.ptr

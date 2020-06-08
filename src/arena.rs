@@ -18,16 +18,17 @@ pub struct ArenaPrim<T> {
 
 /// An arena allocator for allocating GCed objects containing GCed fields.
 pub struct ArenaGc<T> {
-    intern: ArenaInternals<T>,
+    pub intern: ArenaInternals<T>,
 }
 
-struct ArenaInternals<T> {
+pub struct ArenaInternals<T> {
     // TODO compact representation of arenas
-    header: *const Header<T>,
-    grey_self: bool,
-    grey_feilds: u8,
-    white_region: Range<usize>,
-    next: UnsafeCell<*mut T>,
+    // TODO make all these private by wrapping up needed functionality.
+    pub header: *const Header<T>,
+    pub grey_self: bool,
+    pub grey_feilds: UnsafeCell<u8>,
+    pub white_region: Range<usize>,
+    pub next: UnsafeCell<*mut T>,
 }
 
 #[repr(align(16384))]
@@ -127,7 +128,7 @@ fn new<T: Trace>() -> ArenaInternals<T> {
             header: msg.mem_ptr as *const Header<T>,
             next: UnsafeCell::new((capacity * size_of::<T>()) as *mut T),
             grey_self: msg.grey_self,
-            grey_feilds: msg.grey_feilds,
+            grey_feilds: UnsafeCell::new(msg.grey_feilds),
             white_region: msg.white_region.clone(),
         }
     } else {
@@ -151,8 +152,9 @@ impl<T: Trace> Arena<T> for ArenaGc<T> {
     }
 }
 
-struct Header<T> {
-    evacuated: Mutex<HashMap<u16, *const T>>,
+pub struct Header<T> {
+    // TODO private
+    pub evacuated: Mutex<HashMap<u16, *const T>>,
     // roots: HashMap<u16, *const Box<UnsafeCell<*const T>>>,
     // finalizers: TODO
     roots: usize,
