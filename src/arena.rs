@@ -40,9 +40,7 @@ struct Mem {
 pub trait Arena<T> {
     fn new() -> Self;
     fn advance(&mut self) -> Self;
-    fn gc_alloc<'r>(&'r self, _t: T) -> Gc<'r, T>
-    where
-        T: 'r;
+    fn gc_alloc<'r>(&'r self, _t: T) -> Gc<'r, T>;
 }
 
 impl<T: NoGc + Trace> Arena<T> for ArenaPrim<T> {
@@ -50,8 +48,6 @@ impl<T: NoGc + Trace> Arena<T> for ArenaPrim<T> {
         Self { intern: new() }
     }
     fn gc_alloc<'r>(&'r self, _t: T) -> Gc<'r, T>
-    where
-        T: 'r,
     {
         unimplemented!()
     }
@@ -148,8 +144,6 @@ impl<T: Trace> Arena<T> for ArenaGc<T> {
         Self { intern: new() }
     }
     fn gc_alloc<'r>(&'r self, _t: T) -> Gc<'r, T>
-    where
-        T: 'r,
     {
         todo!()
     }

@@ -51,15 +51,10 @@ unsafe impl<'o, 'n, O: Trace + 'o, N: 'n> Mark<'n, List<'o, O>, List<'n, N>>
     for ArenaGc<List<'n, N>>
 {
     unsafe fn ptr(a: *const Self, o: *const List<O>) -> *const List<'n, N> {
-        let a = unsafe {&*a};
-        let condemned_self =
-            a.intern.grey_self && a.intern.white_region.contains(&(o as usize));
+        let a = unsafe { &*a };
+        let condemned_self = a.intern.grey_self && a.intern.white_region.contains(&(o as usize));
         let grey_feilds = unsafe { &mut *a.intern.grey_feilds.get() };
-        let cf = Condemned::feilds(
-            unsafe { &*o },
-            *grey_feilds,
-            a.intern.white_region.clone(),
-        );
+        let cf = Condemned::feilds(unsafe { &*o }, *grey_feilds, a.intern.white_region.clone());
         *grey_feilds |= cf;
         if condemned_self || (0b0000_0000 != cf) {
             let next = a.intern.next.get();
@@ -117,24 +112,25 @@ fn churn_list<'l>() -> ArenaGc<List<'l, Gc<'l, usize>>> {
 
     let lists: ArenaGc<List<Gc<usize>>> = ArenaGc::new();
     let one_two = lists.gc_alloc(List {
-        t: unsafe { std::mem::transmute(gc_one) },
-        next: {
-            // TODO use a macro or a proc maco to generate this until GAT
-            // This preserves type while transmute liftimes
-            // TODO remove transmute from mark
-            let f: Option<Gc<List<Gc<usize>>>> = Some(lists.gc_alloc(List {
-                t: usizes.gc_alloc(2),
-                next: None,
-            }));
-            unsafe { std::mem::transmute(f) }
-        },
+        t: gc_one,
+        next: Some(mark(&lists, unsafe {
+            Mark::ptr(
+                &lists as *const _,
+                &*lists.gc_alloc(List {
+                    t: usizes.gc_alloc(2),
+                    next: None,
+                }) as *const _,
+            )
+        })),
     });
 
     fn mark<'n, A, O, N>(_: &'n A, o: *const O) -> Gc<'n, N> {
         unsafe { std::mem::transmute(o) }
     }
     // lists2.mark(one_two);
-    let one_two: Gc<List<Gc<usize>>> = mark(&lists2, unsafe {Mark::ptr(&lists2 as *const _, &*one_two as *const _)});
+    let one_two: Gc<List<Gc<usize>>> = mark(&lists2, unsafe {
+        Mark::ptr(&lists2 as *const _, &*one_two as *const _)
+    });
     drop(lists);
     drop(usizes);
     let _ = one_two.t;
