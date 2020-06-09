@@ -133,8 +133,7 @@ fn new<T: Trace>() -> ArenaInternals<T> {
     if msg.from_gc && !msg.worker_read {
         msg.worker_read = true;
         // TODO const assert layout details
-        // FIXME attempt to subtract with overflow
-        let capacity = (16384 - (msg.mem_ptr + header_size::<T>())) / size_of::<T>();
+        let capacity = (16384 - header_size::<T>()) / size_of::<T>();
         ArenaInternals {
             header: msg.mem_ptr as *const Header<T>,
             next: UnsafeCell::new((capacity * size_of::<T>()) as *mut T),
