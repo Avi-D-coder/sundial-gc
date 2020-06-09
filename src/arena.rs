@@ -134,7 +134,7 @@ impl<T: Trace> Arena<T> for ArenaInternals<T> {
     fn new() -> ArenaInternals<T> {
         let bus = GC_BUS.with(|tm| {
             let tm = unsafe { &mut *tm.get() };
-            let mem_ptr = unsafe { System.alloc_zeroed(Layout::new::<Mem>()) };
+            let mem_ptr = unsafe { System.alloc(Layout::new::<Mem>()) };
             let mem_addr = mem_ptr as usize;
             debug_assert!(
                 mem_addr
@@ -153,7 +153,7 @@ impl<T: Trace> Arena<T> for ArenaInternals<T> {
             })
         });
 
-        let mut msg = bus.lock().unwrap();
+        let mut msg = bus.lock().expect("Could not unlock bus");
         if msg.from_gc && !msg.worker_read {
             msg.worker_read = true;
             // TODO const assert layout details
@@ -166,7 +166,8 @@ impl<T: Trace> Arena<T> for ArenaInternals<T> {
                 white_region: msg.white_region.clone(),
             }
         } else {
-            todo!()
+            // TODO
+            panic!("Multiple Arena<T>s per thread not yet supported");
         }
     }
 
