@@ -160,7 +160,7 @@ impl<T: Trace> Arena<T> for ArenaInternals<T> {
             let capacity = (16384 - header_size::<T>()) / size_of::<T>();
             ArenaInternals {
                 header: msg.mem_addr as *const Header<T>,
-                next: UnsafeCell::new((capacity * size_of::<T>()) as *mut T),
+                next: UnsafeCell::new((msg.mem_addr + (capacity * size_of::<T>())) as *mut T),
                 grey_self: msg.grey_self,
                 grey_feilds: UnsafeCell::new(msg.grey_feilds),
                 white_region: msg.white_region.clone(),
@@ -173,11 +173,9 @@ impl<T: Trace> Arena<T> for ArenaInternals<T> {
     fn gc_alloc<'a, 'r: 'a>(&'a self, t: T) -> Gc<'r, T> {
         unsafe {
             let ptr = *self.next.get();
-            let next = self.next.get();
-            *next = (ptr as usize - size_of::<T>()) as *mut _;
-            let ptr = &mut *ptr;
-            *ptr = t;
-            Gc { ptr }
+            *self.next.get() = (ptr as usize - size_of::<T>()) as *mut _;
+            ptr::write(ptr, t);
+            Gc { ptr: &*ptr }
         }
     }
 
