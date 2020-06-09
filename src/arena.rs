@@ -58,12 +58,14 @@ impl<T: NoGc + Trace> Arena<T> for ArenaPrim<T> {
 
 impl<T: Trace> Drop for ArenaInternals<T> {
     fn drop(&mut self) {
-        let bus = GC_BUS.with(|tm| {
+        GC_BUS.with(|tm| {
             let tm = unsafe { &mut *tm.get() };
-            let key = (
-                T::TRACE_TYPE_INFO,
-                ptr::drop_in_place::<T> as *const fn(*mut T) as usize,
-            );
+            tm.entry(key::<T>()).and_modify(|bus| {
+                let mut msg = bus.lock().unwrap();
+                msg.from_gc = false;
+                msg.worker_read = false;
+                msg.grey_feilds = unsafe { *self.grey_feilds.get() };
+            });
         });
     }
 }
@@ -114,12 +116,8 @@ const fn header_size<T>() -> usize {
 fn new<T: Trace>() -> ArenaInternals<T> {
     let bus = GC_BUS.with(|tm| {
         let tm = unsafe { &mut *tm.get() };
-        let key = (
-            T::TRACE_TYPE_INFO,
-            ptr::drop_in_place::<T> as *const fn(*mut T) as usize,
-        );
         let mem_ptr = unsafe { System.alloc_zeroed(Layout::new::<Mem>()) as usize };
-        tm.entry(key).or_insert_with(|| {
+        tm.entry(key::<T>()).or_insert_with(|| {
             Box::new(Mutex::new(BusMsg {
                 from_gc: true,
                 worker_read: false,
@@ -174,6 +172,13 @@ pub struct Header<T> {
 thread_local! {
     /// Map from type to GC communication bus.
     static GC_BUS: UnsafeCell<HashMap<(GcTypeInfo, usize), Box<Mutex<BusMsg>>>> = UnsafeCell::new(HashMap::new());
+}
+
+fn key<T: Trace>() -> (GcTypeInfo, usize) {
+    (
+        T::TRACE_TYPE_INFO,
+        ptr::drop_in_place::<T> as *const fn(*mut T) as usize,
+    )
 }
 
 // TODO replace with atomic 64 byte header encoding.
