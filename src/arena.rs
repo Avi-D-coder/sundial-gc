@@ -45,10 +45,27 @@ pub trait Arena<T> {
 
 impl<T: NoGc + Trace> Arena<T> for ArenaPrim<T> {
     fn new() -> Self {
-        Self { intern: new() }
+        Self {
+            intern: Arena::new(),
+        }
     }
-    fn gc_alloc<'a, 'r: 'a>(&'a self, _t: T) -> Gc<'r, T> {
+    fn gc_alloc<'a, 'r: 'a>(&'a self, t: T) -> Gc<'r, T> {
+        self.intern.gc_alloc(t)
+    }
+
+    fn advance(&mut self) -> Self {
         unimplemented!()
+    }
+}
+
+impl<T: Trace> Arena<T> for ArenaGc<T> {
+    fn new() -> Self {
+        Self {
+            intern: Arena::new(),
+        }
+    }
+    fn gc_alloc<'a, 'r: 'a>(&'a self, t: T) -> Gc<'r, T> {
+        self.intern.gc_alloc(t)
     }
 
     fn advance(&mut self) -> Self {
@@ -113,45 +130,49 @@ const fn header_size<T>() -> usize {
     header + ((align - (header % align)) % align)
 }
 
-fn new<T: Trace>() -> ArenaInternals<T> {
-    let bus = GC_BUS.with(|tm| {
-        let tm = unsafe { &mut *tm.get() };
-        let mem_ptr = unsafe { System.alloc_zeroed(Layout::new::<Mem>()) as usize };
-        tm.entry(key::<T>()).or_insert_with(|| {
-            Box::new(Mutex::new(BusMsg {
-                from_gc: true,
-                worker_read: false,
-                mem_ptr,
-                grey_self: false,
-                grey_feilds: 0b0000_0000,
-                white_region: 0..1,
-            }))
-        })
-    });
+impl<T: Trace> Arena<T> for ArenaInternals<T> {
+    fn new() -> ArenaInternals<T> {
+        let bus = GC_BUS.with(|tm| {
+            let tm = unsafe { &mut *tm.get() };
+            let mem_ptr = unsafe { System.alloc_zeroed(Layout::new::<Mem>()) as usize };
+            tm.entry(key::<T>()).or_insert_with(|| {
+                Box::new(Mutex::new(BusMsg {
+                    from_gc: true,
+                    worker_read: false,
+                    mem_ptr,
+                    grey_self: false,
+                    grey_feilds: 0b0000_0000,
+                    white_region: 0..1,
+                }))
+            })
+        });
 
-    let mut msg = bus.lock().unwrap();
-    if msg.from_gc && !msg.worker_read {
-        msg.worker_read = true;
-        // TODO const assert layout details
-        let capacity = (16384 - header_size::<T>()) / size_of::<T>();
-        ArenaInternals {
-            header: msg.mem_ptr as *const Header<T>,
-            next: UnsafeCell::new((capacity * size_of::<T>()) as *mut T),
-            grey_self: msg.grey_self,
-            grey_feilds: UnsafeCell::new(msg.grey_feilds),
-            white_region: msg.white_region.clone(),
+        let mut msg = bus.lock().unwrap();
+        if msg.from_gc && !msg.worker_read {
+            msg.worker_read = true;
+            // TODO const assert layout details
+            let capacity = (16384 - header_size::<T>()) / size_of::<T>();
+            ArenaInternals {
+                header: msg.mem_ptr as *const Header<T>,
+                next: UnsafeCell::new((capacity * size_of::<T>()) as *mut T),
+                grey_self: msg.grey_self,
+                grey_feilds: UnsafeCell::new(msg.grey_feilds),
+                white_region: msg.white_region.clone(),
+            }
+        } else {
+            todo!()
         }
-    } else {
-        todo!()
     }
-}
 
-impl<T: Trace> Arena<T> for ArenaGc<T> {
-    fn new() -> Self {
-        Self { intern: new() }
-    }
-    fn gc_alloc<'a, 'r: 'a>(&'a self, _t: T) -> Gc<'r, T> {
-        todo!()
+    fn gc_alloc<'a, 'r: 'a>(&'a self, t: T) -> Gc<'r, T> {
+        unsafe {
+            let ptr = *self.next.get();
+            let next = self.next.get();
+            *next = (ptr as usize - size_of::<T>()) as *mut _;
+            let ptr = &mut *ptr;
+            *ptr = t;
+            Gc { ptr }
+        }
     }
 
     fn advance(&mut self) -> Self {
