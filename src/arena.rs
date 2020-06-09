@@ -134,12 +134,18 @@ impl<T: Trace> Arena<T> for ArenaInternals<T> {
     fn new() -> ArenaInternals<T> {
         let bus = GC_BUS.with(|tm| {
             let tm = unsafe { &mut *tm.get() };
-            let mem_ptr = unsafe { System.alloc_zeroed(Layout::new::<Mem>()) as usize };
+            let mem_ptr = unsafe { System.alloc_zeroed(Layout::new::<Mem>()) };
+            let mem_addr = mem_ptr as usize;
+            debug_assert!(
+                mem_addr
+                    < unsafe { &std::mem::transmute::<_, &Mem>(mem_ptr)._mem[16383] } as *const _
+                        as usize
+            );
             tm.entry(key::<T>()).or_insert_with(|| {
                 Box::new(Mutex::new(BusMsg {
                     from_gc: true,
                     worker_read: false,
-                    mem_ptr,
+                    mem_addr,
                     grey_self: false,
                     grey_feilds: 0b0000_0000,
                     white_region: 0..1,
@@ -153,7 +159,7 @@ impl<T: Trace> Arena<T> for ArenaInternals<T> {
             // TODO const assert layout details
             let capacity = (16384 - header_size::<T>()) / size_of::<T>();
             ArenaInternals {
-                header: msg.mem_ptr as *const Header<T>,
+                header: msg.mem_addr as *const Header<T>,
                 next: UnsafeCell::new((capacity * size_of::<T>()) as *mut T),
                 grey_self: msg.grey_self,
                 grey_feilds: UnsafeCell::new(msg.grey_feilds),
@@ -207,7 +213,7 @@ fn key<T: Trace>() -> (GcTypeInfo, usize) {
 pub struct BusMsg {
     pub from_gc: bool,
     pub worker_read: bool,
-    pub mem_ptr: usize,
+    pub mem_addr: usize,
     /// Is a Self Arena being condemned.
     grey_self: bool,
     /// The 8 bits correspond to GCed fields.
