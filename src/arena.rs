@@ -94,9 +94,27 @@ impl<T: Trace> Drop for ArenaInternals<T> {
         GC_BUS.with(|tm| {
             let tm = unsafe { &mut *tm.get() };
             tm.entry(key::<T>()).and_modify(|bus| {
-                let mut msgs = bus.lock().unwrap();
+                let next = unsafe { *self.next.get() } as *const u8;
+                let capacity = self.capacity();
+                let cached_next = bus.0 .0;
+
+                let release_to_gc = if capacity != 0
+                    && cached_next.is_some()
+                    && capacity
+                        > (cached_next.unwrap() as usize
+                            - (Header::from(cached_next.unwrap() as *mut _) as usize
+                                + size_of::<Header<T>>()))
+                            / size_of::<T>()
+                {
+                    bus.0 .0 = Some(next as *mut _);
+                    false
+                } else {
+                    true
+                };
+                let mut msgs = bus.1.lock().unwrap();
                 msgs[self.bus_idx as usize] = Msg::End {
-                    next: unsafe { *self.next.get() } as *const u8,
+                    release_to_gc,
+                    next,
                     grey_feilds: unsafe { *self.grey_feilds.get() },
                     white_start: self.white_region.start,
                     white_end: self.white_region.end,
@@ -167,11 +185,12 @@ impl<T: Trace> Arena<T> for ArenaInternals<T> {
     fn new() -> ArenaInternals<T> {
         let bus = GC_BUS.with(|tm| {
             let tm = unsafe { &mut *tm.get() };
-            tm.entry(key::<T>())
-                .or_insert_with(|| Box::new(Mutex::new([Msg::Slot; 8])))
+            tm.entry(key::<T>()).or_insert_with(|| {
+                Box::new(((None, GcInvariant::none()), Mutex::new([Msg::Slot; 8])))
+            })
         });
 
-        let mut msgs = bus.lock().expect("Could not unlock bus");
+        let mut msgs = bus.1.lock().expect("Could not unlock bus");
         let slot = msgs
             .iter_mut()
             .enumerate()
@@ -191,6 +210,8 @@ impl<T: Trace> Arena<T> for ArenaInternals<T> {
         {
             let next = UnsafeCell::new(if let Some(n) = next {
                 n as *mut T
+            } else if let Some(n) = bus.0 .0 {
+                n as *mut T
             } else {
                 alloc_arena::<T>()
             });
@@ -204,7 +225,12 @@ impl<T: Trace> Arena<T> for ArenaInternals<T> {
                 white_region: white_start..white_end,
             }
         } else {
-            let next = alloc_arena::<T>();
+            let inv = bus.0 .1;
+            let next = if let Some(n) = bus.0 .0 {
+                n as *mut T
+            } else {
+                alloc_arena::<T>()
+            };
 
             let (bus_idx, slot) = msgs
                 .iter_mut()
@@ -214,14 +240,17 @@ impl<T: Trace> Arena<T> for ArenaInternals<T> {
                 .expect("No space on bus left. Extending the bus not yet supported.");
 
             // send start message to gc
-            *slot = Msg::Start(next as *const u8);
+            *slot = Msg::Start {
+                white_start: 0,
+                white_end: 1,
+            };
 
             ArenaInternals {
                 bus_idx: bus_idx as u8,
                 next: UnsafeCell::new(next),
-                grey_self: false,
-                grey_feilds: UnsafeCell::new(0b0000_0000),
-                white_region: 0..1,
+                grey_self: inv.grey_self,
+                grey_feilds: UnsafeCell::new(inv.grey_feilds),
+                white_region: inv.white_start..inv.white_end,
             }
         }
     }
@@ -261,8 +290,11 @@ impl<T> Header<T> {
 
 thread_local! {
     /// Map from type to GC communication bus.
-    static GC_BUS: UnsafeCell<HashMap<(GcTypeInfo, usize), Box<Mutex<[Msg; 8]>>>>
-        = UnsafeCell::new(HashMap::new());
+    /// `ArenaInternals.next` from an `Msg::End` with excise capacity.
+    /// Cached invariant from last `Msg::Gc`.
+    static GC_BUS: UnsafeCell<
+        HashMap<(GcTypeInfo, usize), Box<((Option<*mut u8>, GcInvariant), Mutex<[Msg; 8]>)>>,
+    > = UnsafeCell::new(HashMap::new());
 }
 
 fn key<T: Trace>() -> (GcTypeInfo, usize) {
@@ -278,8 +310,14 @@ fn key<T: Trace>() -> (GcTypeInfo, usize) {
 enum Msg {
     Slot,
     /// The `mem_addr` of the area
-    Start(*const u8),
+    Start {
+        /// The condemned ptr range
+        white_start: usize,
+        white_end: usize,
+    },
     End {
+        /// Worker will not finish filling the Arena
+        release_to_gc: bool,
         /// Address of the 16 kB arena
         next: *const u8,
         grey_feilds: u8,
@@ -311,6 +349,26 @@ impl Msg {
         match self {
             Msg::Gc { .. } => true,
             _ => false,
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+struct GcInvariant {
+    grey_feilds: u8,
+    grey_self: bool,
+    /// The condemned ptr range
+    white_start: usize,
+    white_end: usize,
+}
+
+impl GcInvariant {
+    const fn none() -> Self {
+        Self {
+            grey_self: false,
+            grey_feilds: 0b0000_0000,
+            white_start: 0,
+            white_end: 0,
         }
     }
 }
