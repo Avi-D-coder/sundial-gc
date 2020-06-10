@@ -94,7 +94,7 @@ impl<T: Trace> Drop for ArenaInternals<T> {
     }
 }
 
-unsafe impl<'o, 'n, 'r: 'n, O: NoGc + Immutable, N: NoGc + Immutable + 'r> Mark<'o, 'n, 'r, O, N>
+unsafe impl<'o, 'n, 'r: 'n, O: NoGc + Immutable + 'o, N: NoGc + Immutable + 'r> Mark<'o, 'n, 'r, O, N>
     for ArenaPrim<N>
 {
     #[inline(always)]

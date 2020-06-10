@@ -203,20 +203,18 @@ fn prevent_use_after_free() {
     let str1 = strs.gc_alloc(&*gced);
     let strs2: ArenaPrim<&String> = ArenaPrim::new();
     let _str2: Gc<&String> = strs2.mark(str1);
-    // drop(strings); //~ cannot move out of `strings` because it is borrowed
-    // let str3 = *str2;
+    drop(strings); //~ cannot move out of `strings` because it is borrowed
+    let str3 = *_str2;
 }
 
 #[test]
 fn prevent_use_after_free_correct() {
     let strings: ArenaPrim<String> = ArenaPrim::new();
     let gced = strings.gc_alloc(String::from("foo"));
-    let strs: ArenaPrim<String> = ArenaPrim::new();
-    let str1 = strs.mark(gced);
-    let strs2: ArenaPrim<&String> = ArenaPrim::new();
-    let str2 = strs2.mark(str1);
+    let strs: ArenaPrim<&String> = ArenaPrim::new();
+    let str1 = strs.gc_alloc(&*gced);
     drop(strings);
-    let _str3 = &*str2;
+    let _str3 = &*str1;
 }
 
 // Why did I think this is unsound without GAT Mark?

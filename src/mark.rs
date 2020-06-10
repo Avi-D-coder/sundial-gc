@@ -5,7 +5,7 @@ use std::ops::Range;
 /// The former will allow transmuting only lifetimes.
 /// The latter will make `assert_eq!(type_name::<O>(), type_name::<N>())` const.
 // https://github.com/rust-lang/rfcs/pull/2632.
-pub unsafe trait Mark<'o, 'n, 'r: 'n, O, N: 'r> {
+pub unsafe trait Mark<'o, 'n, 'r: 'n, O: 'o, N: 'r> {
     fn mark(&'n self, o: Gc<'o, O>) -> Gc<'r, N>;
 }
 
