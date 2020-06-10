@@ -29,9 +29,14 @@ pub struct ArenaInternals<T: Trace> {
     bus_idx: u8,
     pub grey_self: bool,
     pub grey_feilds: UnsafeCell<u8>,
-    pub header: *const Header<T>,
     pub white_region: Range<usize>,
     pub next: UnsafeCell<*mut T>,
+}
+
+impl<T: Trace> ArenaInternals<T> {
+    pub fn header(&self) -> &Header<T> {
+        unsafe { &*Header::from(*self.next.get() as *const _) }
+    }
 }
 
 #[repr(align(16384))]
@@ -136,7 +141,7 @@ const fn header_size<T>() -> usize {
 }
 
 /// Returns `header` and `next`.
-fn alloc_arena<T>() -> (*const Header<T>, *mut T) {
+fn alloc_arena<T>() -> *mut T {
     // Get more memory from system allocator
     let mem_ptr = unsafe { System.alloc(Layout::new::<Mem>()) };
     let mem_addr = mem_ptr as usize;
@@ -146,10 +151,7 @@ fn alloc_arena<T>() -> (*const Header<T>, *mut T) {
     );
 
     let capacity = (16384 - header_size::<T>()) / size_of::<T>();
-    (
-        mem_addr as *const _,
-        (mem_addr + (capacity * size_of::<T>())) as *mut T,
-    )
+    (mem_addr + (capacity * size_of::<T>())) as *mut T
 }
 
 impl<T: Trace> Arena<T> for ArenaInternals<T> {
@@ -178,25 +180,22 @@ impl<T: Trace> Arena<T> for ArenaInternals<T> {
             },
         )) = slot
         {
-            // FIXME make header a method
-            let header = ptr::null();
             let next = UnsafeCell::new(if let Some(n) = next {
                 n as *mut T
             } else {
-                alloc_arena::<T>().1
+                alloc_arena::<T>()
             });
 
             msgs[bus_idx] = Msg::Slot;
             ArenaInternals {
                 bus_idx: bus_idx as u8,
-                header,
                 next,
                 grey_self,
                 grey_feilds: UnsafeCell::new(grey_feilds),
                 white_region: white_start..white_end,
             }
         } else {
-            let (header, next) = alloc_arena::<T>();
+            let next = alloc_arena::<T>();
 
             let (bus_idx, slot) = msgs
                 .iter_mut()
@@ -210,7 +209,6 @@ impl<T: Trace> Arena<T> for ArenaInternals<T> {
 
             ArenaInternals {
                 bus_idx: bus_idx as u8,
-                header,
                 next: UnsafeCell::new(next),
                 grey_self: false,
                 grey_feilds: UnsafeCell::new(0b0000_0000),
@@ -240,6 +238,13 @@ pub struct Header<T> {
     // finalizers: TODO
     roots: usize,
     finalizers: usize,
+}
+
+impl<T> Header<T> {
+    pub fn from(ptr: *const T) -> *const Header<T> {
+        let offset = ptr as usize % 16384;
+        (ptr as usize - offset) as *const _
+    }
 }
 
 thread_local! {
