@@ -37,6 +37,15 @@ impl<T: Trace> ArenaInternals<T> {
     pub fn header(&self) -> &Header<T> {
         unsafe { &*Header::from(*self.next.get() as *const _) }
     }
+
+    pub fn capacity(&self) -> usize {
+        let next = unsafe { *self.next.get() } as usize;
+        (next - (self.header() as *const _ as usize + size_of::<Header<T>>())) / size_of::<T>()
+    }
+
+    pub fn full(&self) -> bool {
+        self.capacity() == 0
+    }
 }
 
 #[repr(align(16384))]
@@ -219,6 +228,9 @@ impl<T: Trace> Arena<T> for ArenaInternals<T> {
 
     fn gc_alloc<'a, 'r: 'a>(&'a self, t: T) -> Gc<'r, T> {
         unsafe {
+            if self.full() {
+                panic!("Growing `Arena`s not yet implemented")
+            }
             let ptr = *self.next.get();
             *self.next.get() = (ptr as usize - size_of::<T>()) as *mut _;
             ptr::write(ptr, t);
