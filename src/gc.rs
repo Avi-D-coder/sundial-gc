@@ -24,6 +24,12 @@ impl<'r, T> Deref for Gc<'r, T> {
     }
 }
 
+impl<'r, T> From<&'static T> for Gc<'r, T> {
+    fn from(t: &'static T) -> Self {
+        Gc { ptr: &*t }
+    }
+}
+
 unsafe impl<'r, T: 'r + Immutable + Trace> Trace for Gc<'r, T> {
     fn trace(_: usize) {}
     // A Gc<Gc<T>> is equvlent to Gc<T>
