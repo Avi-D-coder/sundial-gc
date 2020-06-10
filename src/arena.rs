@@ -25,9 +25,11 @@ pub struct ArenaGc<T: Trace> {
 pub struct ArenaInternals<T: Trace> {
     // TODO compact representation of arenas
     // TODO make all these private by wrapping up needed functionality.
-    pub header: *const Header<T>,
+    // TODO derive header from next
+    bus_idx: u8,
     pub grey_self: bool,
     pub grey_feilds: UnsafeCell<u8>,
+    pub header: *const Header<T>,
     pub white_region: Range<usize>,
     pub next: UnsafeCell<*mut T>,
 }
@@ -78,10 +80,15 @@ impl<T: Trace> Drop for ArenaInternals<T> {
         GC_BUS.with(|tm| {
             let tm = unsafe { &mut *tm.get() };
             tm.entry(key::<T>()).and_modify(|bus| {
-                let mut msg = bus.lock().unwrap();
-                msg.from_gc = false;
-                msg.worker_read = false;
-                msg.grey_feilds = unsafe { *self.grey_feilds.get() };
+                let mut msgs = bus.lock().unwrap();
+                msgs[self.bus_idx as usize] = Some(BusMsg {
+                    from_gc: false,
+                    mem_addr: self.header as usize,
+                    grey_feilds: unsafe { *self.grey_feilds.get() },
+                    // does not matter
+                    grey_self: true,
+                    white_region: (0, 1),
+                });
             });
         });
     }
@@ -134,6 +141,56 @@ impl<T: Trace> Arena<T> for ArenaInternals<T> {
     fn new() -> ArenaInternals<T> {
         let bus = GC_BUS.with(|tm| {
             let tm = unsafe { &mut *tm.get() };
+            tm.entry(key::<T>())
+                .or_insert_with(|| Box::new(Mutex::new([None; 8])))
+        });
+
+        let mut msgs = bus.lock().expect("Could not unlock bus");
+        let slot = msgs
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, o)| {
+                if let Some(m) = o {
+                    if m.from_gc {
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            })
+            .next();
+
+        if let Some((
+            bus_idx,
+            &mut Some(BusMsg {
+                mem_addr,
+                grey_self,
+                grey_feilds,
+                white_region,
+                ..
+            }),
+        )) = slot
+        {
+            msgs[bus_idx] = None;
+            let capacity = (16384 - header_size::<T>()) / size_of::<T>();
+            ArenaInternals {
+                bus_idx: bus_idx as u8,
+                header: mem_addr as *const Header<T>,
+                next: UnsafeCell::new((mem_addr + (capacity * size_of::<T>())) as *mut T),
+                grey_self,
+                grey_feilds: UnsafeCell::new(grey_feilds),
+                white_region: white_region.0..white_region.1,
+            }
+        } else {
+            // Get more memory from system allocator
+            let (bus_idx, slot) = msgs
+                .iter()
+                .enumerate()
+                .filter(|(_, o)| o.is_none())
+                .next()
+                .expect("No space on bus left. Extending the bus not yet supported.");
             let mem_ptr = unsafe { System.alloc(Layout::new::<Mem>()) };
             let mem_addr = mem_ptr as usize;
             debug_assert!(
@@ -141,33 +198,17 @@ impl<T: Trace> Arena<T> for ArenaInternals<T> {
                     < unsafe { &std::mem::transmute::<_, &Mem>(mem_ptr)._mem[16383] } as *const _
                         as usize
             );
-            tm.entry(key::<T>()).or_insert_with(|| {
-                Box::new(Mutex::new(BusMsg {
-                    from_gc: true,
-                    worker_read: false,
-                    mem_addr,
-                    grey_self: false,
-                    grey_feilds: 0b0000_0000,
-                    white_region: 0..1,
-                }))
-            })
-        });
 
-        let mut msg = bus.lock().expect("Could not unlock bus");
-        if msg.from_gc && !msg.worker_read {
-            msg.worker_read = true;
-            // TODO const assert layout details
+            // TODO send start message
             let capacity = (16384 - header_size::<T>()) / size_of::<T>();
             ArenaInternals {
-                header: msg.mem_addr as *const Header<T>,
-                next: UnsafeCell::new((msg.mem_addr + (capacity * size_of::<T>())) as *mut T),
-                grey_self: msg.grey_self,
-                grey_feilds: UnsafeCell::new(msg.grey_feilds),
-                white_region: msg.white_region.clone(),
+                bus_idx: bus_idx as u8,
+                header: mem_addr as *const Header<T>,
+                next: UnsafeCell::new((mem_addr + (capacity * size_of::<T>())) as *mut T),
+                grey_self: false,
+                grey_feilds: UnsafeCell::new(0b0000_0000),
+                white_region: 0..1,
             }
-        } else {
-            // TODO
-            panic!("Multiple Arena<T>s per thread not yet supported");
         }
     }
 
@@ -196,7 +237,8 @@ pub struct Header<T> {
 
 thread_local! {
     /// Map from type to GC communication bus.
-    static GC_BUS: UnsafeCell<HashMap<(GcTypeInfo, usize), Box<Mutex<BusMsg>>>> = UnsafeCell::new(HashMap::new());
+    static GC_BUS: UnsafeCell<HashMap<(GcTypeInfo, usize), Box<Mutex<[Option<BusMsg>; 8]>>>>
+        = UnsafeCell::new(HashMap::new());
 }
 
 fn key<T: Trace>() -> (GcTypeInfo, usize) {
@@ -209,9 +251,9 @@ fn key<T: Trace>() -> (GcTypeInfo, usize) {
 // TODO replace with atomic 64 byte header encoding.
 // Plus variable length condemned region messages.
 // TODO allow multiple messages and therefore Arenas of T.
+#[derive(Debug, Copy, Clone)]
 pub struct BusMsg {
     pub from_gc: bool,
-    pub worker_read: bool,
     pub mem_addr: usize,
     /// Is a Self Arena being condemned.
     grey_self: bool,
@@ -219,7 +261,8 @@ pub struct BusMsg {
     /// Only 8 GCed fields per struct are supported.
     /// TODO do enums with GCed fields count as one (conservative), or N fields.
     /// TODO unpack bits from composite types tuples, inline structs, enums.
-    pub grey_feilds: u8,
+    grey_feilds: u8,
     /// TODO support multiple field specific regions in future encoding
-    pub white_region: Range<usize>,
+    /// Equivalents to Range<usize>. It's a tuple so it implements Copy
+    white_region: (usize, usize),
 }
