@@ -195,76 +195,77 @@ fn churn() {
     let _ = *foo2._bar + 1usize;
 }
 
-#[test]
-fn prevent_use_after_free() {
-    let strings: ArenaPrim<String> = ArenaPrim::new();
-    let gced = strings.gc_alloc(String::from("foo"));
-    let strs: ArenaPrim<&String> = ArenaPrim::new();
-    let str1 = strs.gc_alloc(&*gced);
-    let strs2: ArenaPrim<&String> = ArenaPrim::new();
-    let _str2: Gc<&String> = strs2.mark(str1);
-    drop(strings); //~ cannot move out of `strings` because it is borrowed
-    let str3 = *_str2;
-}
+// TODO &T: Trace cannot be added soundly until GAT lands.
+// In The mean time use Gc::from(&'static T)
 
-#[test]
-fn prevent_use_after_free_correct() {
-    let strings: ArenaPrim<String> = ArenaPrim::new();
-    let gced = strings.gc_alloc(String::from("foo"));
-    let strs: ArenaPrim<&String> = ArenaPrim::new();
-    let str1 = strs.gc_alloc(&*gced);
-    drop(strings);
-    let _str3 = &*str1;
-}
+// #[test]
+// fn prevent_use_after_free() {
+//     let strings: ArenaPrim<String> = ArenaPrim::new();
+//     let gced = strings.gc_alloc(String::from("foo"));
+//     let strs: ArenaPrim<&String> = ArenaPrim::new();
+//     let str1 = strs.gc_alloc(&*gced);
+//     let strs2: ArenaPrim<&String> = ArenaPrim::new();
+//     let _str2: Gc<&String> = strs2.mark(str1);
+//     drop(strings); //~ cannot move out of `strings` because it is borrowed
+//     let str3 = *_str2;
+// }
 
-// Why did I think this is unsound without GAT Mark?
-#[test]
-fn hidden_lifetime_test() {
-    struct Bar<'b> {
-        _b: &'b str,
-    }
-    struct Foo2<'a, 'b> {
-        _bar: Option<Gc<'a, Bar<'b>>>,
-    }
+// #[test]
+// fn prevent_use_after_free_correct() {
+//     let strings: ArenaPrim<String> = ArenaPrim::new();
+//     let gced = strings.gc_alloc(String::from("foo"));
+//     let strs: ArenaPrim<&String> = ArenaPrim::new();
+//     let str1 = strs.gc_alloc(&*gced);
+//     drop(strings);
+//     let _str3 = &*str1;
+// }
 
-    // This may not be trivail to implement as a proc macro
-    unsafe impl<'a, 'b: 'a> Trace for Foo2<'a, 'b> {
-        fn trace(_: usize) {}
-        const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-        const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] =
-            GcTypeInfo::one_child::<Gc<'a, Bar<'b>>>();
-        fn trace_transitive_type_info(tti: &mut Tti) {
-            tti.add_direct::<Self>();
-            tti.add_trans(Gc::<'a, Bar<'b>>::trace_transitive_type_info);
-        }
-    }
+// #[test]
+// fn hidden_lifetime_test() {
+//     struct Bar<'b> {
+//         _b: &'b str,
+//     }
+//     struct Foo2<'a, 'b> {
+//         _bar: Option<Gc<'a, Bar<'b>>>,
+//     }
 
-    unsafe impl<'o, 'n, 'r: 'n, 'b> Mark<'o, 'n, 'r, Foo2<'o, 'b>, Foo2<'r, 'b>>
-        for ArenaGc<Foo2<'r, 'b>>
-    {
-        fn mark(&'n self, o: Gc<'o, Foo2<'o, 'b>>) -> Gc<'r, Foo2<'r, 'b>> {
-            // TODO fillout
-            unsafe { std::mem::transmute(o) }
-        }
-    }
+//     // This may not be trivail to implement as a proc macro
+//     unsafe impl<'a, 'b: 'a> Trace for Foo2<'a, 'b> {
+//         fn trace(_: usize) {}
+//         const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
+//         const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] =
+//             GcTypeInfo::one_child::<Gc<'a, Bar<'b>>>();
+//         fn trace_transitive_type_info(tti: &mut Tti) {
+//             tti.add_direct::<Self>();
+//             tti.add_trans(Gc::<'a, Bar<'b>>::trace_transitive_type_info);
+//         }
+//     }
 
-    // TODO This errors now in an unexpectec place.
-    // There should be an error, triggered by drop
-    let string = String::from("bar");
-    let foos = ArenaGc::new();
-    let bars = ArenaPrim::new();
-    let _b = &*string;
-    let foo = foos.gc_alloc(Foo2 {
-        _bar: Some(bars.gc_alloc(Bar { _b })),
-    });
+//     unsafe impl<'o, 'n, 'r: 'n, 'b> Mark<'o, 'n, 'r, Foo2<'o, 'b>, Foo2<'r, 'b>>
+//         for ArenaGc<Foo2<'r, 'b>>
+//     {
+//         fn mark(&'n self, o: Gc<'o, Foo2<'o, 'b>>) -> Gc<'r, Foo2<'r, 'b>> {
+//             // TODO fillout
+//             unsafe { std::mem::transmute(o) }
+//         }
+//     }
 
-    let foos2 = ArenaGc::new();
-    let foo2 = foos2.mark(foo);
-    drop(foos);
-    drop(bars);
-    // drop(string); //~ cannot move out of `string` because it is borrowed
-    let _: Option<&str> = foo2._bar.as_ref().map(|b| b._b);
-}
+//     // There should be an error, triggered by drop
+//     let string = String::from("bar");
+//     let foos = ArenaGc::new();
+//     let bars = ArenaPrim::new();
+//     let _b = &*string;
+//     let foo = foos.gc_alloc(Foo2 {
+//         _bar: Some(bars.gc_alloc(Bar { _b })),
+//     });
+
+//     let foos2 = ArenaGc::new();
+//     let foo2 = foos2.mark(foo);
+//     drop(foos);
+//     drop(bars);
+//     // drop(string); //~ cannot move out of `string` because it is borrowed
+//     let _: Option<&str> = foo2._bar.as_ref().map(|b| b._b);
+// }
 
 #[test]
 fn immutable_test() {
