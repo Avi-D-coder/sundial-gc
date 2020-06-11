@@ -347,7 +347,7 @@ impl Msg {
         }
     }
 
-    fn is_gc(&self) -> bool {
+    pub fn is_gc(&self) -> bool {
         match self {
             Msg::Gc { .. } => true,
             _ => false,

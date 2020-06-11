@@ -13,14 +13,19 @@ pub(crate) static mut REGISTER: Option<Sender<RegMsg>> = None;
 pub(crate) struct TypeInfo {
     info: GcTypeInfo,
     drop_ptr: fn(*mut u8),
-    ptr: *const Bus,
 }
 
 unsafe impl Send for TypeInfo {}
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Copy, Clone)]
+pub(crate) struct BusPtr(&'static Bus);
+
+unsafe impl Send for BusPtr {}
+unsafe impl Sync for BusPtr {}
+
+#[derive(Copy, Clone)]
 pub(crate) enum RegMsg {
-    Reg(ThreadId, TypeInfo),
+    Reg(ThreadId, TypeInfo, BusPtr),
     Un(ThreadId, TypeInfo),
 }
 
@@ -31,33 +36,50 @@ fn start() -> Sender<RegMsg> {
 }
 
 fn gc_loop(r: Receiver<RegMsg>) {
-    let mut types: HashMap<TypeInfo, HashMap<ThreadId, *const Bus>> = HashMap::new();
+    let mut types: HashMap<TypeInfo, HashMap<ThreadId, BusPtr>> = HashMap::new();
     // Key is 16 kB aligned Arena, value is `Arena.next`.
-    let mut mem: BTreeMap<usize, *const u8>;
+    // TODO This will not work once we are freeing regions containing multiple arenas.
+    // Regions must be contiguous, since Gc.ptr may be a &'static T.
+    // To fix this, we should probably differentiate between Gc<T> and &'static T.
+    let mut mem: BTreeMap<usize, (*const u8, TypeInfo)> = BTreeMap::new();
 
     loop {
         for msg in r.try_iter() {
             match msg {
-                RegMsg::Reg(id, ty) => {
+                RegMsg::Reg(id, ty, bus) => {
                     let buses = types.entry(ty).or_insert(HashMap::new());
                     buses
                         .entry(id)
                         .and_modify(|_| {
                             panic!("Impossible: The same type and thread was registered twice")
                         })
-                        .or_insert(ty.ptr);
+                        .or_insert(bus);
                 }
                 RegMsg::Un(id, ty) => {
                     // The thread was dropped
-                    let buses = types.get_mut(&ty).expect("Impossible: Freed bus of type without an buses");
-                    let bus = buses.get(&id).expect("Impossible: Freed thread's bus that does not exist");
-                    let bus = unsafe { &**bus };
-                    let bus = bus.lock().expect("Could not unlock freed bus");
-                    // bus.iter
+                    let buses = types
+                        .get_mut(&ty)
+                        .expect("Impossible: Freed bus of type without an buses");
+                    let bus = buses
+                        .get(&id)
+                        .expect("Impossible: Freed thread's bus that does not exist");
+                    let bus = bus.0.lock().expect("Could not unlock freed bus");
 
+                    for m in bus.iter() {
+                        if let Msg::End {
+                            next,
+                            grey_feilds,
+                            white_start,
+                            white_end,
+                            ..
+                        } = m
+                        {
+                            mem.insert(Header::from(next) as usize, (*next, ty));
+                        }
+                    }
 
                     buses.remove(&id);
-                },
+                }
             }
         }
 

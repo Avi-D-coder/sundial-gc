@@ -23,11 +23,11 @@ unsafe impl<T: Immutable> Trace for T {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GcTypeInfo {
-    trace_ptr: fn(usize),
-    tti_ptr: fn(*mut Tti),
-    needs_drop: bool,
-    byte_size: u16,
-    alignment: u16,
+    pub(crate) trace_ptr: fn(usize),
+    pub(crate) tti_ptr: fn(*mut Tti),
+    pub(crate) needs_drop: bool,
+    pub(crate) byte_size: u16,
+    pub(crate) alignment: u16,
 }
 
 impl GcTypeInfo {
