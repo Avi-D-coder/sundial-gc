@@ -288,12 +288,14 @@ impl<T> Header<T> {
     }
 }
 
+pub(crate) type Bus = Mutex<[Msg; 8]>;
+
 thread_local! {
     /// Map from type to GC communication bus.
     /// `ArenaInternals.next` from an `Msg::End` with excise capacity.
     /// Cached invariant from last `Msg::Gc`.
     static GC_BUS: UnsafeCell<
-        HashMap<(GcTypeInfo, usize), Box<((Option<*mut u8>, GcInvariant), Mutex<[Msg; 8]>)>>,
+        HashMap<(GcTypeInfo, usize), Box<((Option<*mut u8>, GcInvariant), Bus)>>,
     > = UnsafeCell::new(HashMap::new());
 }
 
@@ -307,7 +309,7 @@ fn key<T: Trace>() -> (GcTypeInfo, usize) {
 // TODO replace with atomic 64 byte header encoding.
 // Plus variable length condemned region messages.
 #[derive(Debug, Copy, Clone)]
-enum Msg {
+pub(crate) enum Msg {
     Slot,
     /// The `mem_addr` of the area
     Start {

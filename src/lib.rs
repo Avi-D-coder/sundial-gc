@@ -19,6 +19,7 @@ pub mod auto_traits;
 pub mod gc;
 pub mod mark;
 pub mod trace;
+mod gc_logic;
 
 use gc::*;
 use mark::*;
