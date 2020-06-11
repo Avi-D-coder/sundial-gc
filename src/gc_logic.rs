@@ -32,6 +32,8 @@ fn start() -> Sender<RegMsg> {
 
 fn gc_loop(r: Receiver<RegMsg>) {
     let mut types: HashMap<TypeInfo, HashMap<ThreadId, *const Bus>> = HashMap::new();
+    // Key is 16 kB aligned Arena, value is `Arena.next`.
+    let mut mem: BTreeMap<usize, *const u8>;
 
     loop {
         for msg in r.try_iter() {
@@ -51,7 +53,7 @@ fn gc_loop(r: Receiver<RegMsg>) {
                     let bus = buses.get(&id).expect("Impossible: Freed thread's bus that does not exist");
                     let bus = unsafe { &**bus };
                     let bus = bus.lock().expect("Could not unlock freed bus");
-                    // TODO retrieve mem
+                    // bus.iter
 
 
                     buses.remove(&id);

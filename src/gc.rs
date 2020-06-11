@@ -35,7 +35,8 @@ unsafe impl<'r, T: 'r + Immutable + Trace> Trace for Gc<'r, T> {
     // A Gc<Gc<T>> is equvlent to Gc<T>
     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<T>();
     const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = T::TRACE_CHILD_TYPE_INFO;
-    fn trace_transitive_type_info(tti: &mut Tti) {
+    fn trace_transitive_type_info(tti: *mut Tti) {
+        let tti = unsafe { &mut *tti };
         tti.add_direct::<Self>();
         T::trace_transitive_type_info(tti)
     }

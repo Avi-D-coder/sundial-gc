@@ -40,7 +40,8 @@ unsafe impl<'r, T: 'r + Trace + Immutable> Trace for List<'r, T> {
         None,
     ];
 
-    default fn trace_transitive_type_info(tti: &mut Tti) {
+    default fn trace_transitive_type_info(tti: *mut Tti) {
+        let tti = unsafe { &mut *tti };
         tti.add_direct::<Self>();
         tti.add_trans(T::trace_transitive_type_info);
         tti.add_trans(Option::<Gc<'r, List<'r, T>>>::trace_transitive_type_info);
@@ -61,7 +62,8 @@ unsafe impl<'r, T: 'r + Trace + Immutable + NoGc> Trace for List<'r, T> {
         None,
     ];
 
-    fn trace_transitive_type_info(tti: &mut Tti) {
+    fn trace_transitive_type_info(tti: *mut Tti) {
+        let tti = unsafe { &mut *tti };
         tti.add_direct::<Self>();
         tti.add_trans(Option::<Gc<'r, List<'r, T>>>::trace_transitive_type_info);
     }
@@ -160,7 +162,8 @@ unsafe impl<'r> Trace for Foo<'r> {
     fn trace(_: usize) {}
     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
     const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = GcTypeInfo::one_child::<Gc<'r, usize>>();
-    fn trace_transitive_type_info(tti: &mut Tti) {
+    fn trace_transitive_type_info(tti: *mut Tti) {
+        let tti = unsafe { &mut *tti };
         tti.add_direct::<Self>();
         tti.add_trans(Gc::<'r, usize>::trace_transitive_type_info);
     }
