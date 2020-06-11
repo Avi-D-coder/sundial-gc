@@ -29,6 +29,12 @@ pub(crate) enum RegMsg {
     Un(ThreadId, TypeInfo),
 }
 
+struct Invariant {
+    white_start: usize,
+    white_end: usize,
+    grey_feilds: u8,
+}
+
 fn start() -> Sender<RegMsg> {
     let (s, r) = channel();
     thread::spawn(move || gc_loop(r));
@@ -42,6 +48,8 @@ fn gc_loop(r: Receiver<RegMsg>) {
     // Regions must be contiguous, since Gc.ptr may be a &'static T.
     // To fix this, we should probably differentiate between Gc<T> and &'static T.
     let mut mem: BTreeMap<usize, (*const u8, TypeInfo)> = BTreeMap::new();
+    // Map between `Arena.next` and the invariant the section of the Msg::End..End Arena upheld.
+    let mut arena_invariants: HashMap<TypeInfo, BTreeMap<*const u8, Invariant>> = HashMap::new();
 
     loop {
         for msg in r.try_iter() {
@@ -65,6 +73,8 @@ fn gc_loop(r: Receiver<RegMsg>) {
                         .expect("Impossible: Freed thread's bus that does not exist");
                     let bus = bus.0.lock().expect("Could not unlock freed bus");
 
+                    let inv = arena_invariants.entry(ty);
+
                     for m in bus.iter() {
                         if let Msg::End {
                             next,
@@ -75,6 +85,7 @@ fn gc_loop(r: Receiver<RegMsg>) {
                         } = m
                         {
                             mem.insert(Header::from(next) as usize, (*next, ty));
+                            // TODO
                         }
                     }
 
