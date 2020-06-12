@@ -151,8 +151,5 @@ unsafe impl<T: Immutable + Trace> Trace for Box<T> {
 unsafe impl<T: Immutable + Trace + NoGc> Trace for Box<T> {
     fn trace(_: usize) {}
     const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
-    fn trace_transitive_type_info(tti: *mut Tti) {
-        let tti = unsafe { &mut *tti };
-        tti.add_trans(T::trace_transitive_type_info);
-    }
+    fn trace_transitive_type_info(_: *mut Tti) {}
 }
