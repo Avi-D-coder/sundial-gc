@@ -75,9 +75,9 @@ impl Tti {
         }
     }
 
-    pub fn add_direct<T: Trace>(&mut self) {
-        self.type_info
-            .extend(T::TRACE_CHILD_TYPE_INFO.iter().filter_map(|o| *o));
+    /// Gc is the only type that adds it's self.
+    pub fn add_gc<T: Trace>(&mut self) {
+        self.type_info.insert(GcTypeInfo::new::<T>());
     }
 
     pub fn add_trans(&mut self, tti: fn(*mut Tti)) {
@@ -127,10 +127,9 @@ unsafe impl<T: Immutable + Trace> Trace for Box<T> {
 unsafe impl<T: Immutable + Trace + NoGc> Trace for Box<T> {
     fn trace(_: usize) {}
     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = GcTypeInfo::one_child::<T>();
+    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
     fn trace_transitive_type_info(tti: *mut Tti) {
         let tti = unsafe { &mut *tti };
-        tti.add_direct::<Self>();
         tti.add_trans(T::trace_transitive_type_info);
     }
 }

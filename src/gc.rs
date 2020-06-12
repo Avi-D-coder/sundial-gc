@@ -35,14 +35,9 @@ unsafe impl<'r, T: 'r + Trace> Trace for Gc<'r, T> {
     // A Gc<Gc<T>> is equvlent to Gc<T>
     const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<T>();
     const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
-    /// Gc<T> is indirect.
-    fn trace_direct_type_info(dti: *mut Tti) {
-        let dti = unsafe { &mut *dti };
-        dti.add_direct::<Self>();
-    }
     fn trace_transitive_type_info(tti: *mut Tti) {
         let tti = unsafe { &mut *tti };
-        tti.add_direct::<Self>();
+        tti.add_gc::<Self>();
         T::trace_transitive_type_info(tti)
     }
 }
