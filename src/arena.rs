@@ -301,7 +301,7 @@ thread_local! {
 
 fn key<T: Trace>() -> (GcTypeInfo, usize) {
     (
-        T::TRACE_TYPE_INFO,
+        GcTypeInfo::new::<T>(),
         ptr::drop_in_place::<T> as *const fn(*mut T) as usize,
     )
 }

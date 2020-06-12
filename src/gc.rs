@@ -33,7 +33,6 @@ impl<'r, T> From<&'static T> for Gc<'r, T> {
 unsafe impl<'r, T: 'r + Trace> Trace for Gc<'r, T> {
     fn trace(_: usize) {}
     // A Gc<Gc<T>> is equvlent to Gc<T>
-    const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<T>();
     const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
     fn trace_transitive_type_info(tti: *mut Tti) {
         let tti = unsafe { &mut *tti };

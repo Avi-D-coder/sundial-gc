@@ -6,9 +6,7 @@ use std::ops::Deref;
 
 pub unsafe trait Trace {
     fn trace(t: usize);
-    const TRACE_TYPE_INFO: GcTypeInfo;
     const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8];
-    fn trace_direct_type_info(dti: *mut Tti);
     fn trace_transitive_type_info(tti: *mut Tti);
 }
 
@@ -17,9 +15,7 @@ pub unsafe trait Trace {
 // If you only implement Mark and not Trace CHILD_TYPE_INFO will all be const None
 unsafe impl<T: Immutable> Trace for T {
     default fn trace(_: usize) {}
-    default const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
     default const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
-    default fn trace_direct_type_info(_: *mut Tti) {}
     default fn trace_transitive_type_info(_: *mut Tti) {}
 }
 
@@ -27,7 +23,6 @@ unsafe impl<T: Immutable> Trace for T {
 pub struct GcTypeInfo {
     pub(crate) trace_ptr: fn(usize),
     pub(crate) tti_ptr: fn(*mut Tti),
-    pub(crate) dti_ptr: fn(*mut Tti),
     pub(crate) child_gc_info: *const [Option<GcTypeInfo>; 8],
     pub(crate) needs_drop: bool,
     pub(crate) byte_size: u16,
@@ -39,7 +34,6 @@ impl GcTypeInfo {
         Self {
             trace_ptr: T::trace,
             tti_ptr: T::trace_transitive_type_info,
-            dti_ptr: T::trace_direct_type_info,
             child_gc_info: &T::TRACE_CHILD_TYPE_INFO as *const _,
             needs_drop: needs_drop::<T>(),
             byte_size: size_of::<T>() as u16,
@@ -95,12 +89,7 @@ unsafe impl<'r, T: Immutable + Trace> Trace for Option<T> {
             T::trace(t as *const T as usize)
         }
     }
-    default const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
     default const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = GcTypeInfo::one_child::<T>();
-    default fn trace_direct_type_info(dti: *mut Tti) {
-        let dti = unsafe { &mut *dti };
-        dti.add_trans(T::trace_transitive_type_info);
-    }
     default fn trace_transitive_type_info(tti: *mut Tti) {
         let tti = unsafe { &mut *tti };
         tti.add_trans(T::trace_transitive_type_info);
@@ -108,9 +97,9 @@ unsafe impl<'r, T: Immutable + Trace> Trace for Option<T> {
 }
 
 unsafe impl<'r, T: Immutable + Trace + NoGc> Trace for Option<T> {
-    fn trace(_: usize) {}
-    const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
-    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
+    default fn trace(_: usize) {}
+    default const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
+    default fn trace_transitive_type_info(_: *mut Tti) {}
 }
 
 unsafe impl<T: Immutable + Trace> Trace for Box<T> {
@@ -118,15 +107,15 @@ unsafe impl<T: Immutable + Trace> Trace for Box<T> {
         let t = unsafe { &*(b as *const Self) }.deref();
         T::trace(t as *const T as usize)
     }
-    default const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
     default const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
-    default fn trace_direct_type_info(_: *mut Tti) {}
-    default fn trace_transitive_type_info(_: *mut Tti) {}
+    default fn trace_transitive_type_info(tti: *mut Tti) {
+        let tti = unsafe { &mut *tti };
+        tti.add_trans(T::trace_transitive_type_info);
+    }
 }
 
 unsafe impl<T: Immutable + Trace + NoGc> Trace for Box<T> {
     fn trace(_: usize) {}
-    const TRACE_TYPE_INFO: GcTypeInfo = GcTypeInfo::new::<Self>();
     const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
     fn trace_transitive_type_info(tti: *mut Tti) {
         let tti = unsafe { &mut *tti };
