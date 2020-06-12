@@ -1,6 +1,6 @@
 use super::auto_traits::*;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::mem::*;
 use std::ops::Deref;
 
@@ -25,6 +25,7 @@ pub struct GcTypeInfo {
     pub(crate) tti_ptr: fn(*mut Tti),
     pub(crate) child_gc_info: *const [Option<GcTypeInfo>; 8],
     pub(crate) needs_drop: bool,
+    pub(crate) is_gc: bool,
     pub(crate) byte_size: u16,
     pub(crate) alignment: u16,
 }
@@ -36,6 +37,7 @@ impl GcTypeInfo {
             tti_ptr: T::trace_transitive_type_info,
             child_gc_info: &T::TRACE_CHILD_TYPE_INFO as *const _,
             needs_drop: needs_drop::<T>(),
+            is_gc: T::IS_GC,
             byte_size: size_of::<T>() as u16,
             alignment: align_of::<T>() as u16,
         }
@@ -79,6 +81,38 @@ impl Tti {
             tti(self)
         }
     }
+}
+
+pub fn direct_gced(ti: GcTypeInfo, gced: &mut HashMap<GcTypeInfo, u8>) {
+    for (field, ti) in unsafe { *ti.child_gc_info }
+        .iter()
+        .filter_map(|o| *o)
+        .enumerate()
+    {
+        if ti.is_gc {
+            let bset = gced.entry(ti).or_insert(0b0000_0000);
+            // Condemed logic must match
+            *bset |= 1 << (field as u8);
+        } else {
+            for ti in unsafe { *ti.child_gc_info }.iter().filter_map(|o| *o) {
+                direct_gced(ti, gced)
+            }
+        }
+    }
+}
+
+// TODO test direct_gced
+
+trait IsGc {
+    const IS_GC: bool;
+}
+
+impl<T> IsGc for T {
+    default const IS_GC: bool = false;
+}
+
+impl<'r, T> IsGc for super::Gc<'r, T> {
+    const IS_GC: bool = false;
 }
 
 /// # std impls
