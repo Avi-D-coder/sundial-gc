@@ -1,7 +1,6 @@
 use super::arena::*;
 use super::trace::*;
 
-use lazy_static::lazy_static;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{mpsc, mpsc::*, Mutex};
 use std::thread::{self, ThreadId};
