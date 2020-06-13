@@ -60,7 +60,7 @@ impl GcTypeInfo {
 pub struct Tti {
     /// Holds fn ptr of trace_transitive_type_info calls
     parrents: HashSet<usize>,
-    type_info: HashSet<GcTypeInfo>,
+    pub type_info: HashSet<GcTypeInfo>,
 }
 
 impl Tti {
