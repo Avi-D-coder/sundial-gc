@@ -41,8 +41,6 @@ type Parents = HashMap<GcTypeInfo, HashSet<GcTypeInfo>>;
 struct TypeState {
     type_info: TypeInfo,
     /// Map Type to Bit
-    direct_parents: HashSet<GcTypeInfo>,
-    transitive_parrents: HashSet<GcTypeInfo>,
     buses: HashMap<ThreadId, BusPtr>,
     // Map between `Arena.next` and the invariant the section of the Msg::End..End Arena upheld.
     invariants: BTreeMap<*const u8, Invariant>,
@@ -56,18 +54,18 @@ impl TypeState {
         transitive_parrents: &mut Parents,
     ) -> Self {
         let mut direct_children: HashMap<GcTypeInfo, u8> = HashMap::new();
-        direct_gced(type_info.info, &mut HashMap::new());
-        direct_children.iter().map(|(child, _)| {
+        direct_gced(type_info.info, &mut direct_children);
+        direct_children.iter().for_each(|(child, _)| {
             let cp = direct_parents.entry(*child).or_insert(HashSet::new());
-            cp.insert(type_info.info)
+            cp.insert(type_info.info);
         });
 
         let mut tti = Tti::new();
         let tti_fn = type_info.info.tti_ptr;
         tti_fn(&mut tti as *mut Tti);
-        tti.type_info.iter().map(|child| {
-            let cp = direct_parents.entry(*child).or_insert(HashSet::new());
-            cp.insert(type_info.info)
+        tti.type_info.iter().for_each(|child| {
+            let cp = transitive_parrents.entry(*child).or_insert(HashSet::new());
+            cp.insert(type_info.info);
         });
 
         todo!()
