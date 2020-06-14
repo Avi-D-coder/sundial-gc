@@ -35,7 +35,19 @@ struct Invariant {
     grey_feilds: u8,
 }
 
-type Parents = HashMap<GcTypeInfo, HashSet<GcTypeInfo>>;
+struct Parents {
+    direct: HashMap<GcTypeInfo, u8>,
+    transitive: HashSet<GcTypeInfo>,
+}
+
+impl Default for Parents {
+    fn default() -> Self {
+        Parents {
+            direct: HashMap::new(),
+            transitive: HashSet::new(),
+        }
+    }
+}
 
 /// This whole struct is unsafe!
 struct TypeState {
@@ -47,46 +59,58 @@ struct TypeState {
     current_invariant: Option<Invariant>,
 }
 
-impl TypeState {
-    pub fn new(
-        type_info: TypeInfo,
-        direct_parents: &mut Parents,
-        transitive_parrents: &mut Parents,
-    ) -> Self {
-        let mut direct_children: HashMap<GcTypeInfo, u8> = HashMap::new();
-        direct_gced(type_info.info, &mut direct_children);
-        direct_children.iter().for_each(|(child, _)| {
-            let cp = direct_parents.entry(*child).or_insert(HashSet::new());
-            cp.insert(type_info.info);
-        });
-
-        let mut tti = Tti::new();
-        let tti_fn = type_info.info.tti_ptr;
-        tti_fn(&mut tti as *mut Tti);
-        tti.type_info.iter().for_each(|child| {
-            let cp = transitive_parrents.entry(*child).or_insert(HashSet::new());
-            cp.insert(type_info.info);
-        });
-
-        todo!()
-        // Self {
-        //     type_info,
-        //     direct_children,
-        // }
-    }
+struct TypeRelations {
+    active: HashMap<GcTypeInfo, TypeState>,
+    parents: HashMap<GcTypeInfo, Parents>,
+    /// Key is 16 kB aligned Arena, value is `Arena.next`.
+    /// TODO This will not work once we are freeing regions containing multiple arenas.
+    /// Regions must be contiguous, since Gc.ptr may be a &'static T.
+    /// To fix this, we should probably differentiate between Gc<T> and &'static
+    mem: BTreeMap<usize, (*const u8, TypeInfo)>,
 }
 
-// struct TypeRelations {
-//     direct_parents: HashMap<GcTypeInfo, HashSet<GcTypeInfo>>
-// }
+impl TypeRelations {
+    pub fn new() -> Self {
+        Self {
+            active: HashMap::new(),
+            parents: HashMap::new(),
+            mem: BTreeMap::new(),
+        }
+    }
 
-// impl TypeRelations {
-//     pub fn new(ti: GcTypeInfo) -> Self {
-//         Self {
-//             direct_parents:
-//         }
-//     }
-// }
+    fn reg(&mut self, type_info: TypeInfo, t_id: ThreadId, bus: BusPtr) {
+        let Self {
+            active,
+            parents,
+            mem,
+        } = self;
+        let ts = active.entry(type_info.info).or_insert_with(|| {
+            let mut direct_children: HashMap<GcTypeInfo, u8> = HashMap::new();
+            direct_gced(type_info.info, &mut direct_children);
+            direct_children.iter().for_each(|(child, bit)| {
+                let cp = parents.entry(*child).or_default();
+                cp.direct.insert(type_info.info, *bit);
+            });
+
+            let mut tti = Tti::new();
+            let tti_fn = type_info.info.tti_ptr;
+            tti_fn(&mut tti as *mut Tti);
+            tti.type_info.iter().for_each(|child| {
+                let cp = parents.entry(*child).or_default();
+                cp.transitive.insert(type_info.info);
+            });
+
+            TypeState {
+                type_info,
+                buses: HashMap::new(),
+                invariants: BTreeMap::new(),
+                current_invariant: None,
+            }
+        });
+
+        ts.buses.insert(t_id, bus);
+    }
+}
 
 fn start() -> Sender<RegMsg> {
     let (s, r) = channel();
@@ -97,11 +121,6 @@ fn start() -> Sender<RegMsg> {
 fn gc_loop(r: Receiver<RegMsg>) {
     let mut types: HashMap<GcTypeInfo, TypeInfo> = HashMap::new();
     let mut type_states: HashMap<GcTypeInfo, TypeState> = HashMap::new();
-    // Key is 16 kB aligned Arena, value is `Arena.next`.
-    // TODO This will not work once we are freeing regions containing multiple arenas.
-    // Regions must be contiguous, since Gc.ptr may be a &'static T.
-    // To fix this, we should probably differentiate between Gc<T> and &'static T.
-    let mut mem: BTreeMap<usize, (*const u8, TypeInfo)> = BTreeMap::new();
 
     loop {
         for msg in r.try_iter() {
