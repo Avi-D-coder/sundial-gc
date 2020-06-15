@@ -40,7 +40,7 @@ impl<T: Trace> ArenaInternals<T> {
 
     pub fn capacity(&self) -> usize {
         let next = unsafe { *self.next.get() } as usize;
-        (next - (self.header() as *const _ as usize + size_of::<Header<T>>())) / size_of::<T>()
+        (next - (self.header() as *const _ as usize + header_size::<T>())) / size_of::<T>()
     }
 
     pub fn full(&self) -> bool {

@@ -2,11 +2,14 @@ use super::arena::*;
 use super::trace::*;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::{mpsc, mpsc::*, Mutex};
+use std::mem;
+use std::sync::{mpsc::*, Mutex};
 use std::thread::{self, ThreadId};
 use std::time::Duration;
 
 pub(crate) static mut REGISTER: Option<Sender<RegMsg>> = None;
+
+const ARENA_SIZE: usize = 16384;
 
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub(crate) struct TypeInfo {
@@ -29,6 +32,7 @@ pub(crate) enum RegMsg {
     Un(ThreadId, TypeInfo),
 }
 
+#[derive(Copy, Clone)]
 struct Invariant {
     white_start: usize,
     white_end: usize,
@@ -49,14 +53,140 @@ impl Default for Parents {
     }
 }
 
+/// Keep in sync with Header<T>
+struct HeaderUnTyped {
+    // TODO private
+    pub evacuated: Mutex<HashMap<u16, *const u8>>,
+    // roots: HashMap<u16, *const Box<UnsafeCell<*const T>>>,
+    // finalizers: TODO
+    roots: usize,
+    finalizers: usize,
+}
+
+impl HeaderUnTyped {
+    /// last is closest to Header, since we bump down.
+    fn last_offset(align: u16) -> u16 {
+        let header = mem::size_of::<HeaderUnTyped>() as u16;
+        header + ((align - (header % align)) % align)
+    }
+}
+
 /// This whole struct is unsafe!
 struct TypeState {
     type_info: TypeInfo,
     /// Map Type to Bit
     buses: HashMap<ThreadId, BusPtr>,
-    // Map between `Arena.next` and the invariant the section of the Msg::End..End Arena upheld.
-    invariants: BTreeMap<*const u8, Invariant>,
-    current_invariant: Option<Invariant>,
+    /// Arena owned by GC, that have not been completely filled.
+    gc_arenas: HashSet<*const u8>,
+    /// Count of Arenas started before `invariant`.
+    pending_known_grey: usize,
+    /// `Arena.Header` started after `epoch`.
+    pending: HashMap<*const u8, usize>,
+    latest_grey: usize,
+    /// `epoch` is not synchronized across threads.
+    /// 2 epochs delineate Arena age.
+    /// 2 epoch are needed, since thread A may receive a GCed object from thread B in between the
+    ///   GC reading A & B's messages.
+    /// A's `Msg::Start` may be received in the next epoch after B's `Msg::End`.
+    epoch: usize,
+    invariant: Option<Invariant>,
+}
+
+impl TypeState {
+    /// Handle messages of Type.
+    /// Returns true when no condemed pointers from Type exist.
+    fn step(&mut self) -> bool {
+        let Self {
+            type_info,
+            buses,
+            gc_arenas,
+            pending_known_grey,
+            pending,
+            latest_grey,
+            epoch,
+            invariant,
+        } = self;
+        *epoch += 1;
+
+        // TODO lift allocation
+        let mut grey = Vec::with_capacity(20);
+        buses.iter().for_each(|(_, bus)| {
+            let bus = bus.0.lock().expect("Could not unlock bus");
+            // TODO fill gc_arenas by sending them to workers.
+            grey.extend(bus.iter().filter_map(|msg| match msg {
+                Msg::Start {
+                    white_start,
+                    white_end,
+                } => {
+                    if invariant
+                        .map(|ci| ci.white_start == *white_start && ci.white_end == *white_end)
+                        .unwrap_or(true)
+                    {
+                    } else {
+                        *latest_grey = *epoch;
+                        *pending_known_grey += 1;
+                    }
+                    None
+                }
+                Msg::End {
+                    release_to_gc,
+                    next,
+                    grey_feilds,
+                    white_start,
+                    white_end,
+                } => {
+                    if invariant
+                        .map(|i| i.white_start == *white_start && i.white_end == *white_end)
+                        .unwrap_or(true)
+                    {
+                        let next_addr = *next as usize;
+                        let header = (next_addr - (next_addr % ARENA_SIZE)) as *const u8;
+
+                        // Nothing was marked.
+                        // Allocated objects contain no condemned pointers into the white set.
+                        if *grey_feilds == 0b0000_0000 {
+                            if !release_to_gc {
+                                let remaining = pending.entry(header).or_insert(*epoch);
+                                *remaining = *epoch;
+                                None
+                            } else {
+                                pending.remove(&header);
+
+                                // if full
+                                let last = (next_addr - (next_addr % ARENA_SIZE))
+                                    + HeaderUnTyped::last_offset(type_info.info.alignment) as usize;
+                                if next_addr >= last {
+                                    gc_arenas.insert(*next);
+                                };
+                                None
+                            }
+                        } else {
+                            *latest_grey = *epoch;
+                            Some((*next, *grey_feilds))
+                        }
+                    } else {
+                        *latest_grey = *epoch;
+                        Some((*next, 0b1111_1111))
+                    }
+                }
+                _ => None,
+            }));
+        });
+
+        // TODO trace grey, updating refs
+
+        if *pending_known_grey == 0
+            && *epoch >= (*latest_grey + 2)
+            && pending
+                .iter()
+                .all(|(_, start_epoch)| *start_epoch >= *latest_grey)
+        {
+            // No direct pointers into the white region exist from this type!
+            true
+        } else {
+            false
+        }
+    }
 }
 
 struct TypeRelations {
@@ -103,8 +233,12 @@ impl TypeRelations {
             TypeState {
                 type_info,
                 buses: HashMap::new(),
-                invariants: BTreeMap::new(),
-                current_invariant: None,
+                gc_arenas: HashSet::new(),
+                pending_known_grey: 0,
+                pending: HashMap::new(),
+                latest_grey: 0,
+                epoch: 0,
+                invariant: None,
             }
         });
 
@@ -119,29 +253,12 @@ fn start() -> Sender<RegMsg> {
 }
 
 fn gc_loop(r: Receiver<RegMsg>) {
-    let mut types: HashMap<GcTypeInfo, TypeInfo> = HashMap::new();
-    let mut type_states: HashMap<GcTypeInfo, TypeState> = HashMap::new();
+    let mut types = TypeRelations::new();
 
     loop {
         for msg in r.try_iter() {
             match msg {
-                RegMsg::Reg(id, ty, bus) => {
-                    types
-                        .entry(ty.info)
-                        .and_modify(|ti| assert_eq!(ti.drop_ptr as usize, ty.drop_ptr as usize))
-                        .or_insert(ty);
-                    // let buses = types.entry(ty.info)
-                    // buses
-                    //     .entry(id)
-                    //     .and_modify(|_| {
-                    //         panic!("Impossible: The same type and thread was registered twice")
-                    //     })
-                    //     .or_insert(bus);
-
-                    // if known_types.insert(ty) {
-                    //     direct_children.insert(ty, direct_gced(ti, gced))
-                    // }
-                }
+                RegMsg::Reg(id, ty, bus) => types.reg(ty, id, bus),
                 RegMsg::Un(id, ty) => {
                     // The thread was dropped
                     // let buses = types
@@ -172,6 +289,8 @@ fn gc_loop(r: Receiver<RegMsg>) {
                 }
             }
         }
+
+        types.active.iter_mut().map(|(_l, ts)| {});
 
         thread::sleep(Duration::from_millis(100))
     }
