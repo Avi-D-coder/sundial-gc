@@ -78,6 +78,8 @@ struct TypeState {
     buses: HashMap<ThreadId, BusPtr>,
     /// Arena owned by GC, that have not been completely filled.
     gc_arenas: HashSet<*const u8>,
+    /// Count of Arenas started before transitive_epoch.
+    pending_known_transitive_grey: usize,
     /// Count of Arenas started before `invariant`.
     pending_known_grey: usize,
     /// `Arena.Header` started after `epoch`.
@@ -89,6 +91,7 @@ struct TypeState {
     ///   GC reading A & B's messages.
     /// A's `Msg::Start` may be received in the next epoch after B's `Msg::End`.
     epoch: usize,
+    transitive_epoch: usize,
     invariant: Option<Invariant>,
 }
 
@@ -100,10 +103,12 @@ impl TypeState {
             type_info,
             buses,
             gc_arenas,
+            pending_known_transitive_grey,
             pending_known_grey,
             pending,
             latest_grey,
             epoch,
+            transitive_epoch,
             invariant,
         } = self;
         *epoch += 1;
@@ -118,6 +123,9 @@ impl TypeState {
                     white_start,
                     white_end,
                 } => {
+                    if *epoch < *transitive_epoch {
+                        *pending_known_transitive_grey += 1;
+                    }
                     if invariant
                         .map(|ci| ci.white_start == *white_start && ci.white_end == *white_end)
                         .unwrap_or(true)
@@ -146,11 +154,24 @@ impl TypeState {
                         // Allocated objects contain no condemned pointers into the white set.
                         if *grey_feilds == 0b0000_0000 {
                             if !release_to_gc {
-                                let remaining = pending.entry(header).or_insert(*epoch);
+                                let remaining = pending
+                                    .entry(header)
+                                    .and_modify(|e| {
+                                        if *e < *transitive_epoch {
+                                            *pending_known_transitive_grey =
+                                                pending_known_transitive_grey.saturating_sub(1);
+                                        }
+                                    })
+                                    .or_insert(*epoch);
                                 *remaining = *epoch;
                                 None
                             } else {
-                                pending.remove(&header);
+                                if let Some(e) = pending.remove(&header) {
+                                    if e < *transitive_epoch {
+                                        *pending_known_transitive_grey =
+                                            pending_known_transitive_grey.saturating_sub(1);
+                                    }
+                                };
 
                                 // if full
                                 let last = (next_addr - (next_addr % ARENA_SIZE))
@@ -186,6 +207,12 @@ impl TypeState {
         } else {
             false
         }
+    }
+
+    fn request_transitive_parrent_stack_clear(&mut self) {
+        // TODO are 2 epochs needed?
+        self.transitive_epoch = self.epoch + 2;
+        self.pending_known_transitive_grey = self.pending.len();
     }
 }
 
@@ -234,10 +261,12 @@ impl TypeRelations {
                 type_info,
                 buses: HashMap::new(),
                 gc_arenas: HashSet::new(),
+                pending_known_transitive_grey: 0,
                 pending_known_grey: 0,
                 pending: HashMap::new(),
                 latest_grey: 0,
                 epoch: 0,
+                transitive_epoch: 0,
                 invariant: None,
             }
         });
