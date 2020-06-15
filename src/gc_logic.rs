@@ -83,6 +83,8 @@ struct TypeState {
     /// Count of Arenas started before `invariant`.
     pending_known_grey: usize,
     /// `Arena.Header` started after `epoch`.
+    /// TODO `pending` should probably be mutually exclusive with `pending_known_grey`.
+    /// This would require an extra new allocation bit to be sent with `Msg::End`.
     pending: HashMap<*const u8, usize>,
     latest_grey: usize,
     /// `epoch` is not synchronized across threads.
@@ -98,7 +100,7 @@ struct TypeState {
 
 impl TypeState {
     /// Handle messages of Type.
-    /// Returns true when no condemed pointers from Type exist.
+    /// Returns true when no condemned pointers from Type exist.
     fn step(&mut self) -> bool {
         let Self {
             type_info,
@@ -217,7 +219,18 @@ impl TypeState {
     fn request_transitive_parrent_stack_clear(&mut self) {
         // TODO are 2 epochs needed?
         self.transitive_epoch = self.epoch + 2;
-        self.pending_known_transitive_grey = self.pending.len();
+        // TODO This should be `.len()`, once :40 is fixed.
+        self.pending_known_transitive_grey = self.pending.iter().filter(|(_, e)| **e != 0).count();
+    }
+
+    fn set_invariant(&mut self, inv: Invariant) {
+        self.pending_known_transitive_grey = 0;
+        // It will be one upon first `step()`
+        self.epoch = 0;
+        self.latest_grey = 1;
+        let mut pkg = 0;
+        self.pending = todo!();
+        self.invariant = Some(inv);
     }
 }
 
