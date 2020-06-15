@@ -78,13 +78,14 @@ struct TypeState {
     buses: HashMap<ThreadId, BusPtr>,
     /// Arena owned by GC, that have not been completely filled.
     gc_arenas: HashSet<*const u8>,
+    gc_arenas_full: HashSet<*const u8>,
     /// Count of Arenas started before transitive_epoch.
     pending_known_transitive_grey: usize,
     /// Count of Arenas started before `invariant`.
     pending_known_grey: usize,
     /// `Arena.Header` started after `epoch`.
-    /// TODO `pending` should probably be mutually exclusive with `pending_known_grey`.
-    /// This would require an extra new allocation bit to be sent with `Msg::End`.
+    /// `pending` is mutually exclusive with `pending_known_grey`.
+    /// A arena `*const u8` cannot have a entry in `pending` and `pending_known_grey`.
     pending: HashMap<*const u8, usize>,
     latest_grey: usize,
     /// `epoch` is not synchronized across threads.
@@ -105,6 +106,7 @@ impl TypeState {
         let Self {
             type_info,
             buses,
+            gc_arenas_full,
             gc_arenas,
             pending_known_transitive_grey,
             pending_known_grey,
@@ -145,6 +147,7 @@ impl TypeState {
                 }
                 Msg::End {
                     release_to_gc,
+                    new_allocation,
                     next,
                     grey_feilds,
                     white_start,
@@ -156,43 +159,36 @@ impl TypeState {
                     {
                         let next_addr = *next as usize;
                         let header = (next_addr - (next_addr % ARENA_SIZE)) as *const u8;
-
+                        if let Some(e) = pending.remove(&header) {
+                            if e < *transitive_epoch {
+                                *pending_known_transitive_grey =
+                                    pending_known_transitive_grey.saturating_sub(1);
+                            }
+                        } else if !new_allocation {
+                            *pending_known_grey -= 1;
+                        };
                         // Nothing was marked.
                         // Allocated objects contain no condemned pointers into the white set.
                         if *grey_feilds == 0b0000_0000 {
-                            if !release_to_gc {
-                                let remaining = pending
-                                    .entry(header)
-                                    .and_modify(|e| {
-                                        if *e < *transitive_epoch {
-                                            *pending_known_transitive_grey =
-                                                pending_known_transitive_grey.saturating_sub(1);
-                                        }
-                                    })
-                                    .or_insert(0);
-                                *remaining = *epoch;
-                                None
-                            } else {
-                                if let Some(e) = pending.remove(&header) {
-                                    if e < *transitive_epoch {
-                                        *pending_known_transitive_grey =
-                                            pending_known_transitive_grey.saturating_sub(1);
-                                    }
-                                };
-
+                            if *release_to_gc {
                                 // if full
                                 let last = (next_addr - (next_addr % ARENA_SIZE))
                                     + HeaderUnTyped::last_offset(type_info.info.alignment) as usize;
                                 if next_addr >= last {
                                     gc_arenas.insert(*next);
+                                } else {
+                                    gc_arenas_full.insert(*next);
                                 };
-                                None
-                            }
+                            } else {
+                                // TODO store active worker arenas
+                            };
+                            None
                         } else {
                             *latest_grey = *epoch;
                             Some((*next, *grey_feilds))
                         }
                     } else {
+                        *pending_known_grey -= 1;
                         *latest_grey = *epoch;
                         Some((*next, 0b1111_1111))
                     }
@@ -216,20 +212,27 @@ impl TypeState {
         }
     }
 
-    fn request_transitive_parrent_stack_clear(&mut self) {
+    /// Call when `Self` is a transitive parent of an `Arena<T>`,
+    /// once `T`'s direct parents are clear of condemned ptrs.
+    /// Must be proceed by a call to `is_stack_clear`.
+    fn request_clear_stack(&mut self) {
         // TODO are 2 epochs needed?
         self.transitive_epoch = self.epoch + 2;
-        // TODO This should be `.len()`, once :40 is fixed.
-        self.pending_known_transitive_grey = self.pending.iter().filter(|(_, e)| **e != 0).count();
+        self.pending_known_transitive_grey = self.pending.len();
+    }
+
+    /// Must be proceed by a call to `request_clear_stack`.
+    fn is_stack_clear(&self) -> bool {
+        self.pending_known_transitive_grey == 0 && self.pending_known_grey == 0
     }
 
     fn set_invariant(&mut self, inv: Invariant) {
         self.pending_known_transitive_grey = 0;
+        self.pending_known_grey = self.pending.len();
         // It will be one upon first `step()`
         self.epoch = 0;
         self.latest_grey = 1;
-        let mut pkg = 0;
-        self.pending = todo!();
+        self.pending = HashMap::new();
         self.invariant = Some(inv);
     }
 }
@@ -279,6 +282,7 @@ impl TypeRelations {
                 type_info,
                 buses: HashMap::new(),
                 gc_arenas: HashSet::new(),
+                gc_arenas_full: HashSet::new(),
                 pending_known_transitive_grey: 0,
                 pending_known_grey: 0,
                 pending: HashMap::new(),

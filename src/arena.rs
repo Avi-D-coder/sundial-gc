@@ -27,6 +27,7 @@ pub struct ArenaInternals<T: Trace> {
     // TODO make all these private by wrapping up needed functionality.
     // TODO derive header from next
     bus_idx: u8,
+    new_allocation: bool,
     pub grey_self: bool,
     pub grey_feilds: UnsafeCell<u8>,
     pub white_region: Range<usize>,
@@ -114,6 +115,7 @@ impl<T: Trace> Drop for ArenaInternals<T> {
                 let mut msgs = bus.1.lock().unwrap();
                 msgs[self.bus_idx as usize] = Msg::End {
                     release_to_gc,
+                    new_allocation: self.new_allocation,
                     next,
                     grey_feilds: unsafe { *self.grey_feilds.get() },
                     white_start: self.white_region.start,
@@ -208,17 +210,20 @@ impl<T: Trace> Arena<T> for ArenaInternals<T> {
             },
         )) = slot
         {
+            let mut new_allocation = false;
             let next = UnsafeCell::new(if let Some(n) = next {
                 n as *mut T
             } else if let Some(n) = bus.0 .0 {
                 n as *mut T
             } else {
+                new_allocation = true;
                 alloc_arena::<T>()
             });
 
             msgs[bus_idx] = Msg::Slot;
             ArenaInternals {
                 bus_idx: bus_idx as u8,
+                new_allocation,
                 next,
                 grey_self,
                 grey_feilds: UnsafeCell::new(grey_feilds),
@@ -226,9 +231,12 @@ impl<T: Trace> Arena<T> for ArenaInternals<T> {
             }
         } else {
             let inv = bus.0 .1;
+
+            let mut new_allocation = false;
             let next = if let Some(n) = bus.0 .0 {
                 n as *mut T
             } else {
+                new_allocation = true;
                 alloc_arena::<T>()
             };
 
@@ -248,6 +256,7 @@ impl<T: Trace> Arena<T> for ArenaInternals<T> {
 
             ArenaInternals {
                 bus_idx: bus_idx as u8,
+                new_allocation,
                 next: UnsafeCell::new(next),
                 grey_self: inv.grey_self,
                 grey_feilds: UnsafeCell::new(inv.grey_feilds),
@@ -323,6 +332,7 @@ pub(crate) enum Msg {
     End {
         /// Worker will not finish filling the Arena
         release_to_gc: bool,
+        new_allocation: bool,
         /// Address of the 16 kB arena
         next: *const u8,
         grey_feilds: u8,
