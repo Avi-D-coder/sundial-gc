@@ -90,6 +90,7 @@ struct TypeState {
     /// 2 epoch are needed, since thread A may receive a GCed object from thread B in between the
     ///   GC reading A & B's messages.
     /// A's `Msg::Start` may be received in the next epoch after B's `Msg::End`.
+    /// `epoch` counts from 1, and resets when free is accomplished.
     epoch: usize,
     transitive_epoch: usize,
     invariant: Option<Invariant>,
@@ -122,6 +123,7 @@ impl TypeState {
                 Msg::Start {
                     white_start,
                     white_end,
+                    next,
                 } => {
                     if *epoch < *transitive_epoch {
                         *pending_known_transitive_grey += 1;
@@ -130,6 +132,9 @@ impl TypeState {
                         .map(|ci| ci.white_start == *white_start && ci.white_end == *white_end)
                         .unwrap_or(true)
                     {
+                        let next_addr = *next as usize;
+                        let header = (next_addr - (next_addr % ARENA_SIZE)) as *const u8;
+                        pending.insert(header, *epoch);
                     } else {
                         *latest_grey = *epoch;
                         *pending_known_grey += 1;
@@ -162,7 +167,7 @@ impl TypeState {
                                                 pending_known_transitive_grey.saturating_sub(1);
                                         }
                                     })
-                                    .or_insert(*epoch);
+                                    .or_insert(0);
                                 *remaining = *epoch;
                                 None
                             } else {

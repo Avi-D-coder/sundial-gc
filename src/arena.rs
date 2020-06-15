@@ -241,6 +241,7 @@ impl<T: Trace> Arena<T> for ArenaInternals<T> {
 
             // send start message to gc
             *slot = Msg::Start {
+                next: next as *const u8,
                 white_start: 0,
                 white_end: 1,
             };
@@ -316,6 +317,8 @@ pub(crate) enum Msg {
         /// The condemned ptr range
         white_start: usize,
         white_end: usize,
+        /// TODO cache on GC side per Bus
+        next: *const u8,
     },
     End {
         /// Worker will not finish filling the Arena
