@@ -454,6 +454,7 @@ fn gc_loop(r: Receiver<RegMsg>) {
         });
 
         clear_stack_new.drain().for_each(|(pti, mut ctis)| {
+            active.get_mut(&pti).unwrap().request_clear_stack();
             clear_stack_old.entry(pti).and_modify(|s| {
                 ctis.drain().for_each(|c| {
                     s.insert(c);
