@@ -133,6 +133,10 @@ impl TypeState {
             invariant,
             ..
         } = self;
+        let last_offset = HeaderUnTyped::last_offset(type_info.info.alignment) as usize;
+        let first_offset =
+            HeaderUnTyped::first_offset(type_info.info.alignment, type_info.info.byte_size)
+                as usize;
         *epoch += 1;
 
         // TODO lift allocation
@@ -191,8 +195,7 @@ impl TypeState {
                         if *grey_feilds == 0b0000_0000 {
                             if *release_to_gc {
                                 // if full
-                                let last = (next_addr - (next_addr % ARENA_SIZE))
-                                    + HeaderUnTyped::last_offset(type_info.info.alignment) as usize;
+                                let last = (next_addr - (next_addr % ARENA_SIZE)) + last_offset;
                                 if next_addr >= last {
                                     gc_arenas.insert(*next);
                                 } else {
@@ -230,20 +233,14 @@ impl TypeState {
                     let next = gc_arenas
                         .pop_first()
                         .map(|p| p as *mut _)
-                        .or(free.pop().map(|h| {
-                            (h as usize
-                                + (HeaderUnTyped::first_offset(
-                                    type_info.info.alignment,
-                                    type_info.info.alignment,
-                                ) as usize)) as *mut u8
-                        }));
+                        .or(free.pop().map(|h| (h as usize + first_offset) as *mut u8));
 
                     if let Some(Invariant {
                         grey_feilds,
                         grey_self,
                         white_start,
                         white_end,
-                    }) = self.invariant
+                    }) = *invariant
                     {
                         *slot = Msg::Gc {
                             next,
@@ -413,7 +410,7 @@ fn gc_loop(r: Receiver<RegMsg>) {
         let mut clear_stack_new: HashMap<GcTypeInfo, HashSet<GcTypeInfo>> =
             HashMap::with_capacity(20);
         active.iter_mut().for_each(|(ti, ts)| {
-            if ts.step() {
+            if ts.step(&mut free) {
                 if let Some(ps) = parents.get(ti) {
                     // FIXME there's a race here when a parent Type is registered after active.iter
                     ts.waiting_on_transitive_parents = ps.transitive.len();
