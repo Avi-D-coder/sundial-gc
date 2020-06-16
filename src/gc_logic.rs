@@ -449,6 +449,7 @@ fn gc_loop(r: Receiver<RegMsg>) {
                                 unsafe { System.dealloc(header as *mut u8, Layout::new::<Mem>()) };
                             }
                         });
+                    ts.invariant = None;
                 }
             })
         });
