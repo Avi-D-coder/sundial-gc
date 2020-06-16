@@ -13,6 +13,7 @@
 #![feature(const_type_name)]
 #![feature(trivial_bounds)]
 #![feature(bindings_after_at)]
+#![feature(map_first_last)]
 
 pub mod arena;
 pub mod auto_traits;

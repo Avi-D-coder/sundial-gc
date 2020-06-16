@@ -307,6 +307,8 @@ thread_local! {
     static GC_BUS: UnsafeCell<
         HashMap<(GcTypeInfo, usize), Box<((Option<*mut u8>, GcInvariant), Bus)>>,
     > = UnsafeCell::new(HashMap::new());
+
+    // FIXME upon drop/thread end send End for cached_next and Msg::Gc.next
 }
 
 fn key<T: Trace>() -> (GcTypeInfo, usize) {
@@ -353,7 +355,7 @@ pub(crate) enum Msg {
 
 impl Msg {
     #[inline(always)]
-    fn is_slot(&self) -> bool {
+    pub fn is_slot(&self) -> bool {
         match self {
             Msg::Slot => true,
             _ => false,

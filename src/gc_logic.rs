@@ -41,6 +41,7 @@ struct Invariant {
     white_start: usize,
     white_end: usize,
     grey_feilds: u8,
+    grey_self: bool,
 }
 
 #[derive(Clone)]
@@ -73,6 +74,12 @@ impl HeaderUnTyped {
     fn last_offset(align: u16) -> u16 {
         let header = mem::size_of::<HeaderUnTyped>() as u16;
         header + ((align - (header % align)) % align)
+    }
+
+    // TODO is this right?
+    fn first_offset(align: u16, size: u16) -> u16 {
+        let cap = (ARENA_SIZE as u16 - HeaderUnTyped::last_offset(align)) / size;
+        HeaderUnTyped::last_offset(align) + (cap * size)
     }
 }
 
@@ -110,7 +117,7 @@ struct TypeState {
 impl TypeState {
     /// Handle messages of Type.
     /// Returns true when no condemned pointers from Type exist.
-    fn step(&mut self) -> bool {
+    fn step(&mut self, free: &mut Vec<*mut HeaderUnTyped>) -> bool {
         let Self {
             type_info,
             buses,
@@ -131,9 +138,10 @@ impl TypeState {
         // TODO lift allocation
         let mut grey = Vec::with_capacity(20);
         buses.iter().for_each(|(_, bus)| {
-            let bus = bus.0.lock().expect("Could not unlock bus");
+            let mut has_new = false;
+            let mut bus = bus.0.lock().expect("Could not unlock bus");
             // TODO fill gc_arenas by sending them to workers.
-            grey.extend(bus.iter().filter_map(|msg| match msg {
+            grey.extend(bus.iter_mut().filter_map(|msg| match msg {
                 Msg::Start {
                     white_start,
                     white_end,
@@ -153,6 +161,7 @@ impl TypeState {
                         *latest_grey = *epoch;
                         *pending_known_grey += 1;
                     }
+                    *msg = Msg::Slot;
                     None
                 }
                 Msg::End {
@@ -163,7 +172,7 @@ impl TypeState {
                     white_start,
                     white_end,
                 } => {
-                    if invariant
+                    let ret = if invariant
                         .map(|i| i.white_start == *white_start && i.white_end == *white_end)
                         .unwrap_or(true)
                     {
@@ -174,7 +183,7 @@ impl TypeState {
                                 *pending_known_transitive_grey =
                                     pending_known_transitive_grey.saturating_sub(1);
                             }
-                        } else if !new_allocation {
+                        } else if !*new_allocation {
                             *pending_known_grey -= 1;
                         };
                         // Nothing was marked.
@@ -201,10 +210,59 @@ impl TypeState {
                         *pending_known_grey -= 1;
                         *latest_grey = *epoch;
                         Some((*next, 0b1111_1111))
+                    };
+
+                    *msg = Msg::Slot;
+                    ret
+                }
+                Msg::Gc { next, .. } => {
+                    has_new = true;
+                    if next.is_none() {
+                        *next = Some(0 as *mut u8);
                     }
+                    None
                 }
                 _ => None,
             }));
+
+            if !has_new {
+                bus.iter_mut().filter(|m| m.is_slot()).next().map(|slot| {
+                    let next = gc_arenas
+                        .pop_first()
+                        .map(|p| p as *mut _)
+                        .or(free.pop().map(|h| {
+                            (h as usize
+                                + (HeaderUnTyped::first_offset(
+                                    type_info.info.alignment,
+                                    type_info.info.alignment,
+                                ) as usize)) as *mut u8
+                        }));
+
+                    if let Some(Invariant {
+                        grey_feilds,
+                        grey_self,
+                        white_start,
+                        white_end,
+                    }) = self.invariant
+                    {
+                        *slot = Msg::Gc {
+                            next,
+                            grey_feilds,
+                            grey_self,
+                            white_start,
+                            white_end,
+                        };
+                    } else {
+                        *slot = Msg::Gc {
+                            next,
+                            grey_feilds: 0b0000_0000,
+                            grey_self: false,
+                            white_start: 0,
+                            white_end: 1,
+                        };
+                    }
+                });
+            }
         });
 
         // TODO trace grey, updating refs
@@ -337,7 +395,7 @@ fn gc_loop(r: Receiver<RegMsg>) {
                 RegMsg::Un(id, ty) => {
                     // The thread was dropped
                     let type_state = types.active.get_mut(&ty.info).unwrap();
-                    type_state.step();
+                    type_state.step(&mut free);
                     type_state.buses.remove(&id);
                 }
             }
