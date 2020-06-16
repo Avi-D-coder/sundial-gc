@@ -1,11 +1,15 @@
 use super::arena::*;
 use super::trace::*;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::mem;
 use std::sync::{mpsc::*, Mutex};
 use std::thread::{self, ThreadId};
-use std::time::Duration;
+use std::{
+    alloc::{GlobalAlloc, Layout, System},
+    ptr,
+    time::Duration,
+};
 
 pub(crate) static mut REGISTER: Option<Sender<RegMsg>> = None;
 
@@ -39,6 +43,7 @@ struct Invariant {
     grey_feilds: u8,
 }
 
+#[derive(Clone)]
 struct Parents {
     direct: HashMap<GcTypeInfo, u8>,
     transitive: HashSet<GcTypeInfo>,
@@ -77,8 +82,8 @@ struct TypeState {
     /// Map Type to Bit
     buses: HashMap<ThreadId, BusPtr>,
     /// Arena owned by GC, that have not been completely filled.
-    gc_arenas: HashSet<*const u8>,
-    gc_arenas_full: HashSet<*const u8>,
+    gc_arenas: BTreeSet<*const u8>,
+    gc_arenas_full: BTreeSet<*const u8>,
     /// Count of Arenas started before transitive_epoch.
     pending_known_transitive_grey: usize,
     /// Count of Arenas started before `invariant`.
@@ -96,7 +101,10 @@ struct TypeState {
     /// `epoch` counts from 1, and resets when free is accomplished.
     epoch: usize,
     transitive_epoch: usize,
+    /// Waiting for transitive parents to clear their stack
+    phase2: bool,
     invariant: Option<Invariant>,
+    waiting_on_transitive_parents: usize,
 }
 
 impl TypeState {
@@ -114,7 +122,9 @@ impl TypeState {
             latest_grey,
             epoch,
             transitive_epoch,
+            phase2,
             invariant,
+            ..
         } = self;
         *epoch += 1;
 
@@ -201,13 +211,21 @@ impl TypeState {
 
         if *pending_known_grey == 0
             && *epoch >= (*latest_grey + 2)
-            && pending
-                .iter()
-                .all(|(_, start_epoch)| *start_epoch >= *latest_grey)
+            && (*phase2
+                || (pending
+                    .iter()
+                    .all(|(_, start_epoch)| *start_epoch >= *latest_grey)))
         {
             // No direct pointers into the white region exist from this type!
-            true
+            if *phase2 {
+                false
+            } else {
+                *phase2 = true;
+                true
+            }
         } else {
+            // This cannot happen at the moment
+            // phase2 = false
             false
         }
     }
@@ -223,10 +241,13 @@ impl TypeState {
 
     /// Must be proceed by a call to `request_clear_stack`.
     fn is_stack_clear(&self) -> bool {
-        self.pending_known_transitive_grey == 0 && self.pending_known_grey == 0
+        self.pending_known_transitive_grey == 0
+            && self.pending_known_grey == 0
+            && self.transitive_epoch != 0
     }
 
     fn set_invariant(&mut self, inv: Invariant) {
+        self.phase2 = false;
         self.pending_known_transitive_grey = 0;
         self.pending_known_grey = self.pending.len();
         // It will be one upon first `step()`
@@ -281,15 +302,17 @@ impl TypeRelations {
             TypeState {
                 type_info,
                 buses: HashMap::new(),
-                gc_arenas: HashSet::new(),
-                gc_arenas_full: HashSet::new(),
+                gc_arenas: BTreeSet::new(),
+                gc_arenas_full: BTreeSet::new(),
                 pending_known_transitive_grey: 0,
                 pending_known_grey: 0,
                 pending: HashMap::new(),
                 latest_grey: 0,
                 epoch: 0,
                 transitive_epoch: 0,
+                phase2: false,
                 invariant: None,
+                waiting_on_transitive_parents: 0,
             }
         });
 
@@ -305,6 +328,7 @@ fn start() -> Sender<RegMsg> {
 
 fn gc_loop(r: Receiver<RegMsg>) {
     let mut types = TypeRelations::new();
+    let mut free: Vec<*mut HeaderUnTyped> = Vec::with_capacity(100);
 
     loop {
         for msg in r.try_iter() {
@@ -312,36 +336,75 @@ fn gc_loop(r: Receiver<RegMsg>) {
                 RegMsg::Reg(id, ty, bus) => types.reg(ty, id, bus),
                 RegMsg::Un(id, ty) => {
                     // The thread was dropped
-                    // let buses = types
-                    //     .get_mut(&ty)
-                    //     .expect("Impossible: Freed bus of type without an buses");
-                    // let bus = buses
-                    //     .get(&id)
-                    //     .expect("Impossible: Freed thread's bus that does not exist");
-                    // let bus = bus.0.lock().expect("Could not unlock freed bus");
-
-                    // let inv = arena_invariants.entry(ty);
-
-                    // for m in bus.iter() {
-                    //     if let Msg::End {
-                    //         next,
-                    //         grey_feilds,
-                    //         white_start,
-                    //         white_end,
-                    //         ..
-                    //     } = m
-                    //     {
-                    //         mem.insert(Header::from(next) as usize, (*next, ty));
-                    //         // TODO
-                    //     }
-                    // }
-
-                    // buses.remove(&id);
+                    let type_state = types.active.get_mut(&ty.info).unwrap();
+                    type_state.step();
+                    type_state.buses.remove(&id);
                 }
             }
         }
 
-        types.active.iter_mut().map(|(_l, ts)| {});
+        let TypeRelations {
+            parents,
+            active,
+            mem,
+        } = &mut types;
+
+        let mut stack_cleared = HashSet::with_capacity(20);
+        let mut clear_stack_old: HashMap<GcTypeInfo, HashSet<GcTypeInfo>> =
+            HashMap::with_capacity(20);
+        let mut clear_stack_new: HashMap<GcTypeInfo, HashSet<GcTypeInfo>> =
+            HashMap::with_capacity(20);
+        active.iter_mut().for_each(|(ti, ts)| {
+            if ts.step() {
+                if let Some(ps) = parents.get(ti) {
+                    // FIXME there's a race here when a parent Type is registered after active.iter
+                    ts.waiting_on_transitive_parents = ps.transitive.len();
+
+                    ps.transitive.iter().for_each(|pti| {
+                        let requesters = clear_stack_new.entry(*pti).or_insert(HashSet::new());
+                        requesters.insert(*ti);
+                    });
+                }
+            }
+
+            // TODO This is slower than it could be like everything
+            if ts.is_stack_clear() && clear_stack_old.contains_key(ti) {
+                stack_cleared.insert(*ti);
+            };
+        });
+
+        stack_cleared.drain().for_each(|ti| {
+            clear_stack_old.remove(&ti).unwrap().iter().for_each(|cti| {
+                let ts = active.get_mut(cti).unwrap();
+                ts.waiting_on_transitive_parents -= 1;
+                if ts.waiting_on_transitive_parents == 0 {
+                    let inv = ts.invariant.unwrap();
+                    // Free memory
+                    ts.gc_arenas_full
+                        .range((inv.white_start as *const u8)..(inv.white_end as *const u8))
+                        .into_iter()
+                        .for_each(|next| {
+                            let next_addr = *next as usize;
+                            let header =
+                                (next_addr - (next_addr % ARENA_SIZE)) as *mut HeaderUnTyped;
+                            unsafe { ptr::drop_in_place(header) }
+                            if free.len() < mem.len() / 3 {
+                                free.push(header);
+                            } else {
+                                unsafe { System.dealloc(header as *mut u8, Layout::new::<Mem>()) };
+                            }
+                        });
+                }
+            })
+        });
+
+        clear_stack_new.drain().for_each(|(pti, mut ctis)| {
+            clear_stack_old.entry(pti).and_modify(|s| {
+                ctis.drain().for_each(|c| {
+                    s.insert(c);
+                });
+            });
+        });
 
         thread::sleep(Duration::from_millis(100))
     }

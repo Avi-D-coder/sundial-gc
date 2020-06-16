@@ -50,7 +50,7 @@ impl<T: Trace> ArenaInternals<T> {
 }
 
 #[repr(align(16384))]
-struct Mem {
+pub(crate) struct Mem {
     _mem: [u8; 16384],
 }
 
