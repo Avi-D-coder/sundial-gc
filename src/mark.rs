@@ -1,5 +1,6 @@
 use super::gc::*;
 use crate::{auto_traits::HasGc, trace::GcTypeInfo};
+use smallvec::SmallVec;
 use std::ops::Range;
 
 /// This will be sound once GAT or const Eq &str lands.
@@ -12,13 +13,19 @@ pub unsafe trait Mark<'o, 'n, 'r: 'n, O: 'o, N: 'r> {
 
 // Blanket Arena<T> impl is in src/arena.rs
 
+pub(crate) struct Handlers<'e, E: FnMut(*const u8)> {
+    // TODO benchmark sizes
+    translation: &'e SmallVec<[u8; 16]>,
+    effects: &'e mut SmallVec<[E; 4]>,
+}
+
 pub unsafe trait Condemned {
     fn feilds(s: &Self, grey_feilds: u8, region: Range<usize>) -> u8;
-    fn evacuate(
+    fn evacuate<'e, E: FnMut(*const u8), const offset: u8>(
         s: &Self,
         grey_feilds: u8,
         region: Range<usize>,
-        on_condemed: *const fn(*const u8, GcTypeInfo),
+        handlers: Handlers<'e, E>,
     );
 
     const PRE_CONDTION: bool;
@@ -35,7 +42,13 @@ unsafe impl<T> Condemned for T {
         }
     }
 
-    default fn evacuate(_: &Self, _: u8, _: Range<usize>, _: *const fn(*const u8, GcTypeInfo)) {}
+    default fn evacuate<'e, E: FnMut(*const u8), const offset: u8>(
+        s: &Self,
+        _: u8,
+        _: Range<usize>,
+        _: Handlers<'e, E>,
+    ) {
+    }
 
     default const PRE_CONDTION: bool = if T::HAS_GC {
         // TODO When fmt is allowed in const s/your type/type_name::<T>()
@@ -53,7 +66,17 @@ unsafe impl<T> Condemned for Option<T> {
         }
     }
 
-    default fn evacuate(_: &Self, _: u8, _: Range<usize>, _: *const fn(*const u8, GcTypeInfo)) {}
+    fn evacuate<'e, E: FnMut(*const u8), const offset: u8>(
+        s: &Self,
+        grey_feilds: u8,
+        region: Range<usize>,
+        handlers: Handlers<'e, E>,
+    ) {
+        match s {
+            Some(t) => Condemned::evacuate(t, grey_feilds, region, handlers),
+            None => (),
+        }
+    }
 
     default const PRE_CONDTION: bool = if T::PRE_CONDTION {
         true

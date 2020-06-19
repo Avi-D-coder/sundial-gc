@@ -1,6 +1,6 @@
 use crate::trace::*;
 
-use crate::mark::Condemned;
+use crate::mark::{Condemned, Handlers};
 use std::ops::Deref;
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -46,6 +46,13 @@ unsafe impl<'r, T> Condemned for Gc<'r, T> {
     fn feilds(_: &Self, _: u8, _: std::ops::Range<usize>) -> u8 {
         0b0000_0000
     }
-    fn evacuate(_: &Self, _: u8, _: std::ops::Range<usize>, _: *const fn(*const u8, GcTypeInfo)) {}
     const PRE_CONDTION: bool = true;
+    fn evacuate<'e, E: FnMut(*const u8), const offset: u8>(
+        s: &Self,
+        grey_feilds: u8,
+        region: std::ops::Range<usize>,
+        handlers: Handlers<'e, E>,
+    ) {
+        todo!()
+    }
 }
