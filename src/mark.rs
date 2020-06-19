@@ -13,7 +13,7 @@ pub unsafe trait Mark<'o, 'n, 'r: 'n, O: 'o, N: 'r> {
 
 // Blanket Arena<T> impl is in src/arena.rs
 
-pub(crate) struct Handlers<'e, E: FnMut(*const u8)> {
+pub struct Handlers<'e, E: FnMut(*const u8)> {
     // TODO benchmark sizes
     translation: &'e SmallVec<[u8; 16]>,
     effects: &'e mut SmallVec<[E; 4]>,
@@ -21,7 +21,7 @@ pub(crate) struct Handlers<'e, E: FnMut(*const u8)> {
 
 pub unsafe trait Condemned {
     fn feilds(s: &Self, grey_feilds: u8, region: Range<usize>) -> u8;
-    fn evacuate<'e, E: FnMut(*const u8), const offset: u8>(
+    fn evacuate<'e, E: FnMut(*const u8), const OFFSET: u8>(
         s: &Self,
         grey_feilds: u8,
         region: Range<usize>,
@@ -42,8 +42,8 @@ unsafe impl<T> Condemned for T {
         }
     }
 
-    default fn evacuate<'e, E: FnMut(*const u8), const offset: u8>(
-        s: &Self,
+    default fn evacuate<'e, E: FnMut(*const u8), const OFFSET: u8>(
+        _: &Self,
         _: u8,
         _: Range<usize>,
         _: Handlers<'e, E>,
@@ -58,6 +58,23 @@ unsafe impl<T> Condemned for T {
     };
 }
 
+unsafe impl<'r, T> Condemned for Gc<'r, T> {
+    fn feilds(_: &Self, _: u8, _: std::ops::Range<usize>) -> u8 {
+        0b0000_0000
+    }
+    const PRE_CONDTION: bool = true;
+    fn evacuate<'e, E: FnMut(*const u8), const OFFSET: u8>(
+        s: &Self,
+        grey_feilds: u8,
+        region: std::ops::Range<usize>,
+        handlers: Handlers<'e, E>,
+    ) {
+        todo!()
+    }
+}
+
+// std impls
+
 unsafe impl<T> Condemned for Option<T> {
     default fn feilds(s: &Self, grey_feilds: u8, region: Range<usize>) -> u8 {
         match s {
@@ -66,14 +83,14 @@ unsafe impl<T> Condemned for Option<T> {
         }
     }
 
-    fn evacuate<'e, E: FnMut(*const u8), const offset: u8>(
+    fn evacuate<'e, E: FnMut(*const u8), const OFFSET: u8>(
         s: &Self,
         grey_feilds: u8,
         region: Range<usize>,
         handlers: Handlers<'e, E>,
     ) {
         match s {
-            Some(t) => Condemned::evacuate(t, grey_feilds, region, handlers),
+            Some(t) => Condemned::evacuate::<E, OFFSET>(t, grey_feilds, region, handlers),
             None => (),
         }
     }

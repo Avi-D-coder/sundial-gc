@@ -41,18 +41,3 @@ unsafe impl<'r, T: 'r + Trace> Trace for Gc<'r, T> {
         T::trace_transitive_type_info(tti)
     }
 }
-
-unsafe impl<'r, T> Condemned for Gc<'r, T> {
-    fn feilds(_: &Self, _: u8, _: std::ops::Range<usize>) -> u8 {
-        0b0000_0000
-    }
-    const PRE_CONDTION: bool = true;
-    fn evacuate<'e, E: FnMut(*const u8), const offset: u8>(
-        s: &Self,
-        grey_feilds: u8,
-        region: std::ops::Range<usize>,
-        handlers: Handlers<'e, E>,
-    ) {
-        todo!()
-    }
-}
