@@ -152,12 +152,6 @@ unsafe impl<'r, T: NoGc + 'r> Condemned for List<'r, T> {
 }
 
 #[test]
-fn option_test() {
-    assert!(Option::<usize>::PRE_CONDTION);
-    // assert!(Option::<Gc<usize>>::PRE_CONDTION);
-}
-
-#[test]
 fn churn_list() {
     let usizes: ArenaPrim<usize> = ArenaPrim::new();
     let gc_one = usizes.gc_alloc(1);

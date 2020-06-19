@@ -44,3 +44,20 @@ unsafe impl<T> Condemned for T {
         true
     };
 }
+
+unsafe impl<T> Condemned for Option<T> {
+    default fn feilds(s: &Self, grey_feilds: u8, region: Range<usize>) -> u8 {
+        match s {
+            Some(t) => Condemned::feilds(t, grey_feilds, region),
+            None => 0b0000_0000,
+        }
+    }
+
+    default fn evacuate(_: &Self, _: u8, _: Range<usize>, _: *const fn(*const u8, GcTypeInfo)) {}
+
+    default const PRE_CONDTION: bool = if T::PRE_CONDTION {
+        true
+    } else {
+        panic!("You need to derive Condemned for T. Required due to a direct Gc<A> in Option<T>");
+    };
+}
