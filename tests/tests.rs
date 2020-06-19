@@ -10,6 +10,8 @@
 #![feature(const_mut_refs)]
 #![feature(trivial_bounds)]
 #![feature(associated_type_bounds)]
+#![feature(const_if_match)]
+#![feature(const_panic)]
 
 use sundial_gc::arena::*;
 use sundial_gc::auto_traits::*;
@@ -106,8 +108,9 @@ where
     }
 }
 
-unsafe impl<'r, T: Condemned> Condemned for List<'r, T> {
+unsafe impl<'r, T: Condemned + 'r> Condemned for List<'r, T> {
     default fn feilds(x: &List<'r, T>, grey_feilds: u8, condemned: Range<usize>) -> u8 {
+        assert!(Self::PRE_CONDTION);
         let mut bloom = 0b0000000;
         if 0b1000_0000 == grey_feilds & 0b1000_0000 {
             bloom |= Condemned::feilds(&x.t, grey_feilds, condemned.clone())
@@ -121,12 +124,37 @@ unsafe impl<'r, T: Condemned> Condemned for List<'r, T> {
         };
         bloom
     }
+
+    default const PRE_CONDTION: bool =
+        if T::PRE_CONDTION && T::PRE_CONDTION && Option::<Gc<'r, List<'r, T>>>::PRE_CONDTION {
+            true
+        } else {
+            panic!("You need to derive Condemned for your type. Required due to a direct Gc<T>");
+        };
 }
 
-unsafe impl<'r, T: NoGc> Condemned for List<'r, T> {
-    fn feilds(_: &List<'r, T>, _: u8, _: Range<usize>) -> u8 {
-        0b0000000
+unsafe impl<'r, T: NoGc + 'r> Condemned for List<'r, T> {
+    fn feilds(x: &List<'r, T>, grey_feilds: u8, condemned: Range<usize>) -> u8 {
+        assert!(Self::PRE_CONDTION);
+        let mut bloom = 0b0000000;
+        if 0b0100_0000 == grey_feilds & 0b0100_0000 {
+            bloom |= Condemned::feilds(&x.next, grey_feilds, condemned)
+        };
+        bloom
     }
+
+    default const PRE_CONDTION: bool =
+        if T::PRE_CONDTION && T::PRE_CONDTION && Option::<Gc<'r, List<'r, T>>>::PRE_CONDTION {
+            true
+        } else {
+            panic!("You need to derive Condemned for your type. Required due to a direct Gc<T>");
+        };
+}
+
+#[test]
+fn option_test() {
+    assert!(Option::<usize>::PRE_CONDTION);
+    // assert!(Option::<Gc<usize>>::PRE_CONDTION);
 }
 
 #[test]

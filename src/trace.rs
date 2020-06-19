@@ -7,6 +7,7 @@ use std::ops::Deref;
 pub unsafe trait Trace {
     fn trace(t: usize);
     const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8];
+    const TRACE_DIRECT_FIELDS: u8;
     fn trace_transitive_type_info(tti: *mut Tti);
 }
 
@@ -16,7 +17,13 @@ pub unsafe trait Trace {
 unsafe impl<T: Immutable> Trace for T {
     default fn trace(_: usize) {}
     default const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
-    default fn trace_transitive_type_info(_: *mut Tti) {}
+    default const TRACE_DIRECT_FIELDS: u8 = 0;
+    default fn trace_transitive_type_info(_: *mut Tti) {
+        eprintln!("Trace T::HAS_GC: {}", T::HAS_GC);
+        if T::HAS_GC {
+            panic!("You need to derive Trace")
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -124,6 +131,7 @@ unsafe impl<'r, T: Immutable + Trace> Trace for Option<T> {
         }
     }
     default const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = GcTypeInfo::one_child::<T>();
+    default const TRACE_DIRECT_FIELDS: u8 = T::TRACE_DIRECT_FIELDS;
     default fn trace_transitive_type_info(tti: *mut Tti) {
         let tti = unsafe { &mut *tti };
         tti.add_trans(T::trace_transitive_type_info);
@@ -133,6 +141,7 @@ unsafe impl<'r, T: Immutable + Trace> Trace for Option<T> {
 unsafe impl<'r, T: Immutable + Trace + NoGc> Trace for Option<T> {
     default fn trace(_: usize) {}
     default const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
+    default const TRACE_DIRECT_FIELDS: u8 = 0;
     default fn trace_transitive_type_info(_: *mut Tti) {}
 }
 
@@ -142,6 +151,7 @@ unsafe impl<T: Immutable + Trace> Trace for Box<T> {
         T::trace(t as *const T as usize)
     }
     default const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
+    default const TRACE_DIRECT_FIELDS: u8 = T::TRACE_DIRECT_FIELDS;
     default fn trace_transitive_type_info(tti: *mut Tti) {
         let tti = unsafe { &mut *tti };
         tti.add_trans(T::trace_transitive_type_info);
@@ -151,5 +161,6 @@ unsafe impl<T: Immutable + Trace> Trace for Box<T> {
 unsafe impl<T: Immutable + Trace + NoGc> Trace for Box<T> {
     fn trace(_: usize) {}
     const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
+    const TRACE_DIRECT_FIELDS: u8 = 0;
     fn trace_transitive_type_info(_: *mut Tti) {}
 }

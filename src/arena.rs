@@ -3,6 +3,7 @@ use super::gc::*;
 use super::trace::*;
 use super::Mark;
 
+use crate::mark::Condemned;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::any::type_name;
 use std::cell::UnsafeCell;
@@ -185,6 +186,9 @@ fn alloc_arena<T>() -> *mut T {
 
 impl<T: Trace> Arena<T> for ArenaInternals<T> {
     fn new() -> ArenaInternals<T> {
+        // if !T::PRE_CONDTION {
+
+        // };
         let bus = GC_BUS.with(|tm| {
             let tm = unsafe { &mut *tm.get() };
             tm.entry(key::<T>()).or_insert_with(|| {
