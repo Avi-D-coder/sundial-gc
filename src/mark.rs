@@ -1,13 +1,13 @@
 use super::gc::*;
 use crate::{
-    arena::alloc_arena,
-    auto_traits::HasGc,
+    arena::{alloc_arena, Header},
+    auto_traits::{HasGc, Immutable},
     gc_logic::{HeaderUnTyped, ARENA_SIZE},
     trace::GcTypeInfo,
 };
 use smallvec::SmallVec;
 use std::ops::Range;
-use std::{cmp::min, mem, ptr};
+use std::{cmp::min, collections::HashMap, mem, ptr};
 
 /// This will be sound once GAT or const Eq &str lands.
 /// The former will allow transmuting only lifetimes.
@@ -30,7 +30,7 @@ pub struct Handlers {
 }
 
 pub unsafe trait Condemned {
-    fn feilds(s: &Self, grey_feilds: u8, region: Range<usize>) -> u8;
+    fn feilds(s: &Self, offset: u8, grey_feilds: u8, region: Range<usize>) -> u8;
     fn evacuate<'e>(
         s: &Self,
         offset: u8,
@@ -39,12 +39,14 @@ pub unsafe trait Condemned {
         handlers: &mut Handlers,
     );
 
+    fn direct_gc_types(t: &mut HashMap<GcTypeInfo, (SmallVec<[u8; 8]>, u8)>, offset: u8);
+
     const GC_COUNT: u8;
     const PRE_CONDTION: bool;
 }
 
-unsafe impl<T> Condemned for T {
-    default fn feilds(_: &Self, _: u8, _: Range<usize>) -> u8 {
+unsafe impl<T: Immutable> Condemned for T {
+    default fn feilds(_: &Self, _: u8, _: u8, _: Range<usize>) -> u8 {
         // This check is superfluous
         // TODO ensure if gets optimized out
         if !T::HAS_GC {
@@ -53,6 +55,8 @@ unsafe impl<T> Condemned for T {
             panic!("You need to derive Condemned for your type. Required due to a direct Gc<T>")
         }
     }
+
+    default fn direct_gc_types(_: &mut HashMap<GcTypeInfo, (SmallVec<[u8; 8]>, u8)>, _: u8) {}
 
     default fn evacuate<'e>(_: &Self, _: u8, _: u8, _: Range<usize>, _: &mut Handlers) {}
 
@@ -65,9 +69,19 @@ unsafe impl<T> Condemned for T {
     };
 }
 
-unsafe impl<'r, T> Condemned for Gc<'r, T> {
-    fn feilds(_: &Self, _: u8, _: std::ops::Range<usize>) -> u8 {
-        0b0000_0000
+unsafe impl<'r, T: Immutable> Condemned for Gc<'r, T> {
+    /// Returns the bit associated with a condemned ptr
+    fn feilds(s: &Self, offset: u8, grey_feilds: u8, condemned: std::ops::Range<usize>) -> u8 {
+        let bit = 1 << (offset % 8);
+        let ptr = s.ptr as *const T;
+        if grey_feilds & bit == bit
+            && condemned.contains(&(ptr as usize))
+            && (unsafe { (&*Header::from(ptr)).condemned })
+        {
+            bit
+        } else {
+            0b0000_0000
+        }
     }
 
     fn evacuate<'e>(
@@ -110,16 +124,24 @@ unsafe impl<'r, T> Condemned for Gc<'r, T> {
         }
     }
 
+    fn direct_gc_types(t: &mut HashMap<GcTypeInfo, (SmallVec<[u8; 8]>, u8)>, offset: u8) {
+        let (idxs, bits) = t
+            .entry(GcTypeInfo::new::<T>())
+            .or_insert((SmallVec::new(), 0b1111_1111));
+        idxs.push(offset);
+        *bits |= 1 << (offset % 8)
+    }
+
     const GC_COUNT: u8 = 1;
     const PRE_CONDTION: bool = true;
 }
 
 // std impls
 
-unsafe impl<T> Condemned for Option<T> {
-    default fn feilds(s: &Self, grey_feilds: u8, region: Range<usize>) -> u8 {
+unsafe impl<T: Immutable> Condemned for Option<T> {
+    default fn feilds(s: &Self, offset: u8, grey_feilds: u8, region: Range<usize>) -> u8 {
         match s {
-            Some(t) => Condemned::feilds(t, grey_feilds, region),
+            Some(t) => Condemned::feilds(t, offset, grey_feilds, region),
             None => 0b0000_0000,
         }
     }
@@ -137,6 +159,11 @@ unsafe impl<T> Condemned for Option<T> {
         }
     }
 
+    fn direct_gc_types(t: &mut HashMap<GcTypeInfo, (SmallVec<[u8; 8]>, u8)>, offset: u8) {
+        T::direct_gc_types(t, offset)
+    }
+
+    const GC_COUNT: u8 = T::GC_COUNT;
     default const PRE_CONDTION: bool = if T::PRE_CONDTION {
         true
     } else {
@@ -144,15 +171,15 @@ unsafe impl<T> Condemned for Option<T> {
     };
 }
 
-unsafe impl<A, B> Condemned for (A, B) {
-    fn feilds((a, b): &Self, grey_feilds: u8, region: Range<usize>) -> u8 {
+unsafe impl<A: Immutable, B: Immutable> Condemned for (A, B) {
+    fn feilds((a, b): &Self, offset: u8, grey_feilds: u8, region: Range<usize>) -> u8 {
         let mut r = 0b0000_0000;
         if (grey_feilds & 0b1000_0000) == 0b1000_0000 {
-            r |= Condemned::feilds(a, grey_feilds, region.clone());
+            r |= Condemned::feilds(a, offset, grey_feilds, region.clone());
         };
 
         if (grey_feilds & 0b0100_0000) == 0b0100_0000 {
-            r |= Condemned::feilds(b, grey_feilds, region);
+            r |= Condemned::feilds(b, offset, grey_feilds, region);
         };
 
         r
@@ -174,6 +201,11 @@ unsafe impl<A, B> Condemned for (A, B) {
             region.clone(),
             handlers,
         );
+    }
+
+    fn direct_gc_types(t: &mut HashMap<GcTypeInfo, (SmallVec<[u8; 8]>, u8)>, offset: u8) {
+        A::direct_gc_types(t, offset);
+        B::direct_gc_types(t, offset);
     }
 
     const GC_COUNT: u8 = A::GC_COUNT + B::GC_COUNT;

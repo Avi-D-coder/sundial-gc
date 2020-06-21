@@ -67,6 +67,7 @@ pub(crate) struct HeaderUnTyped {
     // finalizers: TODO
     roots: usize,
     finalizers: usize,
+    condemned: bool,
 }
 
 impl HeaderUnTyped {

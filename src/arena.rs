@@ -297,6 +297,7 @@ pub struct Header<T> {
     // finalizers: TODO
     roots: usize,
     finalizers: usize,
+    pub condemned: bool,
 }
 
 impl<T> Header<T> {

@@ -67,10 +67,11 @@ unsafe impl<'r, T: 'r + Trace + Immutable + NoGc> Trace for List<'r, T> {
     }
 }
 
-unsafe impl<'o, 'n, 'r: 'n, O: Trace, N: 'r + Trace> Mark<'o, 'n, 'r, List<'o, O>, List<'r, N>>
+unsafe impl<'o, 'n, 'r: 'n, O: Trace + 'o, N: 'r + Trace> Mark<'o, 'n, 'r, List<'o, O>, List<'r, N>>
     for ArenaGc<List<'r, N>>
 where
     List<'r, N>: Trace,
+    List<'o, O>: Condemned,
 {
     fn mark(&'n self, o: Gc<'o, List<'o, O>>) -> Gc<'r, List<'r, N>> {
         let condemned_self = self.intern.grey_self
@@ -109,7 +110,7 @@ where
     }
 }
 
-unsafe impl<'r, T: Condemned + 'r> Condemned for List<'r, T> {
+unsafe impl<'r, T: Immutable + Condemned + 'r> Condemned for List<'r, T> {
     default fn feilds(x: &List<'r, T>, grey_feilds: u8, condemned: Range<usize>) -> u8 {
         assert!(Self::PRE_CONDTION);
         let mut bloom = 0b0000000;
@@ -134,7 +135,7 @@ unsafe impl<'r, T: Condemned + 'r> Condemned for List<'r, T> {
         };
 }
 
-unsafe impl<'r, T: NoGc + 'r> Condemned for List<'r, T> {
+unsafe impl<'r, T: Immutable + NoGc + 'r> Condemned for List<'r, T> {
     fn feilds(x: &List<'r, T>, grey_feilds: u8, condemned: Range<usize>) -> u8 {
         assert!(Self::PRE_CONDTION);
         let mut bloom = 0b0000000;
