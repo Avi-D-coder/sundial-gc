@@ -95,6 +95,7 @@ where
                 .and_modify(|gc| new_gc = unsafe { std::mem::transmute(*gc) })
                 .or_insert_with(|| {
                     unsafe {
+                        // FIXME overrun
                         *next = ((*next as usize) - std::mem::size_of::<List<N>>()) as *mut _
                     };
                     new_gc

@@ -152,6 +152,7 @@ unsafe impl<'o, 'n, 'r: 'n, O: NoGc + Immutable + 'o, N: NoGc + Immutable + 'r>
                 .entry((offset / size_of::<N>()) as u16)
                 .and_modify(|gc| new_gc = *gc)
                 .or_insert_with(|| {
+                    // FIXME overrun
                     unsafe { *next = ((*next as usize) - size_of::<N>()) as *mut N };
                     new_gc
                 });
