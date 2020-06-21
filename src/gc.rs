@@ -1,6 +1,3 @@
-use crate::trace::*;
-
-use crate::mark::{Condemned, Handlers};
 use std::ops::Deref;
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -27,17 +24,5 @@ impl<'r, T> Deref for Gc<'r, T> {
 impl<'r, T> From<&'static T> for Gc<'r, T> {
     fn from(t: &'static T) -> Self {
         Gc { ptr: &*t }
-    }
-}
-
-unsafe impl<'r, T: 'r + Trace> Trace for Gc<'r, T> {
-    fn trace(_: usize) {}
-    // A Gc<Gc<T>> is equvlent to Gc<T>
-    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [None; 8];
-    const TRACE_DIRECT_FIELDS: u8 = 1;
-    fn trace_transitive_type_info(tti: *mut Tti) {
-        let tti = unsafe { &mut *tti };
-        tti.add_gc::<Self>();
-        T::trace_transitive_type_info(tti)
     }
 }

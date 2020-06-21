@@ -3,7 +3,6 @@ use crate::{
     arena::{alloc_arena, Header},
     auto_traits::{HasGc, Immutable},
     gc_logic::{HeaderUnTyped, ARENA_SIZE},
-    trace::{GcTypeInfo, Trace},
 };
 use smallvec::SmallVec;
 use std::ops::Range;
@@ -48,7 +47,7 @@ impl Tti {
     }
 
     /// Gc is the only type that adds it's self.
-    pub unsafe fn add_gc<T: Trace>(tti: *mut Tti) {
+    pub unsafe fn add_gc<T: Condemned>(tti: *mut Tti) {
         (*tti).type_info.insert(GcTypeInfo::new::<T>());
     }
 
@@ -61,9 +60,33 @@ impl Tti {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GcTypeInfo {
+    pub(crate) evacuate_fn: fn(&u8, u8, u8, Range<usize>, &mut Handlers),
+    pub(crate) transitive_gc_types_fn: fn(*mut Tti),
+    /// `direct_gc_types(t: &mut HashMap<GcTypeInfo, (SmallVec<[u8; 8]>, u8)>, offset: u8)`
+    pub(crate) direct_gc_types_fn: fn(&mut HashMap<GcTypeInfo, (SmallVec<[u8; 8]>, u8)>, u8),
+    pub(crate) needs_drop: bool,
+    pub(crate) size: u16,
+    pub(crate) align: u16,
+}
+
+impl GcTypeInfo {
+    pub const fn new<T: Condemned>() -> Self {
+        Self {
+            evacuate_fn: T::evacuate,
+            transitive_gc_types_fn: (),
+            direct_gc_types_fn: (),
+            needs_drop: mem::needs_drop::<T>(),
+            size: mem::size_of::<T>() as u16,
+            align: mem::align_of::<T>() as u16,
+        }
+    }
+}
+
 pub unsafe trait Condemned {
     fn feilds(s: &Self, offset: u8, grey_feilds: u8, region: Range<usize>) -> u8;
-    fn evacuate<'e>(
+    unsafe fn evacuate<'e>(
         s: &Self,
         offset: u8,
         grey_feilds: u8,

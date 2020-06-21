@@ -1,9 +1,6 @@
-use super::auto_traits::*;
-use super::gc::*;
-use super::trace::*;
-use super::Mark;
-
-use crate::mark::Condemned;
+use crate::auto_traits::*;
+use crate::gc::*;
+use crate::mark::{Condemned, GcTypeInfo, Mark};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::any::type_name;
 use std::cell::UnsafeCell;
@@ -14,7 +11,7 @@ use std::ptr;
 use std::sync::Mutex;
 use std::{cmp::min, thread_local};
 
-pub struct Arena<T: Trace + Condemned + Immutable> {
+pub struct Arena<T: Condemned + Immutable> {
     // TODO compact representation of arenas
     // TODO make all these private by wrapping up needed functionality.
     // TODO derive header from next
@@ -26,7 +23,7 @@ pub struct Arena<T: Trace + Condemned + Immutable> {
     pub next: UnsafeCell<*mut T>,
 }
 
-impl<T: Trace + Immutable + Condemned> Arena<T> {
+impl<T: Immutable + Condemned> Arena<T> {
     pub fn header(&self) -> &Header<T> {
         unsafe { &*Header::from(*self.next.get() as *const _) }
     }
@@ -97,7 +94,7 @@ unsafe impl<'o, 'n, 'r: 'n, O: Immutable + 'o, N: Immutable + 'r> Mark<'o, 'n, '
     }
 }
 
-impl<T: Trace + Immutable + Condemned> Drop for Arena<T> {
+impl<T: Immutable + Condemned> Drop for Arena<T> {
     fn drop(&mut self) {
         GC_BUS.with(|tm| {
             let tm = unsafe { &mut *tm.get() };
@@ -189,7 +186,7 @@ pub fn alloc_arena<T>() -> *mut T {
     (mem_addr + (capacity * size_of::<T>())) as *mut T
 }
 
-impl<T: Trace + Immutable + Condemned> Arena<T> {
+impl<T: Immutable + Condemned> Arena<T> {
     pub fn new() -> Arena<T> {
         // if !T::PRE_CONDITION {
 
@@ -321,7 +318,7 @@ thread_local! {
     // FIXME upon drop/thread end send End for cached_next and Msg::Gc.next
 }
 
-fn key<T: Trace>() -> (GcTypeInfo, usize) {
+fn key<T: Condemned>() -> (GcTypeInfo, usize) {
     (
         GcTypeInfo::new::<T>(),
         ptr::drop_in_place::<T> as *const fn(*mut T) as usize,

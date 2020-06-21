@@ -1,6 +1,5 @@
-use super::arena::*;
-use super::trace::*;
-
+use crate::arena::*;
+use crate::mark::*;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::mem;
 use std::sync::{mpsc::*, Mutex};
@@ -341,7 +340,7 @@ impl TypeRelations {
         } = self;
         let ts = active.entry(type_info.info).or_insert_with(|| {
             let mut direct_children: HashMap<GcTypeInfo, u8> = HashMap::new();
-            direct_gced(type_info.info, &mut direct_children);
+            type_info.info.direct_gc_types(&mut direct_children);
             direct_children.iter().for_each(|(child, bit)| {
                 let cp = parents.entry(*child).or_default();
                 cp.direct.insert(type_info.info, *bit);
