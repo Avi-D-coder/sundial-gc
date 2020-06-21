@@ -2,6 +2,7 @@ use super::gc::*;
 use crate::{auto_traits::HasGc, trace::GcTypeInfo};
 use smallvec::SmallVec;
 use std::ops::Range;
+use std::{mem, ptr};
 
 /// This will be sound once GAT or const Eq &str lands.
 /// The former will allow transmuting only lifetimes.
@@ -13,19 +14,22 @@ pub unsafe trait Mark<'o, 'n, 'r: 'n, O: 'o, N: 'r> {
 
 // Blanket Arena<T> impl is in src/arena.rs
 
-pub struct Handlers<'e, E: FnMut(*const u8)> {
+/// Currently just holds Arenas
+pub struct Handlers {
     // TODO benchmark sizes
-    translation: &'e SmallVec<[u8; 16]>,
-    effects: &'e mut SmallVec<[E; 4]>,
+    translation: SmallVec<[u8; 16]>,
+    nexts: SmallVec<[*mut u8; 4]>,
+    /// forward(old, new) -> already evacuated
+    forward: fn(*const u8, *const u8) -> Option<*const u8>,
 }
 
 pub unsafe trait Condemned {
     fn feilds(s: &Self, grey_feilds: u8, region: Range<usize>) -> u8;
-    fn evacuate<'e, E: FnMut(*const u8), const OFFSET: u8>(
+    fn evacuate<'e, const OFFSET: u8>(
         s: &Self,
         grey_feilds: u8,
         region: Range<usize>,
-        handlers: Handlers<'e, E>,
+        handlers: &mut Handlers,
     );
 
     const PRE_CONDTION: bool;
@@ -42,13 +46,7 @@ unsafe impl<T> Condemned for T {
         }
     }
 
-    default fn evacuate<'e, E: FnMut(*const u8), const OFFSET: u8>(
-        _: &Self,
-        _: u8,
-        _: Range<usize>,
-        _: Handlers<'e, E>,
-    ) {
-    }
+    default fn evacuate<'e, const OFFSET: u8>(_: &Self, _: u8, _: Range<usize>, _: &mut Handlers) {}
 
     default const PRE_CONDTION: bool = if T::HAS_GC {
         // TODO When fmt is allowed in const s/your type/type_name::<T>()
@@ -63,13 +61,33 @@ unsafe impl<'r, T> Condemned for Gc<'r, T> {
         0b0000_0000
     }
     const PRE_CONDTION: bool = true;
-    fn evacuate<'e, E: FnMut(*const u8), const OFFSET: u8>(
+    fn evacuate<'e, const OFFSET: u8>(
         s: &Self,
-        grey_feilds: u8,
+        _: u8,
         region: std::ops::Range<usize>,
-        handlers: Handlers<'e, E>,
+        handlers: &mut Handlers,
     ) {
-        todo!()
+        let ptr = s.ptr as *const T;
+        let addr = ptr as usize;
+        if region.contains(&addr) {
+            let i = handlers.translation[OFFSET as usize];
+            if let Some(next) = handlers.nexts.get_mut(i as usize) {
+                unsafe { ptr::copy_nonoverlapping(ptr, *next as *mut T, 1) }
+                let forward = handlers.forward;
+                if let Some(pre_evac) = forward(ptr as *const u8, *next as *const u8) {
+                    let r = s as *const Gc<T> as *mut *const T;
+                    unsafe {
+                        *r = pre_evac as *const T;
+                    }
+                } else {
+                    let r = s as *const Gc<T> as *mut *const T;
+                    unsafe {
+                        *r = *next as *const T;
+                    }
+                    *next = (addr + mem::size_of::<T>()) as *mut u8;
+                }
+            }
+        }
     }
 }
 
@@ -83,14 +101,14 @@ unsafe impl<T> Condemned for Option<T> {
         }
     }
 
-    fn evacuate<'e, E: FnMut(*const u8), const OFFSET: u8>(
+    fn evacuate<'e, const OFFSET: u8>(
         s: &Self,
         grey_feilds: u8,
         region: Range<usize>,
-        handlers: Handlers<'e, E>,
+        handlers: &mut Handlers,
     ) {
         match s {
-            Some(t) => Condemned::evacuate::<E, OFFSET>(t, grey_feilds, region, handlers),
+            Some(t) => Condemned::evacuate::<OFFSET>(t, grey_feilds, region, handlers),
             None => (),
         }
     }
