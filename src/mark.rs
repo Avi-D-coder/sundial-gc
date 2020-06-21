@@ -1,8 +1,13 @@
 use super::gc::*;
-use crate::{auto_traits::HasGc, trace::GcTypeInfo};
+use crate::{
+    arena::alloc_arena,
+    auto_traits::HasGc,
+    gc_logic::{HeaderUnTyped, ARENA_SIZE},
+    trace::GcTypeInfo,
+};
 use smallvec::SmallVec;
 use std::ops::Range;
-use std::{mem, ptr};
+use std::{cmp::min, mem, ptr};
 
 /// This will be sound once GAT or const Eq &str lands.
 /// The former will allow transmuting only lifetimes.
@@ -21,6 +26,7 @@ pub struct Handlers {
     nexts: SmallVec<[*mut u8; 4]>,
     /// forward(old, new) -> already evacuated
     forward: fn(*const u8, *const u8) -> Option<*const u8>,
+    filled: SmallVec<[SmallVec<[*mut HeaderUnTyped; 1]>; 4]>,
 }
 
 pub unsafe trait Condemned {
@@ -72,6 +78,15 @@ unsafe impl<'r, T> Condemned for Gc<'r, T> {
         if region.contains(&addr) {
             let i = handlers.translation[OFFSET as usize];
             if let Some(next) = handlers.nexts.get_mut(i as usize) {
+                let next_addr = *next as usize;
+                let header_addr = next_addr - next_addr % ARENA_SIZE;
+
+                // Get a new Arena if this ones full
+                if HeaderUnTyped::last_offset(mem::align_of::<T>() as u16) as usize > next_addr {
+                    handlers.filled[i as usize].push(header_addr as *mut HeaderUnTyped);
+                    *next = alloc_arena::<T>() as *mut u8;
+                };
+
                 unsafe { ptr::copy_nonoverlapping(ptr, *next as *mut T, 1) }
                 let forward = handlers.forward;
                 if let Some(pre_evac) = forward(ptr as *const u8, *next as *const u8) {
@@ -84,7 +99,8 @@ unsafe impl<'r, T> Condemned for Gc<'r, T> {
                     unsafe {
                         *r = *next as *const T;
                     }
-                    *next = (addr + mem::size_of::<T>()) as *mut u8;
+                    // TODO fix overwrite when size_of<T> > size_of<Header> via min in other places
+                    *next = min(addr - mem::size_of::<T>(), header_addr) as *mut u8;
                 }
             }
         }

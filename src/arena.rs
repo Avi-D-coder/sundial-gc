@@ -170,8 +170,8 @@ const fn header_size<T>() -> usize {
     header + ((align - (header % align)) % align)
 }
 
-/// Returns `header` and `next`.
-fn alloc_arena<T>() -> *mut T {
+/// Returns `next`.
+pub fn alloc_arena<T>() -> *mut T {
     // Get more memory from system allocator
     let mem_ptr = unsafe { System.alloc(Layout::new::<Mem>()) };
     let mem_addr = mem_ptr as usize;
@@ -180,13 +180,16 @@ fn alloc_arena<T>() -> *mut T {
             < unsafe { &std::mem::transmute::<_, &Mem>(mem_ptr)._mem[16383] } as *const _ as usize
     );
 
+    // FIXME animalizes Header
+
+    // FIXME this seems wrong! Make sure it's in sync with ArenaUntyped
     let capacity = (16384 - header_size::<T>()) / size_of::<T>();
     (mem_addr + (capacity * size_of::<T>())) as *mut T
 }
 
 impl<T: Trace> Arena<T> for ArenaInternals<T> {
     fn new() -> ArenaInternals<T> {
-        // if !T::PRE_CONDTION {
+        // if !T::PRE_CONDITION {
 
         // };
         let bus = GC_BUS.with(|tm| {

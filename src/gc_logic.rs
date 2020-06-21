@@ -13,7 +13,7 @@ use std::{
 
 pub(crate) static mut REGISTER: Option<Sender<RegMsg>> = None;
 
-const ARENA_SIZE: usize = 16384;
+pub const ARENA_SIZE: usize = 16384;
 
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub(crate) struct TypeInfo {
@@ -60,7 +60,7 @@ impl Default for Parents {
 }
 
 /// Keep in sync with Header<T>
-struct HeaderUnTyped {
+pub(crate) struct HeaderUnTyped {
     // TODO private
     pub evacuated: Mutex<HashMap<u16, *const u8>>,
     // roots: HashMap<u16, *const Box<UnsafeCell<*const T>>>,
@@ -71,13 +71,13 @@ struct HeaderUnTyped {
 
 impl HeaderUnTyped {
     /// last is closest to Header, since we bump down.
-    fn last_offset(align: u16) -> u16 {
+    pub(crate) fn last_offset(align: u16) -> u16 {
         let header = mem::size_of::<HeaderUnTyped>() as u16;
         header + ((align - (header % align)) % align)
     }
 
     // TODO is this right?
-    fn first_offset(align: u16, size: u16) -> u16 {
+    pub(crate) fn first_offset(align: u16, size: u16) -> u16 {
         let cap = (ARENA_SIZE as u16 - HeaderUnTyped::last_offset(align)) / size;
         HeaderUnTyped::last_offset(align) + (cap * size)
     }
