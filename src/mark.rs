@@ -3,11 +3,15 @@ use crate::{
     arena::{alloc_arena, Header},
     auto_traits::{HasGc, Immutable},
     gc_logic::{HeaderUnTyped, ARENA_SIZE},
-    trace::GcTypeInfo,
+    trace::{GcTypeInfo, Trace},
 };
 use smallvec::SmallVec;
 use std::ops::Range;
-use std::{cmp::min, collections::HashMap, mem, ptr};
+use std::{
+    cmp::min,
+    collections::{HashMap, HashSet},
+    mem, ptr,
+};
 
 /// This will be sound once GAT or const Eq &str lands.
 /// The former will allow transmuting only lifetimes.
@@ -29,6 +33,34 @@ pub struct Handlers {
     filled: SmallVec<[SmallVec<[*mut HeaderUnTyped; 1]>; 4]>,
 }
 
+pub struct Tti {
+    /// Holds fn ptr of trace_transitive_type_info calls
+    parrents: HashSet<usize>,
+    pub type_info: HashSet<GcTypeInfo>,
+}
+
+impl Tti {
+    pub fn new() -> Self {
+        Self {
+            parrents: HashSet::new(),
+            type_info: HashSet::new(),
+        }
+    }
+
+    /// Gc is the only type that adds it's self.
+    pub unsafe fn add_gc<T: Trace>(tti: *mut Tti) {
+        (*tti).type_info.insert(GcTypeInfo::new::<T>());
+    }
+
+    pub unsafe fn add_trans<T: Condemned>(tti: *mut Tti) {
+        // Prevent cycles by only calling each function once
+        let tgt = T::transitive_gc_types;
+        if (*tti).parrents.insert(tgt as *const fn(*mut Tti) as usize) {
+            T::transitive_gc_types(tti)
+        }
+    }
+}
+
 pub unsafe trait Condemned {
     fn feilds(s: &Self, offset: u8, grey_feilds: u8, region: Range<usize>) -> u8;
     fn evacuate<'e>(
@@ -40,6 +72,7 @@ pub unsafe trait Condemned {
     );
 
     fn direct_gc_types(t: &mut HashMap<GcTypeInfo, (SmallVec<[u8; 8]>, u8)>, offset: u8);
+    fn transitive_gc_types(tti: *mut Tti);
 
     const GC_COUNT: u8;
     const PRE_CONDTION: bool;
@@ -60,6 +93,8 @@ unsafe impl<T: Immutable> Condemned for T {
 
     default fn evacuate<'e>(_: &Self, _: u8, _: u8, _: Range<usize>, _: &mut Handlers) {}
 
+    default fn transitive_gc_types(_: *mut Tti) {}
+
     default const GC_COUNT: u8 = 0;
     default const PRE_CONDTION: bool = if T::HAS_GC {
         // TODO When fmt is allowed in const s/your type/type_name::<T>()
@@ -69,7 +104,7 @@ unsafe impl<T: Immutable> Condemned for T {
     };
 }
 
-unsafe impl<'r, T: Immutable> Condemned for Gc<'r, T> {
+unsafe impl<'r, T: Immutable + Condemned> Condemned for Gc<'r, T> {
     /// Returns the bit associated with a condemned ptr
     fn feilds(s: &Self, offset: u8, grey_feilds: u8, condemned: std::ops::Range<usize>) -> u8 {
         let bit = 1 << (offset % 8);
@@ -132,6 +167,13 @@ unsafe impl<'r, T: Immutable> Condemned for Gc<'r, T> {
         *bits |= 1 << (offset % 8)
     }
 
+    fn transitive_gc_types(tti: *mut Tti) {
+        unsafe {
+            Tti::add_gc::<T>(tti);
+            Tti::add_trans::<T>(tti);
+        }
+    }
+
     const GC_COUNT: u8 = 1;
     const PRE_CONDTION: bool = true;
 }
@@ -161,6 +203,10 @@ unsafe impl<T: Immutable> Condemned for Option<T> {
 
     fn direct_gc_types(t: &mut HashMap<GcTypeInfo, (SmallVec<[u8; 8]>, u8)>, offset: u8) {
         T::direct_gc_types(t, offset)
+    }
+
+    fn transitive_gc_types(tti: *mut Tti) {
+        unsafe { Tti::add_trans::<T>(tti) }
     }
 
     const GC_COUNT: u8 = T::GC_COUNT;
@@ -206,6 +252,13 @@ unsafe impl<A: Immutable, B: Immutable> Condemned for (A, B) {
     fn direct_gc_types(t: &mut HashMap<GcTypeInfo, (SmallVec<[u8; 8]>, u8)>, offset: u8) {
         A::direct_gc_types(t, offset);
         B::direct_gc_types(t, offset);
+    }
+
+    fn transitive_gc_types(tti: *mut Tti) {
+        unsafe {
+            Tti::add_trans::<A>(tti);
+            Tti::add_trans::<B>(tti);
+        }
     }
 
     const GC_COUNT: u8 = A::GC_COUNT + B::GC_COUNT;
