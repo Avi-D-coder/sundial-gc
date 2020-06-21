@@ -111,7 +111,7 @@ unsafe impl<'r, T> Condemned for Gc<'r, T> {
     }
 
     const GC_COUNT: u8 = 1;
-    const PRE_CONDTION: bool = T::PRE_CONDTION;
+    const PRE_CONDTION: bool = true;
 }
 
 // std impls
