@@ -31,13 +31,15 @@ pub struct Handlers {
 
 pub unsafe trait Condemned {
     fn feilds(s: &Self, grey_feilds: u8, region: Range<usize>) -> u8;
-    fn evacuate<'e, const OFFSET: u8>(
+    fn evacuate<'e>(
         s: &Self,
+        offset: u8,
         grey_feilds: u8,
         region: Range<usize>,
         handlers: &mut Handlers,
     );
 
+    const GC_COUNT: u8;
     const PRE_CONDTION: bool;
 }
 
@@ -52,8 +54,9 @@ unsafe impl<T> Condemned for T {
         }
     }
 
-    default fn evacuate<'e, const OFFSET: u8>(_: &Self, _: u8, _: Range<usize>, _: &mut Handlers) {}
+    default fn evacuate<'e>(_: &Self, _: u8, _: u8, _: Range<usize>, _: &mut Handlers) {}
 
+    default const GC_COUNT: u8 = 0;
     default const PRE_CONDTION: bool = if T::HAS_GC {
         // TODO When fmt is allowed in const s/your type/type_name::<T>()
         panic!("You need to derive Condemned for your type. Required due to a direct Gc<T>");
@@ -66,9 +69,10 @@ unsafe impl<'r, T> Condemned for Gc<'r, T> {
     fn feilds(_: &Self, _: u8, _: std::ops::Range<usize>) -> u8 {
         0b0000_0000
     }
-    const PRE_CONDTION: bool = true;
-    fn evacuate<'e, const OFFSET: u8>(
+
+    fn evacuate<'e>(
         s: &Self,
+        offset: u8,
         _: u8,
         region: std::ops::Range<usize>,
         handlers: &mut Handlers,
@@ -76,7 +80,7 @@ unsafe impl<'r, T> Condemned for Gc<'r, T> {
         let ptr = s.ptr as *const T;
         let addr = ptr as usize;
         if region.contains(&addr) {
-            let i = handlers.translation[OFFSET as usize];
+            let i = handlers.translation[offset as usize];
             if let Some(next) = handlers.nexts.get_mut(i as usize) {
                 let next_addr = *next as usize;
                 let header_addr = next_addr - next_addr % ARENA_SIZE;
@@ -105,6 +109,9 @@ unsafe impl<'r, T> Condemned for Gc<'r, T> {
             }
         }
     }
+
+    const GC_COUNT: u8 = 1;
+    const PRE_CONDTION: bool = T::PRE_CONDTION;
 }
 
 // std impls
@@ -117,14 +124,15 @@ unsafe impl<T> Condemned for Option<T> {
         }
     }
 
-    fn evacuate<'e, const OFFSET: u8>(
+    fn evacuate<'e>(
         s: &Self,
+        offset: u8,
         grey_feilds: u8,
         region: Range<usize>,
         handlers: &mut Handlers,
     ) {
         match s {
-            Some(t) => Condemned::evacuate::<OFFSET>(t, grey_feilds, region, handlers),
+            Some(t) => Condemned::evacuate(t, offset, grey_feilds, region, handlers),
             None => (),
         }
     }
@@ -133,5 +141,45 @@ unsafe impl<T> Condemned for Option<T> {
         true
     } else {
         panic!("You need to derive Condemned for T. Required due to a direct Gc<A> in Option<T>");
+    };
+}
+
+unsafe impl<A, B> Condemned for (A, B) {
+    fn feilds((a, b): &Self, grey_feilds: u8, region: Range<usize>) -> u8 {
+        let mut r = 0b0000_0000;
+        if (grey_feilds & 0b1000_0000) == 0b1000_0000 {
+            r |= Condemned::feilds(a, grey_feilds, region.clone());
+        };
+
+        if (grey_feilds & 0b0100_0000) == 0b0100_0000 {
+            r |= Condemned::feilds(b, grey_feilds, region);
+        };
+
+        r
+    }
+
+    fn evacuate<'e>(
+        (a, b): &Self,
+        offset: u8,
+        grey_feilds: u8,
+        region: Range<usize>,
+        handlers: &mut Handlers,
+    ) {
+        Condemned::evacuate(a, offset, grey_feilds, region.clone(), handlers);
+
+        Condemned::evacuate(
+            b,
+            offset + A::GC_COUNT,
+            grey_feilds,
+            region.clone(),
+            handlers,
+        );
+    }
+
+    const GC_COUNT: u8 = A::GC_COUNT + B::GC_COUNT;
+    const PRE_CONDTION: bool = if A::PRE_CONDTION && B::PRE_CONDTION {
+        true
+    } else {
+        panic!("You need to derive Condemned for A & B. Required due to a direct Gc<T> in (A, B)");
     };
 }
