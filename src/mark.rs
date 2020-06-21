@@ -225,7 +225,7 @@ unsafe impl<A: Immutable, B: Immutable> Condemned for (A, B) {
         };
 
         if (grey_feilds & 0b0100_0000) == 0b0100_0000 {
-            r |= Condemned::feilds(b, offset, grey_feilds, region);
+            r |= Condemned::feilds(b, offset + A::GC_COUNT, grey_feilds, region);
         };
 
         r

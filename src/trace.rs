@@ -90,6 +90,24 @@ impl Tti {
     }
 }
 
+pub fn direct_gced(ti: GcTypeInfo, gced: &mut HashMap<GcTypeInfo, u8>) {
+    for (field, ti) in unsafe { *ti.child_gc_info }
+        .iter()
+        .filter_map(|o| *o)
+        .enumerate()
+    {
+        if ti.is_gc {
+            let bset = gced.entry(ti).or_insert(0b0000_0000);
+            // Condemed logic must match
+            *bset |= 1 << (field as u8);
+        } else {
+            for ti in unsafe { *ti.child_gc_info }.iter().filter_map(|o| *o) {
+                direct_gced(ti, gced)
+            }
+        }
+    }
+}
+
 // TODO test direct_gced
 
 trait IsGc {

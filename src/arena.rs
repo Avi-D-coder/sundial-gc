@@ -12,18 +12,9 @@ use std::mem::{align_of, size_of, transmute};
 use std::ops::Range;
 use std::ptr;
 use std::sync::Mutex;
-use std::thread_local;
+use std::{cmp::min, thread_local};
 
-pub struct ArenaPrim<T: Trace> {
-    intern: ArenaInternals<T>,
-}
-
-/// An arena allocator for allocating GCed objects containing GCed fields.
-pub struct ArenaGc<T: Trace> {
-    pub intern: ArenaInternals<T>,
-}
-
-pub struct ArenaInternals<T: Trace> {
+pub struct Arena<T: Trace + Condemned + Immutable> {
     // TODO compact representation of arenas
     // TODO make all these private by wrapping up needed functionality.
     // TODO derive header from next
@@ -35,7 +26,7 @@ pub struct ArenaInternals<T: Trace> {
     pub next: UnsafeCell<*mut T>,
 }
 
-impl<T: Trace> ArenaInternals<T> {
+impl<T: Trace + Immutable + Condemned> Arena<T> {
     pub fn header(&self) -> &Header<T> {
         unsafe { &*Header::from(*self.next.get() as *const _) }
     }
@@ -55,43 +46,58 @@ pub(crate) struct Mem {
     _mem: [u8; 16384],
 }
 
-pub trait Arena<T> {
-    fn new() -> Self;
-    fn advance(&mut self) -> Self;
-    fn gc_alloc<'a, 'r: 'a>(&'a self, _t: T) -> Gc<'r, T>;
-}
+unsafe impl<'o, 'n, 'r: 'n, O: Immutable + 'o, N: Immutable + 'r> Mark<'o, 'n, 'r, O, N>
+    for Arena<N>
+{
+    default fn mark(&self, old: Gc<'o, O>) -> Gc<'r, N> {
+        if type_name::<O>() != type_name::<N>() {
+            // TODO once Eq for &str is const make this const
+            panic!("O is a different type then N, mark only changes lifetimes")
+        };
+        let condemned_self =
+            self.grey_self && self.white_region.contains(&(&*old as *const _ as usize));
 
-impl<T: NoGc + Trace> Arena<T> for ArenaPrim<T> {
-    fn new() -> Self {
-        Self {
-            intern: Arena::new(),
+        let grey_feilds = unsafe { &mut *self.grey_feilds.get() };
+        let cf = Condemned::feilds(&*old, 0, *grey_feilds, self.white_region.clone());
+
+        if condemned_self || (0b0000_0000 != cf) {
+            let next = self.next.get();
+            if (next as usize) < self.header() as *const _ as usize + header_size::<N>() {
+                // TODO
+                panic!("Allocating additional memory for an arena not yet supported");
+            };
+
+            unsafe { std::ptr::copy(std::mem::transmute::<_, *const N>(old), *next, 1) };
+            let mut new_gc: *const N = next as _;
+            let old_addr = &*old as *const _ as usize;
+            let offset = old_addr % 16384;
+            let old_header = unsafe { &*((old_addr - offset) as *const Header<N>) };
+            let evacuated = old_header.evacuated.lock();
+            evacuated
+                .unwrap()
+                .entry((offset / std::mem::size_of::<N>()) as u16)
+                .and_modify(|gc| new_gc = unsafe { std::mem::transmute(*gc) })
+                .or_insert_with(|| {
+                    unsafe {
+                        // FIXME overrun
+                        *next = min(
+                            (*next as usize) - std::mem::size_of::<N>(),
+                            self.header() as *const _ as usize,
+                        ) as *mut _
+                    };
+                    new_gc
+                });
+            Gc {
+                ptr: unsafe { &*new_gc },
+            }
+        } else {
+            // old contains no direct condemned ptrs
+            unsafe { std::mem::transmute(old) }
         }
     }
-    fn gc_alloc<'a, 'r: 'a>(&'a self, t: T) -> Gc<'r, T> {
-        self.intern.gc_alloc(t)
-    }
-
-    fn advance(&mut self) -> Self {
-        unimplemented!()
-    }
 }
 
-impl<T: Trace> Arena<T> for ArenaGc<T> {
-    fn new() -> Self {
-        Self {
-            intern: Arena::new(),
-        }
-    }
-    fn gc_alloc<'a, 'r: 'a>(&'a self, t: T) -> Gc<'r, T> {
-        self.intern.gc_alloc(t)
-    }
-
-    fn advance(&mut self) -> Self {
-        unimplemented!()
-    }
-}
-
-impl<T: Trace> Drop for ArenaInternals<T> {
+impl<T: Trace + Immutable + Condemned> Drop for Arena<T> {
     fn drop(&mut self) {
         GC_BUS.with(|tm| {
             let tm = unsafe { &mut *tm.get() };
@@ -128,19 +134,14 @@ impl<T: Trace> Drop for ArenaInternals<T> {
 }
 
 unsafe impl<'o, 'n, 'r: 'n, O: NoGc + Immutable + 'o, N: NoGc + Immutable + 'r>
-    Mark<'o, 'n, 'r, O, N> for ArenaPrim<N>
+    Mark<'o, 'n, 'r, O, N> for Arena<N>
 {
     #[inline(always)]
     default fn mark(&'n self, o: Gc<'o, O>) -> Gc<'r, N> {
         // TODO make const https://github.com/rust-lang/rfcs/pull/2632
         assert_eq!(type_name::<O>(), type_name::<N>());
-        if self.intern.grey_self
-            && self
-                .intern
-                .white_region
-                .contains(&(&*o as *const _ as usize))
-        {
-            let next = self.intern.next.get();
+        if self.grey_self && self.white_region.contains(&(&*o as *const _ as usize)) {
+            let next = self.next.get();
             unsafe { ptr::copy(transmute(o), *next, 1) };
             let mut new_gc = next as *const N;
             let old_addr = &*o as *const O as usize;
@@ -188,8 +189,8 @@ pub fn alloc_arena<T>() -> *mut T {
     (mem_addr + (capacity * size_of::<T>())) as *mut T
 }
 
-impl<T: Trace> Arena<T> for ArenaInternals<T> {
-    fn new() -> ArenaInternals<T> {
+impl<T: Trace + Immutable + Condemned> Arena<T> {
+    pub fn new() -> Arena<T> {
         // if !T::PRE_CONDITION {
 
         // };
@@ -229,7 +230,7 @@ impl<T: Trace> Arena<T> for ArenaInternals<T> {
             });
 
             msgs[bus_idx] = Msg::Slot;
-            ArenaInternals {
+            Arena {
                 bus_idx: bus_idx as u8,
                 new_allocation,
                 next,
@@ -262,7 +263,7 @@ impl<T: Trace> Arena<T> for ArenaInternals<T> {
                 white_end: 1,
             };
 
-            ArenaInternals {
+            Arena {
                 bus_idx: bus_idx as u8,
                 new_allocation,
                 next: UnsafeCell::new(next),
@@ -273,7 +274,7 @@ impl<T: Trace> Arena<T> for ArenaInternals<T> {
         }
     }
 
-    fn gc_alloc<'a, 'r: 'a>(&'a self, t: T) -> Gc<'r, T> {
+    pub fn gc_alloc<'a, 'r: 'a>(&'a self, t: T) -> Gc<'r, T> {
         unsafe {
             if self.full() {
                 panic!("Growing `Arena`s not yet implemented")
@@ -285,9 +286,9 @@ impl<T: Trace> Arena<T> for ArenaInternals<T> {
         }
     }
 
-    fn advance(&mut self) -> Self {
-        unimplemented!()
-    }
+    // fn advance(&mut self) -> Self {
+    //     unimplemented!()
+    // }
 }
 
 pub struct Header<T> {
@@ -311,7 +312,7 @@ pub(crate) type Bus = Mutex<[Msg; 8]>;
 
 thread_local! {
     /// Map from type to GC communication bus.
-    /// `ArenaInternals.next` from an `Msg::End` with excise capacity.
+    /// `Arena.next` from an `Msg::End` with excise capacity.
     /// Cached invariant from last `Msg::Gc`.
     static GC_BUS: UnsafeCell<
         HashMap<(GcTypeInfo, usize), Box<((Option<*mut u8>, GcInvariant), Bus)>>,
