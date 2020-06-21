@@ -133,10 +133,9 @@ impl TypeState {
             invariant,
             ..
         } = self;
-        let last_offset = HeaderUnTyped::last_offset(type_info.info.alignment) as usize;
+        let last_offset = HeaderUnTyped::last_offset(type_info.info.align) as usize;
         let first_offset =
-            HeaderUnTyped::first_offset(type_info.info.alignment, type_info.info.byte_size)
-                as usize;
+            HeaderUnTyped::first_offset(type_info.info.align, type_info.info.size) as usize;
         *epoch += 1;
 
         // TODO lift allocation
@@ -339,15 +338,16 @@ impl TypeRelations {
             mem,
         } = self;
         let ts = active.entry(type_info.info).or_insert_with(|| {
-            let mut direct_children: HashMap<GcTypeInfo, u8> = HashMap::new();
-            type_info.info.direct_gc_types(&mut direct_children);
-            direct_children.iter().for_each(|(child, bit)| {
+            let mut direct_children: HashMap<GcTypeInfo, TypeRow> = HashMap::new();
+            let direct_gc_types = unsafe { *type_info.info.direct_gc_types_fn };
+            direct_gc_types(&mut direct_children, 0);
+            direct_children.iter().for_each(|(child, row)| {
                 let cp = parents.entry(*child).or_default();
-                cp.direct.insert(type_info.info, *bit);
+                cp.direct.insert(type_info.info, row.1);
             });
 
             let mut tti = Tti::new();
-            let tti_fn = type_info.info.tti_ptr;
+            let tti_fn = unsafe { *type_info.info.transitive_gc_types_fn };
             tti_fn(&mut tti as *mut Tti);
             tti.type_info.iter().for_each(|child| {
                 let cp = parents.entry(*child).or_default();

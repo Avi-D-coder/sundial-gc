@@ -60,26 +60,32 @@ impl Tti {
     }
 }
 
+/// `([Offsets], CompressedOffsets)`
+/// Encodes the positions a type occurs in.
+pub(crate) type TypeRow = (SmallVec<[u8; 8]>, u8);
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GcTypeInfo {
-    pub(crate) evacuate_fn: fn(&u8, u8, u8, Range<usize>, &mut Handlers),
-    pub(crate) transitive_gc_types_fn: fn(*mut Tti),
-    /// `direct_gc_types(t: &mut HashMap<GcTypeInfo, (SmallVec<[u8; 8]>, u8)>, offset: u8)`
-    pub(crate) direct_gc_types_fn: fn(&mut HashMap<GcTypeInfo, (SmallVec<[u8; 8]>, u8)>, u8),
+    pub(crate) evacuate_fn: *const fn(&u8, u8, u8, Range<usize>, &mut Handlers),
+    pub(crate) transitive_gc_types_fn: *const fn(*mut Tti),
+    /// `direct_gc_types(&mut HashMap<GcTypeInfo, ([offset: u8], bits: u8)>, starting_offset: u8 = 0)`
+    pub(crate) direct_gc_types_fn: *const fn(&mut HashMap<GcTypeInfo, TypeRow>, u8),
     pub(crate) needs_drop: bool,
     pub(crate) size: u16,
     pub(crate) align: u16,
 }
 
 impl GcTypeInfo {
-    pub const fn new<T: Condemned>() -> Self {
-        Self {
-            evacuate_fn: T::evacuate,
-            transitive_gc_types_fn: (),
-            direct_gc_types_fn: (),
-            needs_drop: mem::needs_drop::<T>(),
-            size: mem::size_of::<T>() as u16,
-            align: mem::align_of::<T>() as u16,
+    pub fn new<T: Condemned>() -> Self {
+        unsafe {
+            Self {
+                evacuate_fn: mem::transmute(&T::evacuate),
+                transitive_gc_types_fn: mem::transmute(&T::transitive_gc_types),
+                direct_gc_types_fn: mem::transmute(&T::direct_gc_types),
+                needs_drop: mem::needs_drop::<T>(),
+                size: mem::size_of::<T>() as u16,
+                align: mem::align_of::<T>() as u16,
+            }
         }
     }
 }
@@ -94,7 +100,7 @@ pub unsafe trait Condemned {
         handlers: &mut Handlers,
     );
 
-    fn direct_gc_types(t: &mut HashMap<GcTypeInfo, (SmallVec<[u8; 8]>, u8)>, offset: u8);
+    fn direct_gc_types(t: &mut HashMap<GcTypeInfo, TypeRow>, offset: u8);
     fn transitive_gc_types(tti: *mut Tti);
 
     const GC_COUNT: u8;
@@ -112,9 +118,9 @@ unsafe impl<T: Immutable> Condemned for T {
         }
     }
 
-    default fn direct_gc_types(_: &mut HashMap<GcTypeInfo, (SmallVec<[u8; 8]>, u8)>, _: u8) {}
+    default fn direct_gc_types(_: &mut HashMap<GcTypeInfo, TypeRow>, _: u8) {}
 
-    default fn evacuate<'e>(_: &Self, _: u8, _: u8, _: Range<usize>, _: &mut Handlers) {}
+    default unsafe fn evacuate<'e>(_: &Self, _: u8, _: u8, _: Range<usize>, _: &mut Handlers) {}
 
     default fn transitive_gc_types(_: *mut Tti) {}
 
@@ -142,7 +148,7 @@ unsafe impl<'r, T: Immutable + Condemned> Condemned for Gc<'r, T> {
         }
     }
 
-    fn evacuate<'e>(
+    unsafe fn evacuate<'e>(
         s: &Self,
         offset: u8,
         _: u8,
@@ -163,18 +169,14 @@ unsafe impl<'r, T: Immutable + Condemned> Condemned for Gc<'r, T> {
                     *next = alloc_arena::<T>() as *mut u8;
                 };
 
-                unsafe { ptr::copy_nonoverlapping(ptr, *next as *mut T, 1) }
+                ptr::copy_nonoverlapping(ptr, *next as *mut T, 1);
                 let forward = handlers.forward;
                 if let Some(pre_evac) = forward(ptr as *const u8, *next as *const u8) {
                     let r = s as *const Gc<T> as *mut *const T;
-                    unsafe {
-                        *r = pre_evac as *const T;
-                    }
+                    *r = pre_evac as *const T;
                 } else {
                     let r = s as *const Gc<T> as *mut *const T;
-                    unsafe {
-                        *r = *next as *const T;
-                    }
+                    *r = *next as *const T;
                     // TODO fix overwrite when size_of<T> > size_of<Header> via min in other places
                     *next = min(addr - mem::size_of::<T>(), header_addr) as *mut u8;
                 }
@@ -182,7 +184,7 @@ unsafe impl<'r, T: Immutable + Condemned> Condemned for Gc<'r, T> {
         }
     }
 
-    fn direct_gc_types(t: &mut HashMap<GcTypeInfo, (SmallVec<[u8; 8]>, u8)>, offset: u8) {
+    fn direct_gc_types(t: &mut HashMap<GcTypeInfo, TypeRow>, offset: u8) {
         let (idxs, bits) = t
             .entry(GcTypeInfo::new::<T>())
             .or_insert((SmallVec::new(), 0b1111_1111));
@@ -211,7 +213,7 @@ unsafe impl<T: Immutable> Condemned for Option<T> {
         }
     }
 
-    fn evacuate<'e>(
+    unsafe fn evacuate<'e>(
         s: &Self,
         offset: u8,
         grey_feilds: u8,
@@ -224,7 +226,7 @@ unsafe impl<T: Immutable> Condemned for Option<T> {
         }
     }
 
-    fn direct_gc_types(t: &mut HashMap<GcTypeInfo, (SmallVec<[u8; 8]>, u8)>, offset: u8) {
+    fn direct_gc_types(t: &mut HashMap<GcTypeInfo, TypeRow>, offset: u8) {
         T::direct_gc_types(t, offset)
     }
 
@@ -254,7 +256,7 @@ unsafe impl<A: Immutable, B: Immutable> Condemned for (A, B) {
         r
     }
 
-    fn evacuate<'e>(
+    unsafe fn evacuate<'e>(
         (a, b): &Self,
         offset: u8,
         grey_feilds: u8,
@@ -272,7 +274,7 @@ unsafe impl<A: Immutable, B: Immutable> Condemned for (A, B) {
         );
     }
 
-    fn direct_gc_types(t: &mut HashMap<GcTypeInfo, (SmallVec<[u8; 8]>, u8)>, offset: u8) {
+    fn direct_gc_types(t: &mut HashMap<GcTypeInfo, TypeRow>, offset: u8) {
         A::direct_gc_types(t, offset);
         B::direct_gc_types(t, offset);
     }
