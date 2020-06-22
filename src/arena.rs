@@ -9,7 +9,7 @@ use std::mem::{self, transmute};
 use std::ops::Range;
 use std::ptr;
 use std::sync::Mutex;
-use std::{cmp::min, thread_local};
+use std::thread_local;
 
 pub const ARENA_SIZE: usize = 16384;
 
@@ -30,16 +30,110 @@ impl<T: Immutable + Condemned> Arena<T> {
         unsafe { &*Header::from(*self.next.get() as *const _) }
     }
 
-    pub fn capacity(&self) -> usize {
-        let next = unsafe { *self.next.get() } as usize;
-        (next - (self.header() as *const _ as usize + Header::<T>::low_offset() as usize))
-            / mem::size_of::<T>()
+    pub fn capacity(&self) -> u16 {
+        capacity(
+            unsafe { *self.next.get() } as *const u8,
+            mem::size_of::<T>() as u16,
+            mem::align_of::<T>() as u16,
+        )
+    }
+
+    #[inline(always)]
+    pub fn capacity_ptr(next: *const T) -> u16 {
+        capacity(
+            next as *const u8,
+            mem::size_of::<T>() as u16,
+            mem::align_of::<T>() as u16,
+        )
     }
 
     pub fn full(&self) -> bool {
-        let next = unsafe { *self.next.get() } as usize;
-        next < self.header() as *const _ as usize + Header::<T>::low_offset() as usize
+        full(
+            unsafe { *self.next.get() } as *const u8,
+            mem::size_of::<T>() as u16,
+            mem::align_of::<T>() as u16,
+        )
     }
+
+    #[inline(always)]
+    pub fn full_ptr(next: *const T) -> bool {
+        full(
+            next as *const u8,
+            mem::size_of::<T>() as u16,
+            mem::align_of::<T>() as u16,
+        )
+    }
+
+    /// Returns a ptr to the slot after `self.next`.
+    /// When `self.next` points to the lowest slot in it's Arena block
+    /// the block is full, and a ptr to header will be returned.
+    /// `self.next` must be aligned!
+    pub fn bump_down(&self) -> *const T {
+        bump_down(
+            unsafe { *self.next.get() } as *const u8,
+            mem::size_of::<T>() as u16,
+            mem::align_of::<T>() as u16,
+        ) as *const T
+    }
+
+    /// Returns a ptr to the slot after `next`.
+    /// When `next` points to the lowest slot in it's Arena block
+    /// the block is full, and a ptr to header will be returned.
+    /// `next` must be aligned!
+    pub fn bump_down_ptr(next: *const T) -> *const T {
+        bump_down(
+            next as *const u8,
+            mem::size_of::<T>() as u16,
+            mem::align_of::<T>() as u16,
+        ) as *const T
+    }
+
+    /// The index of `ptr` in it's Arena block.
+    pub fn index(ptr: *const T) -> u16 {
+        index(
+            ptr as *const u8,
+            mem::size_of::<T>() as u16,
+            mem::align_of::<T>() as u16,
+        )
+    }
+}
+
+#[inline(always)]
+pub(crate) const fn capacity(next: *const u8, size: u16, align: u16) -> u16 {
+    let next_addr = next as usize;
+    let low = HeaderUnTyped::from(next) as usize + HeaderUnTyped::low_offset(align) as usize;
+    (next_addr - low) as u16 / size
+}
+
+#[inline(always)]
+pub(crate) const fn full(next: *const u8, size: u16, align: u16) -> bool {
+    let low = HeaderUnTyped::from(next) as usize + HeaderUnTyped::low_offset(align) as usize;
+    (next as usize) <= low
+}
+
+#[inline(always)]
+/// Returns a ptr to the slot after `next`.
+/// When `next` points to the lowest slot in it's Arena block
+/// the block is full, and a ptr to header will be returned.
+/// `next` must be aligned!
+pub(crate) const fn bump_down(next: *const u8, size: u16, align: u16) -> *const u8 {
+    // TODO inspect generated code to ensure `next % align` is only being calculated once,
+    // when caller compares `bump_down(next)` to `Header::from(next)`.
+    let header = HeaderUnTyped::from(next);
+    let low = header as usize + HeaderUnTyped::low_offset(align) as usize;
+    // TODO does this generate better ASM than min(next', low)?
+    if low == next as usize {
+        header as *const u8
+    } else {
+        ((next as usize) - size as usize) as *const u8
+    }
+}
+
+/// The index of `ptr` in it's Arena block.
+pub(crate) const fn index(ptr: *const u8, size: u16, align: u16) -> u16 {
+    let header = HeaderUnTyped::from(ptr);
+    let low = header as usize + HeaderUnTyped::low_offset(align) as usize;
+    ((ptr as usize - low) / size as usize) as u16
 }
 
 #[repr(align(16384))]
@@ -63,35 +157,33 @@ unsafe impl<'o, 'n, 'r: 'n, O: Immutable + 'o, N: Immutable + 'r> Mark<'o, 'n, '
 
         if condemned_self || (0b0000_0000 != cf) {
             let next = self.next.get();
-            if (next as usize)
-                < self.header() as *const _ as usize + Header::<N>::low_offset() as usize
-            {
+            if Self::full_ptr(*next) {
                 // TODO
                 panic!("Allocating additional memory for an arena not yet supported");
             };
 
-            unsafe { std::ptr::copy(std::mem::transmute::<_, *const N>(old), *next, 1) };
-            let mut new_gc: *const N = next as _;
-            let old_addr = &*old as *const _ as usize;
-            let offset = old_addr % ARENA_SIZE;
-            let old_header = unsafe { &*((old_addr - offset) as *const Header<N>) };
+            unsafe {
+                let header = Header::from(*next);
+                *next = Self::bump_down_ptr(*next) as *mut N;
+                if *next == header as *mut _ {
+                    // TODO
+                    panic!("Allocating additional memory for an arena not yet supported");
+                };
+
+                std::ptr::copy(std::mem::transmute::<_, *const N>(old), *next, 1);
+            };
+
+            let mut new_ptr = *next;
+            let old_header = unsafe { &*Header::<O>::from(old.ptr) };
             let evacuated = old_header.evacuated.lock();
             evacuated
                 .unwrap()
-                .entry((offset / mem::size_of::<N>()) as u16)
-                .and_modify(|gc| new_gc = unsafe { std::mem::transmute(*gc) })
-                .or_insert_with(|| {
-                    unsafe {
-                        // FIXME overrun
-                        *next = min(
-                            (*next as usize) - mem::size_of::<N>(),
-                            self.header() as *const _ as usize,
-                        ) as *mut _
-                    };
-                    new_gc
-                });
+                .entry(Arena::index(old.ptr as *const O))
+                .and_modify(|evacuated_ptr| new_ptr = *evacuated_ptr as *mut N)
+                .or_insert(*next as *const O);
+
             Gc {
-                ptr: unsafe { &*new_gc },
+                ptr: unsafe { &*new_ptr },
             }
         } else {
             // old contains no direct condemned ptrs
@@ -111,11 +203,7 @@ impl<T: Immutable + Condemned> Drop for Arena<T> {
 
                 let release_to_gc = if capacity != 0
                     && cached_next.is_some()
-                    && capacity
-                        > (cached_next.unwrap() as usize
-                            - (Header::from(cached_next.unwrap() as *mut _) as usize
-                                + mem::size_of::<Header<T>>()))
-                            / mem::size_of::<T>()
+                    && capacity > Self::capacity_ptr(cached_next.unwrap() as *const T)
                 {
                     bus.0 .0 = Some(next as *mut _);
                     false
@@ -188,9 +276,10 @@ pub fn alloc_arena<T>() -> *mut T {
 
 impl<T: Immutable + Condemned> Arena<T> {
     pub fn new() -> Arena<T> {
-        // if !T::PRE_CONDITION {
+        if !T::PRE_CONDITION {
+            panic!("You need to derive Condemned for T")
+        };
 
-        // };
         let bus = GC_BUS.with(|tm| {
             let tm = unsafe { &mut *tm.get() };
             tm.entry(key::<T>()).or_insert_with(|| {
@@ -277,7 +366,7 @@ impl<T: Immutable + Condemned> Arena<T> {
                 panic!("Growing `Arena`s not yet implemented")
             }
             let ptr = *self.next.get();
-            *self.next.get() = (ptr as usize - mem::size_of::<T>()) as *mut _;
+            *self.next.get() = self.bump_down() as *mut T;
             ptr::write(ptr, t);
             Gc { ptr: &*ptr }
         }
@@ -299,6 +388,12 @@ pub(crate) struct HeaderUnTyped {
 }
 
 impl HeaderUnTyped {
+    #[inline(always)]
+    pub fn from(ptr: *const u8) -> *const HeaderUnTyped {
+        let offset = ptr as usize % ARENA_SIZE;
+        (ptr as usize - offset) as *const _
+    }
+
     #[inline(always)]
     /// The offset of the last T (closest to Header).
     pub(crate) fn low_offset(align: u16) -> u16 {
