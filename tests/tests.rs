@@ -17,7 +17,6 @@ use sundial_gc::arena::*;
 use sundial_gc::auto_traits::*;
 use sundial_gc::gc::*;
 use sundial_gc::mark::*;
-use sundial_gc::trace::*;
 
 use std::ops::Range;
 
@@ -27,108 +26,40 @@ struct List<'r, T: 'r> {
     next: Option<Gc<'r, List<'r, T>>>,
 }
 
-// These three impls will be derived with a procedural macro
-unsafe impl<'r, T: 'r + Trace + Immutable> Trace for List<'r, T> {
-    default fn trace(_: usize) {}
-    default const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [
-        Some(GcTypeInfo::new::<T>()),
-        Some(GcTypeInfo::new::<Option<Gc<'r, List<'r, T>>>>()),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    ];
-
-    default fn trace_transitive_type_info(tti: *mut Tti) {
-        let tti = unsafe { &mut *tti };
-        tti.add_trans(T::trace_transitive_type_info);
-        tti.add_trans(Option::<Gc<'r, List<'r, T>>>::trace_transitive_type_info);
-    }
-}
-
-unsafe impl<'r, T: 'r + Trace + Immutable + NoGc> Trace for List<'r, T> {
-    fn trace(_: usize) {}
-    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = [
-        Some(GcTypeInfo::new::<Option<Gc<'r, List<'r, T>>>>()),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    ];
-
-    fn trace_transitive_type_info(tti: *mut Tti) {
-        let tti = unsafe { &mut *tti };
-        tti.add_trans(Option::<Gc<'r, List<'r, T>>>::trace_transitive_type_info);
-    }
-}
-
-unsafe impl<'o, 'n, 'r: 'n, O: Trace + 'o, N: 'r + Trace> Mark<'o, 'n, 'r, List<'o, O>, List<'r, N>>
-    for ArenaGc<List<'r, N>>
-where
-    List<'r, N>: Trace,
-    List<'o, O>: Condemned,
-{
-    fn mark(&'n self, o: Gc<'o, List<'o, O>>) -> Gc<'r, List<'r, N>> {
-        let condemned_self = self.intern.grey_self
-            && self
-                .intern
-                .white_region
-                .contains(&(&*o as *const _ as usize));
-        let grey_feilds = unsafe { &mut *self.intern.grey_feilds.get() };
-        let cf = Condemned::feilds(&*o, *grey_feilds, self.intern.white_region.clone());
-        *grey_feilds |= cf;
-        if condemned_self || (0b0000_0000 != cf) {
-            let next = self.intern.next.get();
-            unsafe { std::ptr::copy(std::mem::transmute::<_, *const List<N>>(o), *next, 1) };
-            let mut new_gc: *const List<'r, N> = next as _;
-            let old_addr = &*o as *const _ as usize;
-            let offset = old_addr % 16384;
-            let old_header = unsafe { &*((old_addr - offset) as *const Header<List<'n, N>>) };
-            let evacuated = old_header.evacuated.lock();
-            evacuated
-                .unwrap()
-                .entry((offset / std::mem::size_of::<List<N>>()) as u16)
-                .and_modify(|gc| new_gc = unsafe { std::mem::transmute(*gc) })
-                .or_insert_with(|| {
-                    unsafe {
-                        // FIXME overrun
-                        *next = ((*next as usize) - std::mem::size_of::<List<N>>()) as *mut _
-                    };
-                    new_gc
-                });
-            Gc {
-                ptr: unsafe { &*new_gc },
-            }
-        } else {
-            unsafe { std::mem::transmute(o) }
-        }
-    }
-}
-
 unsafe impl<'r, T: Immutable + Condemned + 'r> Condemned for List<'r, T> {
-    default fn feilds(x: &List<'r, T>, grey_feilds: u8, condemned: Range<usize>) -> u8 {
+    default fn feilds(x: &Self, offset: u8, grey_feilds: u8, condemned: Range<usize>) -> u8 {
         assert!(Self::PRE_CONDTION);
         let mut bloom = 0b0000000;
-        if 0b1000_0000 == grey_feilds & 0b1000_0000 {
-            bloom |= Condemned::feilds(&x.t, grey_feilds, condemned.clone())
-        };
+        bloom |= Condemned::feilds(&x.t, offset, grey_feilds, condemned.clone());
 
-        // When a fields Gc is at the top level (not hidden in a generic),
-        // the proc macro will generate specific code.
-        // Here it's hidden in Option
-        if 0b0100_0000 == grey_feilds & 0b0100_0000 {
-            bloom |= Condemned::feilds(&x.next, grey_feilds, condemned)
-        };
+        bloom |= Condemned::feilds(&x.next, offset + T::GC_COUNT, grey_feilds, condemned);
         bloom
     }
 
+    default unsafe fn evacuate<'e>(
+        s: &Self,
+        offset: u8,
+        grey_feilds: u8,
+        condemned: Range<usize>,
+        handlers: &mut Handlers,
+    ) {
+        Condemned::evacuate(&s.t, offset, grey_feilds, condemned.clone(), handlers);
+        Condemned::evacuate(&s.next, offset, grey_feilds, condemned, handlers);
+    }
+
+    default fn direct_gc_types(t: &mut std::collections::HashMap<GcTypeInfo, TypeRow>, offset: u8) {
+        T::direct_gc_types(t, offset);
+        Option::<Gc<'r, List<'r, T>>>::direct_gc_types(t, offset);
+    }
+
+    default fn transitive_gc_types(tti: *mut Tti) {
+        T::transitive_gc_types(tti);
+        Option::<Gc<'r, List<'r, T>>>::transitive_gc_types(tti);
+    }
+
+    default const GC_COUNT: u8 = T::GC_COUNT + Option::<Gc<'r, List<'r, T>>>::GC_COUNT;
     default const PRE_CONDTION: bool =
-        if T::PRE_CONDTION && T::PRE_CONDTION && Option::<Gc<'r, List<'r, T>>>::PRE_CONDTION {
+        if T::PRE_CONDTION && Option::<Gc<'r, List<'r, T>>>::PRE_CONDTION {
             true
         } else {
             panic!("You need to derive Condemned for your type. Required due to a direct Gc<T>");
@@ -136,29 +67,36 @@ unsafe impl<'r, T: Immutable + Condemned + 'r> Condemned for List<'r, T> {
 }
 
 unsafe impl<'r, T: Immutable + NoGc + 'r> Condemned for List<'r, T> {
-    fn feilds(x: &List<'r, T>, grey_feilds: u8, condemned: Range<usize>) -> u8 {
+    fn feilds(x: &Self, offset: u8, grey_feilds: u8, condemned: Range<usize>) -> u8 {
         assert!(Self::PRE_CONDTION);
         let mut bloom = 0b0000000;
-        if 0b0100_0000 == grey_feilds & 0b0100_0000 {
-            bloom |= Condemned::feilds(&x.next, grey_feilds, condemned)
-        };
+        bloom |= Condemned::feilds(&x.next, offset, grey_feilds, condemned);
         bloom
     }
 
-    default const PRE_CONDTION: bool =
-        if T::PRE_CONDTION && T::PRE_CONDTION && Option::<Gc<'r, List<'r, T>>>::PRE_CONDTION {
-            true
-        } else {
-            panic!("You need to derive Condemned for your type. Required due to a direct Gc<T>");
-        };
+    fn direct_gc_types(t: &mut std::collections::HashMap<GcTypeInfo, TypeRow>, offset: u8) {
+        T::direct_gc_types(t, offset);
+        Option::<Gc<'r, List<'r, T>>>::direct_gc_types(t, offset);
+    }
+
+    fn transitive_gc_types(tti: *mut Tti) {
+        Option::<Gc<'r, List<'r, T>>>::transitive_gc_types(tti);
+    }
+
+    const GC_COUNT: u8 = Option::<Gc<'r, List<'r, T>>>::GC_COUNT;
+    const PRE_CONDTION: bool = if Option::<Gc<'r, List<'r, T>>>::PRE_CONDTION {
+        true
+    } else {
+        panic!("You need to derive Condemned for your type. Required due to a direct Gc<T>");
+    };
 }
 
 #[test]
 fn churn_list() {
-    let usizes: ArenaPrim<usize> = ArenaPrim::new();
+    let usizes: Arena<usize> = Arena::new();
     let gc_one = usizes.gc_alloc(1);
 
-    let lists: ArenaGc<List<Gc<usize>>> = ArenaGc::new();
+    let lists: Arena<List<Gc<usize>>> = Arena::new();
     let one_two = lists.gc_alloc(List {
         t: gc_one,
         next: Some(lists.gc_alloc(List {
@@ -167,42 +105,50 @@ fn churn_list() {
         })),
     });
 
-    let lists2: ArenaGc<List<Gc<usize>>> = ArenaGc::new();
+    let lists2: Arena<List<Gc<usize>>> = Arena::new();
     let one_two = lists2.mark(one_two);
     drop(lists);
     drop(usizes);
     let _ = one_two.t;
 }
 
+unsafe impl<'r> Condemned for Foo<'r> {
+    fn feilds(s: &Self, offset: u8, grey_feilds: u8, condemned: Range<usize>) -> u8 {
+        assert!(Self::PRE_CONDTION);
+        let mut bloom = 0b0000000;
+        bloom |= Condemned::feilds(&s._bar, offset, grey_feilds, condemned);
+        bloom
+    }
+
+    fn direct_gc_types(t: &mut std::collections::HashMap<GcTypeInfo, TypeRow>, offset: u8) {
+        Gc::<'r, usize>::direct_gc_types(t, offset);
+    }
+
+    fn transitive_gc_types(tti: *mut Tti) {
+        Gc::<'r, usize>::transitive_gc_types(tti);
+    }
+
+    const GC_COUNT: u8 = Gc::<'r, usize>::GC_COUNT;
+    const PRE_CONDTION: bool = if Gc::<'r, usize>::PRE_CONDTION {
+        true
+    } else {
+        panic!("You need to derive Condemned for your type. Required due to a direct Gc<T>");
+    };
+}
+
 struct Foo<'r> {
     _bar: Gc<'r, usize>,
 }
 
-unsafe impl<'r> Trace for Foo<'r> {
-    fn trace(_: usize) {}
-    const TRACE_CHILD_TYPE_INFO: [Option<GcTypeInfo>; 8] = GcTypeInfo::one_child::<Gc<'r, usize>>();
-    fn trace_transitive_type_info(tti: *mut Tti) {
-        let tti = unsafe { &mut *tti };
-        tti.add_trans(Gc::<'r, usize>::trace_transitive_type_info);
-    }
-}
-
-unsafe impl<'o, 'n, 'r: 'n> Mark<'o, 'n, 'r, Foo<'o>, Foo<'r>> for ArenaGc<Foo<'r>> {
-    fn mark(&'n self, o: Gc<'o, Foo<'o>>) -> Gc<'r, Foo<'r>> {
-        // TODO fill out
-        unsafe { std::mem::transmute(o) }
-    }
-}
-
 #[test]
 fn churn() {
-    let usizes: ArenaPrim<usize> = ArenaPrim::new();
+    let usizes: Arena<usize> = Arena::new();
     let gced_usize = usizes.gc_alloc(1);
 
-    let foos: ArenaGc<Foo> = ArenaGc::new();
+    let foos: Arena<Foo> = Arena::new();
     let foo = foos.gc_alloc(Foo { _bar: gced_usize });
 
-    let foos2: ArenaGc<Foo> = ArenaGc::new();
+    let foos2: Arena<Foo> = Arena::new();
     // mark extends foos lifetime to that of the new arena foos2
     // This does not copy foo into the new arena.
     // In this case it is simply transmuting a lifetime.
@@ -221,11 +167,11 @@ fn churn() {
 
 // #[test]
 // fn prevent_use_after_free() {
-//     let strings: ArenaPrim<String> = ArenaPrim::new();
+//     let strings: Arena<String> = Arena::new();
 //     let gced = strings.gc_alloc(String::from("foo"));
-//     let strs: ArenaPrim<&String> = ArenaPrim::new();
+//     let strs: Arena<&String> = Arena::new();
 //     let str1 = strs.gc_alloc(&*gced);
-//     let strs2: ArenaPrim<&String> = ArenaPrim::new();
+//     let strs2: Arena<&String> = Arena::new();
 //     let _str2: Gc<&String> = strs2.mark(str1);
 //     drop(strings); //~ cannot move out of `strings` because it is borrowed
 //     let str3 = *_str2;
@@ -233,9 +179,9 @@ fn churn() {
 
 // #[test]
 // fn prevent_use_after_free_correct() {
-//     let strings: ArenaPrim<String> = ArenaPrim::new();
+//     let strings: Arena<String> = Arena::new();
 //     let gced = strings.gc_alloc(String::from("foo"));
-//     let strs: ArenaPrim<&String> = ArenaPrim::new();
+//     let strs: Arena<&String> = Arena::new();
 //     let str1 = strs.gc_alloc(&*gced);
 //     drop(strings);
 //     let _str3 = &*str1;
@@ -263,7 +209,7 @@ fn churn() {
 //     }
 
 //     unsafe impl<'o, 'n, 'r: 'n, 'b> Mark<'o, 'n, 'r, Foo2<'o, 'b>, Foo2<'r, 'b>>
-//         for ArenaGc<Foo2<'r, 'b>>
+//         for Arena<Foo2<'r, 'b>>
 //     {
 //         fn mark(&'n self, o: Gc<'o, Foo2<'o, 'b>>) -> Gc<'r, Foo2<'r, 'b>> {
 //             // TODO fillout
@@ -273,14 +219,14 @@ fn churn() {
 
 //     // There should be an error, triggered by drop
 //     let string = String::from("bar");
-//     let foos = ArenaGc::new();
-//     let bars = ArenaPrim::new();
+//     let foos = Arena::new();
+//     let bars = Arena::new();
 //     let _b = &*string;
 //     let foo = foos.gc_alloc(Foo2 {
 //         _bar: Some(bars.gc_alloc(Bar { _b })),
 //     });
 
-//     let foos2 = ArenaGc::new();
+//     let foos2 = Arena::new();
 //     let foo2 = foos2.mark(foo);
 //     drop(foos);
 //     drop(bars);
@@ -292,7 +238,7 @@ fn churn() {
 fn immutable_test() {
     // use std::sync::Mutex;
     //~ trait bound `std::cell::UnsafeCell<usize>: Immutable` is not satisfied
-    // let mutexes: ArenaPrim<Mutex<usize>> = ArenaPrim::new();
+    // let mutexes: Arena<Mutex<usize>> = Arena::new();
 
-    let _mutexes: ArenaPrim<Box<std::sync::Arc<usize>>> = ArenaPrim::new();
+    let _mutexes: Arena<Box<std::sync::Arc<usize>>> = Arena::new();
 }

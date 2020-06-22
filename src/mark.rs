@@ -62,7 +62,7 @@ impl Tti {
 
 /// `([Offsets], CompressedOffsets)`
 /// Encodes the positions a type occurs in.
-pub(crate) type TypeRow = (SmallVec<[u8; 8]>, u8);
+pub type TypeRow = (SmallVec<[u8; 8]>, u8);
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GcTypeInfo {
@@ -90,7 +90,7 @@ impl GcTypeInfo {
     }
 }
 
-pub unsafe trait Condemned {
+pub unsafe trait Condemned: Immutable {
     fn feilds(s: &Self, offset: u8, grey_feilds: u8, region: Range<usize>) -> u8;
     unsafe fn evacuate<'e>(
         s: &Self,
