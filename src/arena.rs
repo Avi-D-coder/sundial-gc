@@ -44,7 +44,7 @@ impl<T: Immutable + Condemned> Arena<T> {
 
 #[repr(align(16384))]
 pub(crate) struct Mem {
-    _mem: [u8; 16384],
+    _mem: [u8; ARENA_SIZE],
 }
 
 unsafe impl<'o, 'n, 'r: 'n, O: Immutable + 'o, N: Immutable + 'r> Mark<'o, 'n, 'r, O, N>
@@ -73,7 +73,7 @@ unsafe impl<'o, 'n, 'r: 'n, O: Immutable + 'o, N: Immutable + 'r> Mark<'o, 'n, '
             unsafe { std::ptr::copy(std::mem::transmute::<_, *const N>(old), *next, 1) };
             let mut new_gc: *const N = next as _;
             let old_addr = &*old as *const _ as usize;
-            let offset = old_addr % 16384;
+            let offset = old_addr % ARENA_SIZE;
             let old_header = unsafe { &*((old_addr - offset) as *const Header<N>) };
             let evacuated = old_header.evacuated.lock();
             evacuated
@@ -148,7 +148,7 @@ unsafe impl<'o, 'n, 'r: 'n, O: NoGc + Immutable + 'o, N: NoGc + Immutable + 'r>
             unsafe { ptr::copy(transmute(o), *next, 1) };
             let mut new_gc = next as *const N;
             let old_addr = &*o as *const O as usize;
-            let offset = old_addr % 16384;
+            let offset = old_addr % ARENA_SIZE;
             let old_header = unsafe { &*((old_addr - offset) as *const Header<N>) };
             let evacuated = old_header.evacuated.lock();
             evacuated
@@ -182,7 +182,7 @@ pub fn alloc_arena<T>() -> *mut T {
     // FIXME animalizes Header
 
     // FIXME this seems wrong! Make sure it's in sync with ArenaUntyped
-    let capacity = (16384 - Header::<T>::low_offset() as usize) / mem::size_of::<T>();
+    let capacity = (ARENA_SIZE - Header::<T>::low_offset() as usize) / mem::size_of::<T>();
     (mem_addr + (capacity * mem::size_of::<T>())) as *mut T
 }
 
@@ -328,7 +328,7 @@ pub struct Header<T> {
 impl<T> Header<T> {
     #[inline(always)]
     pub fn from(ptr: *const T) -> *const Header<T> {
-        let offset = ptr as usize % 16384;
+        let offset = ptr as usize % ARENA_SIZE;
         (ptr as usize - offset) as *const _
     }
 
