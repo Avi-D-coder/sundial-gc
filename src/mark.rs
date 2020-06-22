@@ -76,16 +76,14 @@ pub struct GcTypeInfo {
 }
 
 impl GcTypeInfo {
-    pub fn new<T: Condemned>() -> Self {
-        unsafe {
-            Self {
-                evacuate_fn: mem::transmute(&T::evacuate),
-                transitive_gc_types_fn: mem::transmute(&T::transitive_gc_types),
-                direct_gc_types_fn: mem::transmute(&T::direct_gc_types),
-                needs_drop: mem::needs_drop::<T>(),
-                size: mem::size_of::<T>() as u16,
-                align: mem::align_of::<T>() as u16,
-            }
+    pub const fn new<T: Condemned>() -> Self {
+        Self {
+            evacuate_fn: T::evacuate as *const _,
+            transitive_gc_types_fn: T::transitive_gc_types as *const _,
+            direct_gc_types_fn: T::direct_gc_types as *const _,
+            needs_drop: mem::needs_drop::<T>(),
+            size: mem::size_of::<T>() as u16,
+            align: mem::align_of::<T>() as u16,
         }
     }
 }
