@@ -1,8 +1,7 @@
 use super::gc::*;
 use crate::{
-    arena::{alloc_arena, Header},
+    arena::{alloc_arena, Header, HeaderUnTyped, ARENA_SIZE},
     auto_traits::{HasGc, Immutable},
-    gc_logic::{HeaderUnTyped, ARENA_SIZE},
 };
 use smallvec::SmallVec;
 use std::ops::Range;
@@ -162,7 +161,7 @@ unsafe impl<'r, T: Immutable + Condemned> Condemned for Gc<'r, T> {
                 let header_addr = next_addr - next_addr % ARENA_SIZE;
 
                 // Get a new Arena if this ones full
-                if HeaderUnTyped::last_offset(mem::align_of::<T>() as u16) as usize > next_addr {
+                if HeaderUnTyped::low_offset(mem::align_of::<T>() as u16) as usize > next_addr {
                     handlers.filled[i as usize].push(header_addr as *mut HeaderUnTyped);
                     *next = alloc_arena::<T>() as *mut u8;
                 };

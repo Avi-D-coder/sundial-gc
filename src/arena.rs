@@ -5,11 +5,13 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::any::type_name;
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
-use std::mem::{align_of, size_of, transmute};
+use std::mem::{self, transmute};
 use std::ops::Range;
 use std::ptr;
 use std::sync::Mutex;
 use std::{cmp::min, thread_local};
+
+pub const ARENA_SIZE: usize = 16384;
 
 pub struct Arena<T: Condemned + Immutable> {
     // TODO compact representation of arenas
@@ -30,11 +32,13 @@ impl<T: Immutable + Condemned> Arena<T> {
 
     pub fn capacity(&self) -> usize {
         let next = unsafe { *self.next.get() } as usize;
-        (next - (self.header() as *const _ as usize + header_size::<T>())) / size_of::<T>()
+        (next - (self.header() as *const _ as usize + Header::<T>::low_offset() as usize))
+            / mem::size_of::<T>()
     }
 
     pub fn full(&self) -> bool {
-        self.capacity() == 0
+        let next = unsafe { *self.next.get() } as usize;
+        next < self.header() as *const _ as usize + Header::<T>::low_offset() as usize
     }
 }
 
@@ -59,7 +63,9 @@ unsafe impl<'o, 'n, 'r: 'n, O: Immutable + 'o, N: Immutable + 'r> Mark<'o, 'n, '
 
         if condemned_self || (0b0000_0000 != cf) {
             let next = self.next.get();
-            if (next as usize) < self.header() as *const _ as usize + header_size::<N>() {
+            if (next as usize)
+                < self.header() as *const _ as usize + Header::<N>::low_offset() as usize
+            {
                 // TODO
                 panic!("Allocating additional memory for an arena not yet supported");
             };
@@ -72,13 +78,13 @@ unsafe impl<'o, 'n, 'r: 'n, O: Immutable + 'o, N: Immutable + 'r> Mark<'o, 'n, '
             let evacuated = old_header.evacuated.lock();
             evacuated
                 .unwrap()
-                .entry((offset / std::mem::size_of::<N>()) as u16)
+                .entry((offset / mem::size_of::<N>()) as u16)
                 .and_modify(|gc| new_gc = unsafe { std::mem::transmute(*gc) })
                 .or_insert_with(|| {
                     unsafe {
                         // FIXME overrun
                         *next = min(
-                            (*next as usize) - std::mem::size_of::<N>(),
+                            (*next as usize) - mem::size_of::<N>(),
                             self.header() as *const _ as usize,
                         ) as *mut _
                     };
@@ -108,8 +114,8 @@ impl<T: Immutable + Condemned> Drop for Arena<T> {
                     && capacity
                         > (cached_next.unwrap() as usize
                             - (Header::from(cached_next.unwrap() as *mut _) as usize
-                                + size_of::<Header<T>>()))
-                            / size_of::<T>()
+                                + mem::size_of::<Header<T>>()))
+                            / mem::size_of::<T>()
                 {
                     bus.0 .0 = Some(next as *mut _);
                     false
@@ -147,11 +153,11 @@ unsafe impl<'o, 'n, 'r: 'n, O: NoGc + Immutable + 'o, N: NoGc + Immutable + 'r>
             let evacuated = old_header.evacuated.lock();
             evacuated
                 .unwrap()
-                .entry((offset / size_of::<N>()) as u16)
+                .entry((offset / mem::size_of::<N>()) as u16)
                 .and_modify(|gc| new_gc = *gc)
                 .or_insert_with(|| {
                     // FIXME overrun
-                    unsafe { *next = ((*next as usize) - size_of::<N>()) as *mut N };
+                    unsafe { *next = ((*next as usize) - mem::size_of::<N>()) as *mut N };
                     new_gc
                 });
             Gc {
@@ -161,12 +167,6 @@ unsafe impl<'o, 'n, 'r: 'n, O: NoGc + Immutable + 'o, N: NoGc + Immutable + 'r>
             unsafe { std::mem::transmute(o) }
         }
     }
-}
-
-const fn header_size<T>() -> usize {
-    let align = align_of::<T>();
-    let header = size_of::<Header<T>>();
-    header + ((align - (header % align)) % align)
 }
 
 /// Returns `next`.
@@ -182,8 +182,8 @@ pub fn alloc_arena<T>() -> *mut T {
     // FIXME animalizes Header
 
     // FIXME this seems wrong! Make sure it's in sync with ArenaUntyped
-    let capacity = (16384 - header_size::<T>()) / size_of::<T>();
-    (mem_addr + (capacity * size_of::<T>())) as *mut T
+    let capacity = (16384 - Header::<T>::low_offset() as usize) / mem::size_of::<T>();
+    (mem_addr + (capacity * mem::size_of::<T>())) as *mut T
 }
 
 impl<T: Immutable + Condemned> Arena<T> {
@@ -277,7 +277,7 @@ impl<T: Immutable + Condemned> Arena<T> {
                 panic!("Growing `Arena`s not yet implemented")
             }
             let ptr = *self.next.get();
-            *self.next.get() = (ptr as usize - size_of::<T>()) as *mut _;
+            *self.next.get() = (ptr as usize - mem::size_of::<T>()) as *mut _;
             ptr::write(ptr, t);
             Gc { ptr: &*ptr }
         }
@@ -286,6 +286,33 @@ impl<T: Immutable + Condemned> Arena<T> {
     // fn advance(&mut self) -> Self {
     //     unimplemented!()
     // }
+}
+
+pub(crate) struct HeaderUnTyped {
+    // TODO private
+    pub evacuated: Mutex<HashMap<u16, *const u8>>,
+    // roots: HashMap<u16, *const Box<UnsafeCell<*const T>>>,
+    // finalizers: TODO
+    roots: usize,
+    finalizers: usize,
+    condemned: bool,
+}
+
+impl HeaderUnTyped {
+    #[inline(always)]
+    /// The offset of the last T (closest to Header).
+    pub(crate) fn low_offset(align: u16) -> u16 {
+        let header = mem::size_of::<HeaderUnTyped>() as u16;
+        header + ((align - (header % align)) % align)
+    }
+
+    #[inline(always)]
+    // TODO is this right?
+    /// The offset of the first T in the Arena.
+    pub(crate) fn high_offset(align: u16, size: u16) -> u16 {
+        let cap = (ARENA_SIZE as u16 - HeaderUnTyped::low_offset(align)) / size;
+        HeaderUnTyped::low_offset(align) + (cap * size)
+    }
 }
 
 pub struct Header<T> {
@@ -299,9 +326,15 @@ pub struct Header<T> {
 }
 
 impl<T> Header<T> {
+    #[inline(always)]
     pub fn from(ptr: *const T) -> *const Header<T> {
         let offset = ptr as usize % 16384;
         (ptr as usize - offset) as *const _
+    }
+
+    #[inline(always)]
+    fn low_offset() -> u16 {
+        HeaderUnTyped::low_offset(mem::align_of::<T>() as u16)
     }
 }
 

@@ -1,7 +1,6 @@
 use crate::arena::*;
 use crate::mark::*;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::mem;
 use std::sync::{mpsc::*, Mutex};
 use std::thread::{self, ThreadId};
 use std::{
@@ -11,8 +10,6 @@ use std::{
 };
 
 pub(crate) static mut REGISTER: Option<Sender<RegMsg>> = None;
-
-pub const ARENA_SIZE: usize = 16384;
 
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub(crate) struct TypeInfo {
@@ -55,31 +52,6 @@ impl Default for Parents {
             direct: HashMap::new(),
             transitive: HashSet::new(),
         }
-    }
-}
-
-/// Keep in sync with Header<T>
-pub(crate) struct HeaderUnTyped {
-    // TODO private
-    pub evacuated: Mutex<HashMap<u16, *const u8>>,
-    // roots: HashMap<u16, *const Box<UnsafeCell<*const T>>>,
-    // finalizers: TODO
-    roots: usize,
-    finalizers: usize,
-    condemned: bool,
-}
-
-impl HeaderUnTyped {
-    /// last is closest to Header, since we bump down.
-    pub(crate) fn last_offset(align: u16) -> u16 {
-        let header = mem::size_of::<HeaderUnTyped>() as u16;
-        header + ((align - (header % align)) % align)
-    }
-
-    // TODO is this right?
-    pub(crate) fn first_offset(align: u16, size: u16) -> u16 {
-        let cap = (ARENA_SIZE as u16 - HeaderUnTyped::last_offset(align)) / size;
-        HeaderUnTyped::last_offset(align) + (cap * size)
     }
 }
 
@@ -133,9 +105,9 @@ impl TypeState {
             invariant,
             ..
         } = self;
-        let last_offset = HeaderUnTyped::last_offset(type_info.info.align) as usize;
-        let first_offset =
-            HeaderUnTyped::first_offset(type_info.info.align, type_info.info.size) as usize;
+        let low_offset = HeaderUnTyped::low_offset(type_info.info.align) as usize;
+        let high_offset =
+            HeaderUnTyped::high_offset(type_info.info.align, type_info.info.size) as usize;
         *epoch += 1;
 
         // TODO lift allocation
@@ -194,7 +166,7 @@ impl TypeState {
                         if *grey_feilds == 0b0000_0000 {
                             if *release_to_gc {
                                 // if full
-                                let last = (next_addr - (next_addr % ARENA_SIZE)) + last_offset;
+                                let last = (next_addr - (next_addr % ARENA_SIZE)) + low_offset;
                                 if next_addr >= last {
                                     gc_arenas.insert(*next);
                                 } else {
@@ -232,7 +204,7 @@ impl TypeState {
                     let next = gc_arenas
                         .pop_first()
                         .map(|p| p as *mut _)
-                        .or(free.pop().map(|h| (h as usize + first_offset) as *mut u8));
+                        .or(free.pop().map(|h| (h as usize + high_offset) as *mut u8));
 
                     if let Some(Invariant {
                         grey_feilds,
