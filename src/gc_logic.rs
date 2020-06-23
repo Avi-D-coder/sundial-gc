@@ -61,7 +61,7 @@ struct TypeState {
     /// Map Type to Bit
     buses: HashMap<ThreadId, BusPtr>,
     /// Arena owned by GC, that have not been completely filled.
-    gc_arenas: BTreeSet<*const u8>,
+    gc_arenas: BTreeSet<*mut u8>,
     gc_arenas_full: BTreeSet<*const u8>,
     /// Count of Arenas started before transitive_epoch.
     pending_known_transitive_grey: usize,
@@ -70,7 +70,7 @@ struct TypeState {
     /// `Arena.Header` started after `epoch`.
     /// `pending` is mutually exclusive with `pending_known_grey`.
     /// A arena `*const u8` cannot have a entry in `pending` and `pending_known_grey`.
-    pending: HashMap<*const u8, usize>,
+    pending: HashMap<*const HeaderUnTyped, usize>,
     latest_grey: usize,
     /// `epoch` is not synchronized across threads.
     /// 2 epochs delineate Arena age.
@@ -105,9 +105,6 @@ impl TypeState {
             invariant,
             ..
         } = self;
-        let low_offset = HeaderUnTyped::low_offset(type_info.info.align) as usize;
-        let high_offset =
-            HeaderUnTyped::high_offset(type_info.info.align, type_info.info.size) as usize;
         *epoch += 1;
 
         // TODO lift allocation
@@ -129,9 +126,8 @@ impl TypeState {
                         .map(|ci| ci.white_start == *white_start && ci.white_end == *white_end)
                         .unwrap_or(true)
                     {
-                        let next_addr = *next as usize;
-                        let header = (next_addr - (next_addr % ARENA_SIZE)) as *const u8;
-                        pending.insert(header, *epoch);
+                        let next = *next;
+                        pending.insert(HeaderUnTyped::from(next), *epoch);
                     } else {
                         *latest_grey = *epoch;
                         *pending_known_grey += 1;
@@ -147,13 +143,12 @@ impl TypeState {
                     white_start,
                     white_end,
                 } => {
+                    let next = *next;
                     let ret = if invariant
                         .map(|i| i.white_start == *white_start && i.white_end == *white_end)
                         .unwrap_or(true)
                     {
-                        let next_addr = *next as usize;
-                        let header = (next_addr - (next_addr % ARENA_SIZE)) as *const u8;
-                        if let Some(e) = pending.remove(&header) {
+                        if let Some(e) = pending.remove(&HeaderUnTyped::from(next)) {
                             if e < *transitive_epoch {
                                 *pending_known_transitive_grey =
                                     pending_known_transitive_grey.saturating_sub(1);
@@ -165,12 +160,10 @@ impl TypeState {
                         // Allocated objects contain no condemned pointers into the white set.
                         if *grey_feilds == 0b0000_0000 {
                             if *release_to_gc {
-                                // if full
-                                let last = (next_addr - (next_addr % ARENA_SIZE)) + low_offset;
-                                if next_addr >= last {
-                                    gc_arenas.insert(*next);
+                                if full(next, type_info.info.align) {
+                                    gc_arenas.insert(next as *mut _);
                                 } else {
-                                    gc_arenas_full.insert(*next);
+                                    gc_arenas_full.insert(next);
                                 };
                             } else {
                                 // TODO store active worker arenas
@@ -178,12 +171,12 @@ impl TypeState {
                             None
                         } else {
                             *latest_grey = *epoch;
-                            Some((*next, *grey_feilds))
+                            Some((next, *grey_feilds))
                         }
                     } else {
                         *pending_known_grey -= 1;
                         *latest_grey = *epoch;
-                        Some((*next, 0b1111_1111))
+                        Some((next, 0b1111_1111))
                     };
 
                     *msg = Msg::Slot;
@@ -204,7 +197,13 @@ impl TypeState {
                     let next = gc_arenas
                         .pop_first()
                         .map(|p| p as *mut _)
-                        .or(free.pop().map(|h| (h as usize + high_offset) as *mut u8));
+                        .or(free.pop().map(|header| {
+                            (header as usize
+                                + HeaderUnTyped::high_offset(
+                                    type_info.info.align,
+                                    type_info.info.size,
+                                ) as usize) as *mut u8
+                        }));
 
                     if let Some(Invariant {
                         grey_feilds,

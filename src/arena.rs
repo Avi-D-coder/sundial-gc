@@ -392,7 +392,7 @@ impl HeaderUnTyped {
 
     #[inline(always)]
     /// The offset of the last T (closest to Header).
-    pub(crate) fn low_offset(align: u16) -> u16 {
+    pub(crate) const fn low_offset(align: u16) -> u16 {
         let header = mem::size_of::<HeaderUnTyped>() as u16;
         header + ((align - (header % align)) % align)
     }
@@ -400,7 +400,7 @@ impl HeaderUnTyped {
     #[inline(always)]
     // TODO is this right?
     /// The offset of the first T in the Arena.
-    pub(crate) fn high_offset(align: u16, size: u16) -> u16 {
+    pub(crate) const fn high_offset(align: u16, size: u16) -> u16 {
         let cap = (ARENA_SIZE as u16 - HeaderUnTyped::low_offset(align)) / size;
         HeaderUnTyped::low_offset(align) + (cap * size)
     }
@@ -424,8 +424,13 @@ impl<T> Header<T> {
     }
 
     #[inline(always)]
-    fn low_offset() -> u16 {
+    pub const fn low_offset() -> u16 {
         HeaderUnTyped::low_offset(mem::align_of::<T>() as u16)
+    }
+
+    #[inline(always)]
+    pub const fn high_offset() -> u16 {
+        HeaderUnTyped::high_offset(mem::align_of::<T>() as u16, mem::size_of::<T>() as u16)
     }
 }
 

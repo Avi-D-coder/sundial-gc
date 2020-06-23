@@ -29,8 +29,8 @@ pub struct Handlers {
     // forward(old, new) -> already evacuated
     // forward: fn(*const u8, *const u8) -> Option<*const u8>,
     filled: SmallVec<[SmallVec<[*mut HeaderUnTyped; 1]>; 4]>,
-    // TODO Remove Mutex
-    empty: *const Mutex<HashSet<*mut HeaderUnTyped>>,
+    // TODO not safe once we trace in parrel
+    empty: *const Vec<*mut HeaderUnTyped>,
 }
 
 impl Handlers {
