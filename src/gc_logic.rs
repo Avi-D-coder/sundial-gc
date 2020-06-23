@@ -440,9 +440,26 @@ fn gc_loop(r: Receiver<RegMsg>) {
                         .range((inv.white_start as *const u8)..(inv.white_end as *const u8))
                         .into_iter()
                         .for_each(|next| {
-                            let next_addr = *next as usize;
-                            let header =
-                                (next_addr - (next_addr % ARENA_SIZE)) as *mut HeaderUnTyped;
+                            let next = *next;
+                            let header = HeaderUnTyped::from(next) as *mut _;
+
+                            if cti.needs_drop {
+                                let GcTypeInfo {
+                                    align,
+                                    size,
+                                    drop_in_place_fn,
+                                    ..
+                                } = ti;
+                                let mut ptr = next as usize
+                                    + HeaderUnTyped::high_offset(align, size) as usize;
+                                let low = next as usize + HeaderUnTyped::low_offset(align) as usize;
+
+                                while ptr >= low {
+                                    unsafe { (*drop_in_place_fn)(ptr as *mut u8) }
+                                    ptr -= size as usize;
+                                }
+                            };
+
                             unsafe { ptr::drop_in_place(header) }
                             if free.len() < mem.len() / 3 {
                                 free.push(header);
