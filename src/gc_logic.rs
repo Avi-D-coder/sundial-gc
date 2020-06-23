@@ -1,6 +1,6 @@
 use crate::arena::*;
 use crate::mark::*;
-use smallvec::SmallVec;
+use smallvec::{smallvec, SmallVec};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{mpsc::*, Mutex};
 use std::thread::{self, ThreadId};
@@ -51,6 +51,7 @@ impl Default for Parents {
 struct TypeState {
     type_info: GcTypeInfo,
     handlers: Option<Handlers>,
+    handlers_types: Vec<GcTypeInfo>,
     /// Map Type to Bit
     buses: HashMap<ThreadId, BusPtr>,
     /// The last seen `next`. ptr + size..high_offset is owned by gc
@@ -59,7 +60,7 @@ struct TypeState {
     worker_arenas: HashMap<*const HeaderUnTyped, *const u8>,
     /// Arena owned by GC, that have not been completely filled.
     gc_arenas: BTreeSet<*mut u8>,
-    gc_arenas_full: BTreeSet<*const u8>,
+    gc_arenas_full: BTreeSet<*mut HeaderUnTyped>,
     /// Count of Arenas started before transitive_epoch.
     pending_known_transitive_grey: usize,
     /// Count of Arenas started before `invariant`.
@@ -176,7 +177,7 @@ impl TypeState {
                         if full(next, type_info.align) {
                             gc_arenas.insert(next as *mut _);
                         } else {
-                            gc_arenas_full.insert(next);
+                            gc_arenas_full.insert(HeaderUnTyped::from(next) as *mut _);
                         };
                     } else {
                         // store active worker arenas
@@ -356,6 +357,7 @@ impl TypeRelations {
             TypeState {
                 type_info,
                 handlers: None,
+                handlers_types: Vec::new(),
                 buses: HashMap::new(),
                 worker_arenas: HashMap::new(),
                 gc_arenas: BTreeSet::new(),
@@ -410,6 +412,9 @@ fn gc_loop(r: Receiver<RegMsg>) {
             HashMap::with_capacity(20);
         let mut clear_stack_new: HashMap<GcTypeInfo, HashSet<GcTypeInfo>> =
             HashMap::with_capacity(20);
+
+        let mut gc_in_progress = false;
+
         active.iter_mut().for_each(|(ti, ts)| {
             if ts.step(&mut free) {
                 if let Some(ps) = parents.get(ti) {
@@ -427,8 +432,16 @@ fn gc_loop(r: Receiver<RegMsg>) {
             if ts.is_stack_clear() && clear_stack_old.contains_key(ti) {
                 stack_cleared.insert(*ti);
             };
+
+            if ts.invariant.is_some() {
+                gc_in_progress = true;
+            };
         });
 
+        let mut gen2_arenas: HashMap<
+            GcTypeInfo,
+            (SmallVec<[*mut HeaderUnTyped; 1]>, Vec<*mut u8>),
+        > = HashMap::new();
         stack_cleared.drain().for_each(|ti| {
             clear_stack_old.remove(&ti).unwrap().iter().for_each(|cti| {
                 let ts = active.get_mut(cti).unwrap();
@@ -437,11 +450,10 @@ fn gc_loop(r: Receiver<RegMsg>) {
                     let inv = ts.invariant.unwrap();
                     // Free memory
                     ts.gc_arenas_full
-                        .range((inv.white_start as *const u8)..(inv.white_end as *const u8))
+                        .range((inv.white_start as *mut _)..(inv.white_end as *mut _))
                         .into_iter()
-                        .for_each(|next| {
-                            let next = *next;
-                            let header = HeaderUnTyped::from(next) as *mut _;
+                        .for_each(|header| {
+                            let header = *header;
 
                             if cti.needs_drop {
                                 let GcTypeInfo {
@@ -450,9 +462,10 @@ fn gc_loop(r: Receiver<RegMsg>) {
                                     drop_in_place_fn,
                                     ..
                                 } = ti;
-                                let mut ptr = next as usize
-                                    + HeaderUnTyped::high_offset(align, size) as usize;
-                                let low = next as usize + HeaderUnTyped::low_offset(align) as usize;
+                                let low =
+                                    header as usize + HeaderUnTyped::low_offset(align) as usize;
+                                let mut ptr =
+                                    low as usize + HeaderUnTyped::high_offset(align, size) as usize;
 
                                 while ptr >= low {
                                     unsafe { (*drop_in_place_fn)(ptr as *mut u8) }
@@ -467,10 +480,54 @@ fn gc_loop(r: Receiver<RegMsg>) {
                                 unsafe { System.dealloc(header as *mut u8, Layout::new::<Mem>()) };
                             }
                         });
+
                     ts.invariant = None;
+                    ts.handlers.take().map(|h| {
+                        h.filled
+                            .into_iter()
+                            .enumerate()
+                            .into_iter()
+                            .for_each(|(i, headers)| {
+                                gen2_arenas
+                                    .entry(ts.handlers_types[i])
+                                    .and_modify(|(hs, _)| hs.extend(headers.iter().cloned()))
+                                    .or_insert((headers, Vec::new()));
+                            });
+
+                        h.nexts
+                            .into_iter()
+                            .enumerate()
+                            .into_iter()
+                            .for_each(|(i, next)| {
+                                if HeaderUnTyped::from(next) == next as *const _ {
+                                    gen2_arenas
+                                        .entry(ts.handlers_types[i])
+                                        .and_modify(|(hs, _)| hs.push(next as *mut HeaderUnTyped))
+                                        .or_insert((
+                                            smallvec![next as *mut HeaderUnTyped],
+                                            Vec::new(),
+                                        ));
+                                } else {
+                                    gen2_arenas
+                                        .entry(ts.handlers_types[i])
+                                        .and_modify(|(_, nx)| nx.push(next))
+                                        .or_insert((SmallVec::new(), vec![next]));
+                                }
+                            });
+                    });
                 }
             })
         });
+
+        // Reset TypeState by adding contents of Handlers
+        gen2_arenas
+            .drain()
+            .into_iter()
+            .for_each(|(ti, (headers, next))| {
+                let ts = active.get_mut(&ti).unwrap();
+                ts.gc_arenas_full.extend(headers.into_iter());
+                ts.gc_arenas.extend(next.into_iter());
+            });
 
         clear_stack_new.drain().for_each(|(pti, mut ctis)| {
             active.get_mut(&pti).unwrap().request_clear_stack();
