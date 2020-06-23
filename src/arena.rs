@@ -17,6 +17,8 @@ pub struct Arena<T: Condemned + Immutable> {
     // TODO compact representation of arenas
     // TODO make all these private by wrapping up needed functionality.
     // TODO derive header from next
+    /// The index of this Arenas start message.
+    /// Currently infallible
     bus_idx: u8,
     new_allocation: bool,
     pub grey_self: bool,

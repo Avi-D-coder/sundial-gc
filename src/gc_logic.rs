@@ -1,5 +1,6 @@
 use crate::arena::*;
 use crate::mark::*;
+use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{mpsc::*, Mutex};
 use std::thread::{self, ThreadId};
@@ -11,15 +12,6 @@ use std::{
 
 pub(crate) static mut REGISTER: Option<Sender<RegMsg>> = None;
 
-#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
-pub(crate) struct TypeInfo {
-    info: GcTypeInfo,
-    // TODO work around const limitation and merge these
-    drop_ptr: fn(*mut u8),
-}
-
-unsafe impl Send for TypeInfo {}
-
 #[derive(Copy, Clone)]
 pub(crate) struct BusPtr(&'static Bus);
 
@@ -28,8 +20,8 @@ unsafe impl Sync for BusPtr {}
 
 #[derive(Copy, Clone)]
 pub(crate) enum RegMsg {
-    Reg(ThreadId, TypeInfo, BusPtr),
-    Un(ThreadId, TypeInfo),
+    Reg(ThreadId, GcTypeInfo, BusPtr),
+    Un(ThreadId, GcTypeInfo),
 }
 
 #[derive(Copy, Clone)]
@@ -57,10 +49,14 @@ impl Default for Parents {
 
 /// This whole struct is unsafe!
 struct TypeState {
-    type_info: TypeInfo,
-    handlers: Handlers,
+    type_info: GcTypeInfo,
+    handlers: Option<Handlers>,
     /// Map Type to Bit
     buses: HashMap<ThreadId, BusPtr>,
+    /// The last seen `next`. ptr + size..high_offset is owned by gc
+    /// Will not include all Arenas owned by workers.
+    /// Only contains Arenas that the gc owns some of.
+    worker_arenas: HashMap<*const HeaderUnTyped, *const u8>,
     /// Arena owned by GC, that have not been completely filled.
     gc_arenas: BTreeSet<*mut u8>,
     gc_arenas_full: BTreeSet<*const u8>,
@@ -96,6 +92,7 @@ impl TypeState {
         let Self {
             type_info,
             buses,
+            worker_arenas,
             gc_arenas_full,
             gc_arenas,
             pending_known_transitive_grey,
@@ -106,12 +103,13 @@ impl TypeState {
             transitive_epoch,
             phase2,
             invariant,
+            handlers,
             ..
         } = self;
         *epoch += 1;
 
         // TODO lift allocation
-        let mut grey = Vec::with_capacity(20);
+        let mut grey: SmallVec<[(*const u8, u8); 8]> = SmallVec::new();
         buses.iter().for_each(|(_, bus)| {
             let mut has_new = false;
             let mut bus = bus.0.lock().expect("Could not unlock bus");
@@ -135,7 +133,7 @@ impl TypeState {
                         *latest_grey = *epoch;
                         *pending_known_grey += 1;
                     }
-                    *msg = Msg::Slot;
+                    // *msg = Msg::Slot;
                     None
                 }
                 Msg::End {
@@ -147,39 +145,42 @@ impl TypeState {
                     white_end,
                 } => {
                     let next = *next;
-                    let ret = if invariant
-                        .map(|i| i.white_start == *white_start && i.white_end == *white_end)
-                        .unwrap_or(true)
-                    {
-                        if let Some(e) = pending.remove(&HeaderUnTyped::from(next)) {
-                            if e < *transitive_epoch {
-                                *pending_known_transitive_grey =
-                                    pending_known_transitive_grey.saturating_sub(1);
-                            }
-                        } else if !*new_allocation {
-                            *pending_known_grey -= 1;
-                        };
-                        // Nothing was marked.
-                        // Allocated objects contain no condemned pointers into the white set.
-                        if *grey_feilds == 0b0000_0000 {
-                            if *release_to_gc {
-                                if full(next, type_info.info.align) {
-                                    gc_arenas.insert(next as *mut _);
-                                } else {
-                                    gc_arenas_full.insert(next);
+                    let ret = invariant
+                        .map(|i| {
+                            if i.white_start == *white_start && i.white_end == *white_end {
+                                if let Some(e) = pending.remove(&HeaderUnTyped::from(next)) {
+                                    if e < *transitive_epoch {
+                                        *pending_known_transitive_grey =
+                                            pending_known_transitive_grey.saturating_sub(1);
+                                    }
+                                } else if !*new_allocation {
+                                    *pending_known_grey -= 1;
                                 };
+
+                                // Nothing was marked.
+                                // Allocated objects contain no condemned pointers into the white set.
+                                if *grey_feilds == 0b0000_0000 {
+                                    None
+                                } else {
+                                    *latest_grey = *epoch;
+                                    Some((next, *grey_feilds))
+                                }
                             } else {
-                                // TODO store active worker arenas
-                            };
-                            None
+                                *latest_grey = *epoch;
+                                Some((next, 0b1111_1111))
+                            }
+                        })
+                        .flatten();
+
+                    if *release_to_gc {
+                        if full(next, type_info.align) {
+                            gc_arenas.insert(next as *mut _);
                         } else {
-                            *latest_grey = *epoch;
-                            Some((next, *grey_feilds))
-                        }
+                            gc_arenas_full.insert(next);
+                        };
                     } else {
-                        *pending_known_grey -= 1;
-                        *latest_grey = *epoch;
-                        Some((next, 0b1111_1111))
+                        // store active worker arenas
+                        worker_arenas.insert(HeaderUnTyped::from(next), next);
                     };
 
                     *msg = Msg::Slot;
@@ -203,10 +204,8 @@ impl TypeState {
                         .or(free.pop().map(|header| {
                             HeaderUnTyped::init(header);
                             (header as usize
-                                + HeaderUnTyped::high_offset(
-                                    type_info.info.align,
-                                    type_info.info.size,
-                                ) as usize) as *mut u8
+                                + HeaderUnTyped::high_offset(type_info.align, type_info.size)
+                                    as usize) as *mut u8
                         }));
 
                     if let Some(Invariant {
@@ -236,7 +235,32 @@ impl TypeState {
             }
         });
 
-        // TODO trace grey, updating refs
+        // trace grey, updating refs
+        if let Some(inv) = *invariant {
+            let handlers = handlers
+                .as_mut()
+                .expect("handlers must be Some if an invariant is Some");
+
+            grey.iter().for_each(|(next, bits)| {
+                let GcTypeInfo {
+                    align,
+                    size,
+                    evacuate_fn,
+                    ..
+                } = *type_info;
+                let next = *next;
+                let mut ptr = HeaderUnTyped::from(next) as usize
+                    + HeaderUnTyped::high_offset(align, size) as usize;
+
+                while ptr != next as usize {
+                    let t = unsafe { &*(ptr as *const u8) };
+                    unsafe {
+                        (*evacuate_fn)(t, 0, *bits, inv.white_start..inv.white_end, handlers)
+                    };
+                    ptr -= size as usize;
+                }
+            });
+        }
 
         if *pending_known_grey == 0
             && *epoch >= (*latest_grey + 2)
@@ -263,7 +287,6 @@ impl TypeState {
     /// once `T`'s direct parents are clear of condemned ptrs.
     /// Must be proceed by a call to `is_stack_clear`.
     fn request_clear_stack(&mut self) {
-        // TODO are 2 epochs needed?
         self.transitive_epoch = self.epoch + 2;
         self.pending_known_transitive_grey = self.pending.len();
     }
@@ -275,7 +298,7 @@ impl TypeState {
             && self.transitive_epoch != 0
     }
 
-    fn set_invariant(&mut self, inv: Invariant) {
+    fn set_invariant(&mut self, inv: Invariant, handlers: Handlers) {
         self.phase2 = false;
         self.pending_known_transitive_grey = 0;
         self.pending_known_grey = self.pending.len();
@@ -284,6 +307,7 @@ impl TypeState {
         self.latest_grey = 1;
         self.pending = HashMap::new();
         self.invariant = Some(inv);
+        self.handlers = Some(handlers);
     }
 }
 
@@ -294,7 +318,7 @@ struct TypeRelations {
     /// TODO This will not work once we are freeing regions containing multiple arenas.
     /// Regions must be contiguous, since Gc.ptr may be a &'static T.
     /// To fix this, we should probably differentiate between Gc<T> and &'static
-    mem: BTreeMap<usize, (*const u8, TypeInfo)>,
+    mem: BTreeMap<usize, (*const u8, GcTypeInfo)>,
 }
 
 impl TypeRelations {
@@ -306,33 +330,34 @@ impl TypeRelations {
         }
     }
 
-    fn reg(&mut self, type_info: TypeInfo, t_id: ThreadId, bus: BusPtr) {
+    fn reg(&mut self, type_info: GcTypeInfo, t_id: ThreadId, bus: BusPtr) {
         let Self {
             active,
             parents,
             mem,
         } = self;
-        let ts = active.entry(type_info.info).or_insert_with(|| {
+        let ts = active.entry(type_info).or_insert_with(|| {
             let mut direct_children: HashMap<GcTypeInfo, TypeRow> = HashMap::new();
-            let direct_gc_types = unsafe { *type_info.info.direct_gc_types_fn };
+            let direct_gc_types = unsafe { *type_info.direct_gc_types_fn };
             direct_gc_types(&mut direct_children, 0);
             direct_children.iter().for_each(|(child, row)| {
                 let cp = parents.entry(*child).or_default();
-                cp.direct.insert(type_info.info, row.1);
+                cp.direct.insert(type_info, row.1);
             });
 
             let mut tti = Tti::new();
-            let tti_fn = unsafe { *type_info.info.transitive_gc_types_fn };
+            let tti_fn = unsafe { *type_info.transitive_gc_types_fn };
             tti_fn(&mut tti as *mut Tti);
             tti.type_info.iter().for_each(|child| {
                 let cp = parents.entry(*child).or_default();
-                cp.transitive.insert(type_info.info);
+                cp.transitive.insert(type_info);
             });
 
             TypeState {
                 type_info,
-                handlers: todo!(),
+                handlers: None,
                 buses: HashMap::new(),
+                worker_arenas: HashMap::new(),
                 gc_arenas: BTreeSet::new(),
                 gc_arenas_full: BTreeSet::new(),
                 pending_known_transitive_grey: 0,
@@ -367,7 +392,7 @@ fn gc_loop(r: Receiver<RegMsg>) {
                 RegMsg::Reg(id, ty, bus) => types.reg(ty, id, bus),
                 RegMsg::Un(id, ty) => {
                     // The thread was dropped
-                    let type_state = types.active.get_mut(&ty.info).unwrap();
+                    let type_state = types.active.get_mut(&ty).unwrap();
                     type_state.step(&mut free);
                     type_state.buses.remove(&id);
                 }

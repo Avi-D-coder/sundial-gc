@@ -128,10 +128,11 @@ pub type TypeRow = (SmallVec<[u8; 8]>, u8);
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GcTypeInfo {
-    pub(crate) evacuate_fn: *const fn(&u8, u8, u8, Range<usize>, &mut Handlers),
+    pub(crate) evacuate_fn: *const fn(*const u8, u8, u8, Range<usize>, *mut Handlers),
     pub(crate) transitive_gc_types_fn: *const fn(*mut Tti),
     /// `direct_gc_types(&mut HashMap<GcTypeInfo, ([offset: u8], bits: u8)>, starting_offset: u8 = 0)`
     pub(crate) direct_gc_types_fn: *const fn(&mut HashMap<GcTypeInfo, TypeRow>, u8),
+    pub(crate) drop_in_place_fn: *const unsafe fn(*mut u8),
     pub(crate) needs_drop: bool,
     pub(crate) size: u16,
     pub(crate) align: u16,
@@ -143,12 +144,16 @@ impl GcTypeInfo {
             evacuate_fn: T::evacuate as *const _,
             transitive_gc_types_fn: T::transitive_gc_types as *const _,
             direct_gc_types_fn: T::direct_gc_types as *const _,
+            drop_in_place_fn: ptr::drop_in_place::<T> as *const _,
             needs_drop: mem::needs_drop::<T>(),
             size: mem::size_of::<T>() as u16,
             align: mem::align_of::<T>() as u16,
         }
     }
 }
+
+unsafe impl Send for GcTypeInfo {}
+unsafe impl Sync for GcTypeInfo {}
 
 pub unsafe trait Condemned: Immutable {
     fn feilds(s: &Self, offset: u8, grey_feilds: u8, region: Range<usize>) -> u8;
