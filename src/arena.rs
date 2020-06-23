@@ -50,18 +50,13 @@ impl<T: Immutable + Condemned> Arena<T> {
     pub fn full(&self) -> bool {
         full(
             unsafe { *self.next.get() } as *const u8,
-            mem::size_of::<T>() as u16,
             mem::align_of::<T>() as u16,
         )
     }
 
     #[inline(always)]
     pub fn full_ptr(next: *const T) -> bool {
-        full(
-            next as *const u8,
-            mem::size_of::<T>() as u16,
-            mem::align_of::<T>() as u16,
-        )
+        full(next as *const u8, mem::align_of::<T>() as u16)
     }
 
     /// Returns a ptr to the slot after `self.next`.
@@ -99,14 +94,14 @@ impl<T: Immutable + Condemned> Arena<T> {
 }
 
 #[inline(always)]
-pub(crate) const fn capacity(next: *const u8, size: u16, align: u16) -> u16 {
+pub(crate) fn capacity(next: *const u8, size: u16, align: u16) -> u16 {
     let next_addr = next as usize;
     let low = HeaderUnTyped::from(next) as usize + HeaderUnTyped::low_offset(align) as usize;
     (next_addr - low) as u16 / size
 }
 
 #[inline(always)]
-pub(crate) const fn full(next: *const u8, size: u16, align: u16) -> bool {
+pub(crate) fn full(next: *const u8, align: u16) -> bool {
     let low = HeaderUnTyped::from(next) as usize + HeaderUnTyped::low_offset(align) as usize;
     (next as usize) <= low
 }
@@ -116,7 +111,7 @@ pub(crate) const fn full(next: *const u8, size: u16, align: u16) -> bool {
 /// When `next` points to the lowest slot in it's Arena block
 /// the block is full, and a ptr to header will be returned.
 /// `next` must be aligned!
-pub(crate) const fn bump_down(next: *const u8, size: u16, align: u16) -> *const u8 {
+pub(crate) fn bump_down(next: *const u8, size: u16, align: u16) -> *const u8 {
     // TODO inspect generated code to ensure `next % align` is only being calculated once,
     // when caller compares `bump_down(next)` to `Header::from(next)`.
     let header = HeaderUnTyped::from(next);
@@ -130,7 +125,7 @@ pub(crate) const fn bump_down(next: *const u8, size: u16, align: u16) -> *const 
 }
 
 /// The index of `ptr` in it's Arena block.
-pub(crate) const fn index(ptr: *const u8, size: u16, align: u16) -> u16 {
+pub(crate) fn index(ptr: *const u8, size: u16, align: u16) -> u16 {
     let header = HeaderUnTyped::from(ptr);
     let low = header as usize + HeaderUnTyped::low_offset(align) as usize;
     ((ptr as usize - low) / size as usize) as u16
@@ -149,38 +144,39 @@ unsafe impl<'o, 'n, 'r: 'n, O: Immutable + 'o, N: Immutable + 'r> Mark<'o, 'n, '
             // TODO once Eq for &str is const make this const
             panic!("O is a different type then N, mark only changes lifetimes")
         };
-        let condemned_self =
-            self.grey_self && self.white_region.contains(&(&*old as *const _ as usize));
+
+        let old_ptr = old.ptr as *const O as *const N;
+        let condemned_self = self.grey_self && self.white_region.contains(&(old_ptr as usize));
 
         let grey_feilds = unsafe { &mut *self.grey_feilds.get() };
-        let cf = Condemned::feilds(&*old, 0, *grey_feilds, self.white_region.clone());
+        let cf = Condemned::feilds(old.ptr, 0, *grey_feilds, self.white_region.clone());
 
         if condemned_self || (0b0000_0000 != cf) {
-            let next = self.next.get();
-            if Self::full_ptr(*next) {
+            let next_slot = self.next.get();
+            let next = unsafe { *next_slot };
+            if Self::full_ptr(next) {
+                // TODO
+                panic!("Allocating additional memory for an arena not yet supported");
+            };
+
+            if Self::full_ptr(next) {
                 // TODO
                 panic!("Allocating additional memory for an arena not yet supported");
             };
 
             unsafe {
-                let header = Header::from(*next);
-                *next = Self::bump_down_ptr(*next) as *mut N;
-                if *next == header as *mut _ {
-                    // TODO
-                    panic!("Allocating additional memory for an arena not yet supported");
-                };
-
-                std::ptr::copy(std::mem::transmute::<_, *const N>(old), *next, 1);
+                *next_slot = Self::bump_down_ptr(next) as *mut N;
+                std::ptr::copy(old_ptr, next, 1);
             };
 
-            let mut new_ptr = *next;
-            let old_header = unsafe { &*Header::<O>::from(old.ptr) };
+            let mut new_ptr = next;
+            let old_header = unsafe { &*Header::from(old_ptr) };
             let evacuated = old_header.evacuated.lock();
             evacuated
                 .unwrap()
                 .entry(Arena::index(old.ptr as *const O))
                 .and_modify(|evacuated_ptr| new_ptr = *evacuated_ptr as *mut N)
-                .or_insert(*next as *const O);
+                .or_insert(next);
 
             Gc {
                 ptr: unsafe { &*new_ptr },
@@ -276,7 +272,7 @@ pub fn alloc_arena<T>() -> *mut T {
 
 impl<T: Immutable + Condemned> Arena<T> {
     pub fn new() -> Arena<T> {
-        if !T::PRE_CONDITION {
+        if !T::PRE_CONDTION {
             panic!("You need to derive Condemned for T")
         };
 
