@@ -20,9 +20,3 @@ impl<'r, T> Deref for Gc<'r, T> {
         self.ptr
     }
 }
-
-impl<'r, T> From<&'static T> for Gc<'r, T> {
-    fn from(t: &'static T) -> Self {
-        Gc { ptr: &*t }
-    }
-}

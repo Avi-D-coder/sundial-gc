@@ -89,7 +89,11 @@ impl TypeState {
     /// Handle messages of Type.
     /// Returns true when no condemned pointers from Type exist.
     /// `free` must be uninitialized.
-    fn step(&mut self, free: &mut Vec<*mut HeaderUnTyped>) -> bool {
+    fn step(
+        &mut self,
+        free: &mut Vec<*mut HeaderUnTyped>,
+        mem: &mut BTreeMap<*const HeaderUnTyped, GcTypeInfo>,
+    ) -> bool {
         let Self {
             type_info,
             buses,
@@ -177,7 +181,9 @@ impl TypeState {
                         if full(next, type_info.align) {
                             gc_arenas.insert(next as *mut _);
                         } else {
-                            gc_arenas_full.insert(HeaderUnTyped::from(next) as *mut _);
+                            let header = HeaderUnTyped::from(next) as *mut _;
+                            gc_arenas_full.insert(header);
+                            mem.insert(header, *type_info);
                         };
                     } else {
                         // store active worker arenas
@@ -315,11 +321,6 @@ impl TypeState {
 struct TypeRelations {
     active: HashMap<GcTypeInfo, TypeState>,
     parents: HashMap<GcTypeInfo, Parents>,
-    /// Key is 16 kB aligned Arena, value is `Arena.next`.
-    /// TODO This will not work once we are freeing regions containing multiple arenas.
-    /// Regions must be contiguous, since Gc.ptr may be a &'static T.
-    /// To fix this, we should probably differentiate between Gc<T> and &'static
-    mem: BTreeMap<usize, (*const u8, GcTypeInfo)>,
 }
 
 impl TypeRelations {
@@ -327,15 +328,12 @@ impl TypeRelations {
         Self {
             active: HashMap::new(),
             parents: HashMap::new(),
-            mem: BTreeMap::new(),
         }
     }
 
     fn reg(&mut self, type_info: GcTypeInfo, t_id: ThreadId, bus: BusPtr) {
         let Self {
-            active,
-            parents,
-            mem,
+            active, parents, ..
         } = self;
         let ts = active.entry(type_info).or_insert_with(|| {
             let mut direct_children: HashMap<GcTypeInfo, TypeRow> = HashMap::new();
@@ -385,8 +383,10 @@ fn start() -> Sender<RegMsg> {
 }
 
 fn gc_loop(r: Receiver<RegMsg>) {
-    let mut types = TypeRelations::new();
     let mut free: Vec<*mut HeaderUnTyped> = Vec::with_capacity(100);
+    let mut types = TypeRelations::new();
+    // TODO This is horribly inefficient
+    let mut mem: BTreeMap<*const HeaderUnTyped, GcTypeInfo> = BTreeMap::new();
 
     loop {
         for msg in r.try_iter() {
@@ -395,17 +395,13 @@ fn gc_loop(r: Receiver<RegMsg>) {
                 RegMsg::Un(id, ty) => {
                     // The thread was dropped
                     let type_state = types.active.get_mut(&ty).unwrap();
-                    type_state.step(&mut free);
+                    type_state.step(&mut free, &mut mem);
                     type_state.buses.remove(&id);
                 }
             }
         }
 
-        let TypeRelations {
-            parents,
-            active,
-            mem,
-        } = &mut types;
+        let TypeRelations { parents, active } = &mut types;
 
         let mut stack_cleared = HashSet::with_capacity(20);
         let mut clear_stack_old: HashMap<GcTypeInfo, HashSet<GcTypeInfo>> =
@@ -416,7 +412,7 @@ fn gc_loop(r: Receiver<RegMsg>) {
         let mut gc_in_progress = false;
 
         active.iter_mut().for_each(|(ti, ts)| {
-            if ts.step(&mut free) {
+            if ts.step(&mut free, &mut mem) {
                 if let Some(ps) = parents.get(ti) {
                     // FIXME there's a race here when a parent Type is registered after active.iter
                     ts.waiting_on_transitive_parents = ps.transitive.len();
@@ -473,6 +469,7 @@ fn gc_loop(r: Receiver<RegMsg>) {
                                 }
                             };
 
+                            mem.remove(&(header as *const _));
                             unsafe { ptr::drop_in_place(header) }
                             if free.len() < mem.len() / 3 {
                                 free.push(header);
@@ -507,6 +504,8 @@ fn gc_loop(r: Receiver<RegMsg>) {
                                             smallvec![next as *mut HeaderUnTyped],
                                             Vec::new(),
                                         ));
+
+                                    mem.insert(next as *const HeaderUnTyped, ti);
                                 } else {
                                     gen2_arenas
                                         .entry(ts.handlers_types[i])
