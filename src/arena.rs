@@ -253,23 +253,6 @@ unsafe impl<'o, 'n, 'r: 'n, O: NoGc + Immutable + 'o, N: NoGc + Immutable + 'r>
     }
 }
 
-/// Returns `next`.
-pub fn alloc_arena<T>() -> *mut T {
-    // Get more memory from system allocator
-    let mem_ptr = unsafe { System.alloc(Layout::new::<Mem>()) };
-    let mem_addr = mem_ptr as usize;
-    debug_assert!(
-        mem_addr
-            < unsafe { &std::mem::transmute::<_, &Mem>(mem_ptr)._mem[16383] } as *const _ as usize
-    );
-
-    // FIXME animalizes Header
-
-    // FIXME this seems wrong! Make sure it's in sync with ArenaUntyped
-    let capacity = (ARENA_SIZE - Header::<T>::low_offset() as usize) / mem::size_of::<T>();
-    (mem_addr + (capacity * mem::size_of::<T>())) as *mut T
-}
-
 impl<T: Immutable + Condemned> Arena<T> {
     pub fn new() -> Arena<T> {
         if !T::PRE_CONDTION {

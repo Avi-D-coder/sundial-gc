@@ -58,6 +58,7 @@ impl Default for Parents {
 /// This whole struct is unsafe!
 struct TypeState {
     type_info: TypeInfo,
+    handlers: Handlers,
     /// Map Type to Bit
     buses: HashMap<ThreadId, BusPtr>,
     /// Arena owned by GC, that have not been completely filled.
@@ -71,6 +72,7 @@ struct TypeState {
     /// `pending` is mutually exclusive with `pending_known_grey`.
     /// A arena `*const u8` cannot have a entry in `pending` and `pending_known_grey`.
     pending: HashMap<*const HeaderUnTyped, usize>,
+    /// The last epoch we saw a grey in.
     latest_grey: usize,
     /// `epoch` is not synchronized across threads.
     /// 2 epochs delineate Arena age.
@@ -89,6 +91,7 @@ struct TypeState {
 impl TypeState {
     /// Handle messages of Type.
     /// Returns true when no condemned pointers from Type exist.
+    /// `free` must be uninitialized.
     fn step(&mut self, free: &mut Vec<*mut HeaderUnTyped>) -> bool {
         let Self {
             type_info,
@@ -198,6 +201,7 @@ impl TypeState {
                         .pop_first()
                         .map(|p| p as *mut _)
                         .or(free.pop().map(|header| {
+                            HeaderUnTyped::init(header);
                             (header as usize
                                 + HeaderUnTyped::high_offset(
                                     type_info.info.align,
@@ -327,6 +331,7 @@ impl TypeRelations {
 
             TypeState {
                 type_info,
+                handlers: todo!(),
                 buses: HashMap::new(),
                 gc_arenas: BTreeSet::new(),
                 gc_arenas_full: BTreeSet::new(),

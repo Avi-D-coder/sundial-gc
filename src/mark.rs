@@ -1,6 +1,6 @@
 use super::gc::*;
 use crate::{
-    arena::{alloc_arena, Arena, Header, HeaderUnTyped},
+    arena::{Arena, Header, HeaderUnTyped},
     auto_traits::{HasGc, Immutable},
 };
 use smallvec::SmallVec;
@@ -178,9 +178,12 @@ unsafe impl<'r, T: Immutable + Condemned> Condemned for Gc<'r, T> {
                 let header_addr = Header::from(next);
 
                 // Get a new Arena if this ones full
+                let mut new_arena = false;
                 if Arena::full_ptr(next) {
                     handlers.filled[i as usize].push(header_addr as *mut HeaderUnTyped);
-                    next = alloc_arena();
+                    let empty = unsafe {&*handlers.empty};
+                    next = empty.pop().map(|header| HeaderUnTyped::init(header)).unwrap_or(Arena::alloc());
+                    new_arena = true;
                 };
 
                 ptr::copy_nonoverlapping(ptr, next, 1);
@@ -189,6 +192,7 @@ unsafe impl<'r, T: Immutable + Condemned> Condemned for Gc<'r, T> {
                 // If we installed a forwarding ptr, bump next.
                 if next == evacuated_ptr as *mut T {
                     *next_slot = Arena::bump_down_ptr(next_slot) as *mut u8;
+
                 }
                 let old_ptr = sellf as *const Gc<T> as *mut *const T;
                 *old_ptr = next;
