@@ -362,8 +362,8 @@ impl<T: Immutable + Condemned> Arena<T> {
         let header = unsafe { System.alloc(Layout::new::<Mem>()) };
         debug_assert!(
             (header as usize)
-                < unsafe { &std::mem::transmute::<_, &Mem>(header)._mem[ARENA_SIZE] } as *const _
-                    as usize
+                < unsafe { &std::mem::transmute::<_, &Mem>(header)._mem[ARENA_SIZE - 1] }
+                    as *const _ as usize
         );
 
         HeaderUnTyped::init(header as *mut _);
