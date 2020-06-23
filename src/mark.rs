@@ -4,11 +4,10 @@ use crate::{
     auto_traits::{HasGc, Immutable},
 };
 use smallvec::SmallVec;
-use std::ops::Range;
+use std::ops::{Index, Range};
 use std::{
     collections::{HashMap, HashSet},
-    mem, ptr,
-    sync::Mutex,
+    iter, mem, ptr,
 };
 
 /// This will be sound once GAT or const Eq &str lands.
@@ -21,16 +20,63 @@ pub unsafe trait Mark<'o, 'n, 'r: 'n, O: 'o, N: 'r> {
 
 // Blanket Arena<T> impl is in src/arena.rs
 
+pub type Offset = u8;
+
+pub(crate) struct Translator {
+    offsets: SmallVec<[Offset; 16]>,
+}
+
+impl Translator {
+    pub(crate) fn from<T: Condemned>(effs: &Vec<GcTypeInfo>) -> (Self, u8) {
+        let mut types: HashMap<GcTypeInfo, TypeRow> = HashMap::with_capacity(16);
+        T::direct_gc_types(&mut types, 0);
+
+        let mut offsets = SmallVec::from([255; 16]);
+        let mut bloom = 0b0000_0000;
+
+        types
+            .drain()
+            .into_iter()
+            .for_each(|(ti, (type_offs, bits))| {
+                bloom |= bits;
+                if let Some((i, _)) = effs.iter().enumerate().find(|(_, eff)| *eff == &ti) {
+                    type_offs.iter().for_each(|off| {
+                        if offsets.len() < *off as usize {
+                            offsets
+                                .extend(iter::repeat(255).take(1 + *off as usize - offsets.len()));
+                        };
+
+                        offsets[*off as usize] = i as u8;
+                    });
+                };
+            });
+
+        (Self { offsets }, bloom)
+    }
+}
+
+impl Index<Offset> for Translator {
+    type Output = Offset;
+    fn index(&self, i: Offset) -> &Self::Output {
+        unsafe { self.offsets.get_unchecked(i as usize) }
+    }
+}
+
 /// Currently just holds Arenas
 pub struct Handlers {
     // TODO benchmark sizes
-    translation: SmallVec<[u8; 16]>,
-    nexts: SmallVec<[*mut u8; 4]>,
+    pub(crate) translator: Translator,
+    /// Must contain a entry for each active allocator effect Offset
+    /// A missing index will be treated as null;
+    pub(crate) nexts: SmallVec<[*mut u8; 4]>,
     // forward(old, new) -> already evacuated
     // forward: fn(*const u8, *const u8) -> Option<*const u8>,
-    filled: SmallVec<[SmallVec<[*mut HeaderUnTyped; 1]>; 4]>,
-    // TODO not safe once we trace in parrel
-    empty: *const Vec<*mut HeaderUnTyped>,
+    /// Must contain a entry for each active Effect Offset
+    /// A missing index will be treated as null;
+    pub(crate) filled: SmallVec<[SmallVec<[*mut HeaderUnTyped; 1]>; 4]>,
+    // TODO not safe once we trace in parallel
+    /// Header must be uninitialized!
+    pub(crate) free: *mut Vec<*mut HeaderUnTyped>,
 }
 
 impl Handlers {
@@ -108,7 +154,7 @@ pub unsafe trait Condemned: Immutable {
     fn feilds(s: &Self, offset: u8, grey_feilds: u8, region: Range<usize>) -> u8;
     unsafe fn evacuate<'e>(
         s: &Self,
-        offset: u8,
+        offset: Offset,
         grey_feilds: u8,
         region: Range<usize>,
         handlers: &mut Handlers,
@@ -172,7 +218,7 @@ unsafe impl<'r, T: Immutable + Condemned> Condemned for Gc<'r, T> {
         let ptr = sellf.ptr as *const T;
         let addr = ptr as usize;
         if region.contains(&addr) {
-            let i = handlers.translation[offset as usize];
+            let i = handlers.translator[offset];
             if let Some(next_slot) = handlers.nexts.get_mut(i as usize) {
                 let mut next = *next_slot as *mut T;
                 let header_addr = Header::from(next);
@@ -180,9 +226,18 @@ unsafe impl<'r, T: Immutable + Condemned> Condemned for Gc<'r, T> {
                 // Get a new Arena if this ones full
                 let mut new_arena = false;
                 if Arena::full_ptr(next) {
-                    handlers.filled[i as usize].push(header_addr as *mut HeaderUnTyped);
-                    let empty = unsafe {&*handlers.empty};
-                    next = empty.pop().map(|header| HeaderUnTyped::init(header)).unwrap_or(Arena::alloc());
+                    handlers
+                        .filled
+                        .get_mut(i as usize)
+                        .map(|v| v.push(header_addr as *mut HeaderUnTyped));
+                    let empty = &mut *handlers.free;
+                    next = empty
+                        .pop()
+                        .map(|header| {
+                            HeaderUnTyped::init(header);
+                            header as *mut T
+                        })
+                        .unwrap_or(Arena::alloc());
                     new_arena = true;
                 };
 
@@ -192,7 +247,12 @@ unsafe impl<'r, T: Immutable + Condemned> Condemned for Gc<'r, T> {
                 // If we installed a forwarding ptr, bump next.
                 if next == evacuated_ptr as *mut T {
                     *next_slot = Arena::bump_down_ptr(next_slot) as *mut u8;
+                } else if new_arena {
+                    let header = HeaderUnTyped::from(next as *const u8) as *mut HeaderUnTyped;
+                    ptr::drop_in_place(header);
 
+                    let empty = &mut *handlers.free;
+                    empty.push(header)
                 }
                 let old_ptr = sellf as *const Gc<T> as *mut *const T;
                 *old_ptr = next;
