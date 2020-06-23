@@ -308,7 +308,7 @@ impl<T: Immutable + Condemned> Arena<T> {
                 n as *mut T
             } else {
                 new_allocation = true;
-                alloc_arena::<T>()
+                Arena::alloc()
             });
 
             msgs[bus_idx] = Msg::Slot;
@@ -328,7 +328,7 @@ impl<T: Immutable + Condemned> Arena<T> {
                 n as *mut T
             } else {
                 new_allocation = true;
-                alloc_arena::<T>()
+                Arena::alloc()
             };
 
             let (bus_idx, slot) = msgs
@@ -371,6 +371,22 @@ impl<T: Immutable + Condemned> Arena<T> {
     // fn advance(&mut self) -> Self {
     //     unimplemented!()
     // }
+
+    /// Allocates & initializes a new Arena block.
+    /// Returns highest ptr.
+    pub(crate) fn alloc() -> *mut T {
+        // Get more memory from system allocator
+        let header = unsafe { System.alloc(Layout::new::<Mem>()) };
+        debug_assert!(
+            (header as usize)
+                < unsafe { &std::mem::transmute::<_, &Mem>(header)._mem[ARENA_SIZE] } as *const _
+                    as usize
+        );
+
+        HeaderUnTyped::init(header as *mut _);
+
+        (header as usize + Header::<T>::high_offset() as usize) as *mut T
+    }
 }
 
 pub(crate) struct HeaderUnTyped {
@@ -403,6 +419,17 @@ impl HeaderUnTyped {
     pub(crate) const fn high_offset(align: u16, size: u16) -> u16 {
         let cap = (ARENA_SIZE as u16 - HeaderUnTyped::low_offset(align)) / size;
         HeaderUnTyped::low_offset(align) + (cap * size)
+    }
+
+    pub(crate) fn init(ptr: *mut HeaderUnTyped) {
+        unsafe {
+            *ptr = HeaderUnTyped {
+                evacuated: Mutex::new(HashMap::new()),
+                roots: 0,
+                finalizers: 0,
+                condemned: false,
+            }
+        }
     }
 }
 
