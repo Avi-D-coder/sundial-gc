@@ -1,14 +1,14 @@
 use super::gc::*;
 use crate::{
-    arena::{alloc_arena, Header, HeaderUnTyped, ARENA_SIZE},
+    arena::{alloc_arena, Arena, Header, HeaderUnTyped},
     auto_traits::{HasGc, Immutable},
 };
 use smallvec::SmallVec;
 use std::ops::Range;
 use std::{
-    cmp::min,
     collections::{HashMap, HashSet},
     mem, ptr,
+    sync::Mutex,
 };
 
 /// This will be sound once GAT or const Eq &str lands.
@@ -26,9 +26,26 @@ pub struct Handlers {
     // TODO benchmark sizes
     translation: SmallVec<[u8; 16]>,
     nexts: SmallVec<[*mut u8; 4]>,
-    /// forward(old, new) -> already evacuated
-    forward: fn(*const u8, *const u8) -> Option<*const u8>,
+    // forward(old, new) -> already evacuated
+    // forward: fn(*const u8, *const u8) -> Option<*const u8>,
     filled: SmallVec<[SmallVec<[*mut HeaderUnTyped; 1]>; 4]>,
+    // TODO Remove Mutex
+    empty: *const Mutex<HashSet<*mut HeaderUnTyped>>,
+}
+
+impl Handlers {
+    /// Returns a ptr if the condemned ptr has already been evacuated.
+    unsafe fn forward_single_threaded<T: Immutable>(
+        condemned: *const T,
+        new: *const T,
+    ) -> *const T {
+        let header = &mut *(Header::from(condemned) as *mut Header<T>);
+        // This will race if multiple threads are tracing!
+        let evacuated = header.evacuated.get_mut().unwrap();
+
+        // Add a forwarding ptr to the condemned Arena
+        *evacuated.entry(Arena::index(condemned)).or_insert(new)
+    }
 }
 
 pub struct Tti {
@@ -146,37 +163,35 @@ unsafe impl<'r, T: Immutable + Condemned> Condemned for Gc<'r, T> {
     }
 
     unsafe fn evacuate<'e>(
-        s: &Self,
+        sellf: &Self,
         offset: u8,
         _: u8,
         region: std::ops::Range<usize>,
         handlers: &mut Handlers,
     ) {
-        let ptr = s.ptr as *const T;
+        let ptr = sellf.ptr as *const T;
         let addr = ptr as usize;
         if region.contains(&addr) {
             let i = handlers.translation[offset as usize];
-            if let Some(next) = handlers.nexts.get_mut(i as usize) {
-                let next_addr = *next as usize;
-                let header_addr = next_addr - next_addr % ARENA_SIZE;
+            if let Some(next_slot) = handlers.nexts.get_mut(i as usize) {
+                let mut next = *next_slot as *mut T;
+                let header_addr = Header::from(next);
 
                 // Get a new Arena if this ones full
-                if HeaderUnTyped::low_offset(mem::align_of::<T>() as u16) as usize > next_addr {
+                if Arena::full_ptr(next) {
                     handlers.filled[i as usize].push(header_addr as *mut HeaderUnTyped);
-                    *next = alloc_arena::<T>() as *mut u8;
+                    next = alloc_arena();
                 };
 
-                ptr::copy_nonoverlapping(ptr, *next as *mut T, 1);
-                let forward = handlers.forward;
-                if let Some(pre_evac) = forward(ptr as *const u8, *next as *const u8) {
-                    let r = s as *const Gc<T> as *mut *const T;
-                    *r = pre_evac as *const T;
-                } else {
-                    let r = s as *const Gc<T> as *mut *const T;
-                    *r = *next as *const T;
-                    // TODO fix overwrite when size_of<T> > size_of<Header> via min in other places
-                    *next = min(addr - mem::size_of::<T>(), header_addr) as *mut u8;
+                ptr::copy_nonoverlapping(ptr, next, 1);
+                let evacuated_ptr = Handlers::forward_single_threaded(ptr, next);
+
+                // If we installed a forwarding ptr, bump next.
+                if next == evacuated_ptr as *mut T {
+                    *next_slot = Arena::bump_down_ptr(next_slot) as *mut u8;
                 }
+                let old_ptr = sellf as *const Gc<T> as *mut *const T;
+                *old_ptr = next;
             }
         }
     }
