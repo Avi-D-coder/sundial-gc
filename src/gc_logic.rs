@@ -91,11 +91,7 @@ impl TypeState {
     /// Handle messages of Type.
     /// Returns true when no condemned pointers from Type exist.
     /// `free` must be uninitialized.
-    fn step(
-        &mut self,
-        free: &mut Vec<*mut HeaderUnTyped>,
-        mem: &mut BTreeMap<*const HeaderUnTyped, GcTypeInfo>,
-    ) -> bool {
+    fn step(&mut self, free: &mut Vec<*mut HeaderUnTyped>) -> bool {
         let Self {
             type_info,
             buses,
@@ -185,7 +181,6 @@ impl TypeState {
                         } else {
                             let header = HeaderUnTyped::from(next) as *mut _;
                             gc_arenas_full.insert(header);
-                            mem.insert(header, *type_info);
                         };
                     } else {
                         // store active worker arenas
@@ -396,8 +391,6 @@ fn start() -> Sender<RegMsg> {
 fn gc_loop(r: Receiver<RegMsg>) {
     let mut free: Vec<*mut HeaderUnTyped> = Vec::with_capacity(100);
     let mut types = TypeRelations::new();
-    // TODO This is horribly inefficient
-    let mut mem: BTreeMap<*const HeaderUnTyped, GcTypeInfo> = BTreeMap::new();
 
     loop {
         for msg in r.try_iter() {
@@ -406,7 +399,7 @@ fn gc_loop(r: Receiver<RegMsg>) {
                 RegMsg::Un(id, ty) => {
                     // The thread was dropped
                     let type_state = types.active.get_mut(&ty).unwrap();
-                    type_state.step(&mut free, &mut mem);
+                    type_state.step(&mut free);
                     type_state.buses.remove(&id);
                 }
             }
@@ -421,9 +414,10 @@ fn gc_loop(r: Receiver<RegMsg>) {
             HashMap::with_capacity(20);
 
         let mut gc_in_progress = false;
+        let mut arena_count: usize = 0;
 
         active.iter_mut().for_each(|(ti, ts)| {
-            if ts.step(&mut free, &mut mem) {
+            if ts.step(&mut free) {
                 if let Some(ps) = parents.get(ti) {
                     // FIXME there's a race here when a parent Type is registered after active.iter
                     ts.waiting_on_transitive_parents = ps.transitive.len();
@@ -443,6 +437,8 @@ fn gc_loop(r: Receiver<RegMsg>) {
             if ts.invariant.is_some() {
                 gc_in_progress = true;
             };
+
+            arena_count += ts.gc_arenas_full.len();
         });
 
         let mut gen2_arenas: HashMap<
@@ -484,9 +480,8 @@ fn gc_loop(r: Receiver<RegMsg>) {
                                 }
                             };
 
-                            mem.remove(&(header as *const _));
                             unsafe { ptr::drop_in_place(header) }
-                            if free.len() < mem.len() / 3 {
+                            if free.len() < arena_count {
                                 free.push(header);
                             } else {
                                 unsafe { System.dealloc(header as *mut u8, Layout::new::<Mem>()) };
@@ -519,8 +514,6 @@ fn gc_loop(r: Receiver<RegMsg>) {
                                             smallvec![next as *mut HeaderUnTyped],
                                             Vec::new(),
                                         ));
-
-                                    mem.insert(next as *const HeaderUnTyped, ti);
                                 } else {
                                     gen2_arenas
                                         .entry(ts.handlers_types[i])
