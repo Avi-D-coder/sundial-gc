@@ -6,6 +6,8 @@ use std::sync::{mpsc::*, Mutex};
 use std::thread::{self, ThreadId};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
+    mem,
+    ops::Range,
     ptr,
     time::Duration,
 };
@@ -262,7 +264,11 @@ impl TypeState {
                 while ptr != next as usize {
                     let t = unsafe { &*(ptr as *const u8) };
                     unsafe {
-                        (*evacuate_fn)(t, 0, *bits, inv.white_start..inv.white_end, handlers)
+                        mem::transmute::<_, fn(*const u8, u8, u8, Range<usize>, *mut Handlers)>(
+                            evacuate_fn,
+                        )(
+                            t, 0, *bits, inv.white_start..inv.white_end, handlers
+                        )
                     };
                     ptr -= size as usize;
                 }
@@ -337,7 +343,11 @@ impl TypeRelations {
         } = self;
         let ts = active.entry(type_info).or_insert_with(|| {
             let mut direct_children: HashMap<GcTypeInfo, TypeRow> = HashMap::new();
-            let direct_gc_types = unsafe { *type_info.direct_gc_types_fn };
+            let direct_gc_types = unsafe {
+                mem::transmute::<_, fn(&mut HashMap<GcTypeInfo, TypeRow>, u8)>(
+                    type_info.direct_gc_types_fn,
+                )
+            };
             direct_gc_types(&mut direct_children, 0);
             direct_children.iter().for_each(|(child, row)| {
                 let cp = parents.entry(*child).or_default();
@@ -345,7 +355,8 @@ impl TypeRelations {
             });
 
             let mut tti = Tti::new();
-            let tti_fn = unsafe { *type_info.transitive_gc_types_fn };
+            let tti_fn =
+                unsafe { mem::transmute::<_, fn(*mut Tti)>(type_info.transitive_gc_types_fn) };
             tti_fn(&mut tti as *mut Tti);
             tti.type_info.iter().for_each(|child| {
                 let cp = parents.entry(*child).or_default();
@@ -464,7 +475,11 @@ fn gc_loop(r: Receiver<RegMsg>) {
                                     low as usize + HeaderUnTyped::high_offset(align, size) as usize;
 
                                 while ptr >= low {
-                                    unsafe { (*drop_in_place_fn)(ptr as *mut u8) }
+                                    unsafe {
+                                        mem::transmute::<_, fn(*mut u8)>(drop_in_place_fn)(
+                                            ptr as *mut u8,
+                                        )
+                                    }
                                     ptr -= size as usize;
                                 }
                             };

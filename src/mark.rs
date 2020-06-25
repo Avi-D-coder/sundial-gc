@@ -128,11 +128,15 @@ pub type TypeRow = (SmallVec<[u8; 8]>, u8);
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GcTypeInfo {
-    pub(crate) evacuate_fn: *const fn(*const u8, u8, u8, Range<usize>, *mut Handlers),
-    pub(crate) transitive_gc_types_fn: *const fn(*mut Tti),
+    /// `fn(*const u8, u8, u8, Range<usize>, *mut Handlers)`
+    pub(crate) evacuate_fn: *const (),
+    /// `fn(*mut Tti)`
+    pub(crate) transitive_gc_types_fn: *const (),
     /// `direct_gc_types(&mut HashMap<GcTypeInfo, ([offset: u8], bits: u8)>, starting_offset: u8 = 0)`
-    pub(crate) direct_gc_types_fn: *const fn(&mut HashMap<GcTypeInfo, TypeRow>, u8),
-    pub(crate) drop_in_place_fn: *const unsafe fn(*mut u8),
+    /// `fn(&mut HashMap<GcTypeInfo, TypeRow>, u8)`
+    pub(crate) direct_gc_types_fn: *const (),
+    /// `unsafe fn(*mut u8)`
+    pub(crate) drop_in_place_fn: *const (),
     pub(crate) needs_drop: bool,
     pub(crate) size: u16,
     pub(crate) align: u16,
