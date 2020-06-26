@@ -1,12 +1,10 @@
 use crate::arena::*;
 use crate::mark::*;
-use lazy_static::lazy_static;
 use smallvec::{smallvec, SmallVec};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{
     atomic::{AtomicPtr, Ordering},
     mpsc::*,
-    RwLock,
 };
 use std::thread::{self, ThreadId};
 use std::{
