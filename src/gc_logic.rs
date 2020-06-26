@@ -496,9 +496,17 @@ fn gc_loop(r: Receiver<RegMsg>) {
 
                                 while ptr >= low {
                                     unsafe {
-                                        mem::transmute::<_, fn(*mut u8)>(drop_in_place_fn)(
-                                            ptr as *mut u8,
-                                        )
+                                        let header = &mut *header;
+                                        // TODO sort and iterate between evacuated
+                                        if header.evacuated.get_mut().unwrap().contains_key(&index(
+                                            ptr as *const u8,
+                                            ti.size,
+                                            ti.align,
+                                        )) {
+                                            mem::transmute::<_, fn(*mut u8)>(drop_in_place_fn)(
+                                                ptr as *mut u8,
+                                            )
+                                        }
                                     }
                                     ptr -= size as usize;
                                 }
