@@ -1,8 +1,13 @@
 use crate::arena::*;
 use crate::mark::*;
+use lazy_static::lazy_static;
 use smallvec::{smallvec, SmallVec};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::{mpsc::*, Mutex};
+use std::sync::{
+    atomic::{AtomicPtr, Ordering},
+    mpsc::*,
+    RwLock,
+};
 use std::thread::{self, ThreadId};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
@@ -12,7 +17,7 @@ use std::{
     time::Duration,
 };
 
-pub(crate) static mut REGISTER: Option<Sender<RegMsg>> = None;
+pub(crate) static mut REGISTER: AtomicPtr<Sender<RegMsg>> = AtomicPtr::new(ptr::null_mut());
 
 #[derive(Copy, Clone)]
 pub(crate) struct BusPtr(&'static Bus);
@@ -382,10 +387,22 @@ impl TypeRelations {
     }
 }
 
-fn start() -> Sender<RegMsg> {
-    let (s, r) = channel();
-    thread::spawn(move || gc_loop(r));
-    s
+/// Start the Gc thread if needed and return type registration bus.
+pub(crate) fn get_sender() -> Sender<RegMsg> {
+    let reg = unsafe { REGISTER.load(Ordering::Relaxed) };
+    if !reg.is_null() {
+        let s = unsafe { &*reg };
+        s.clone()
+    } else {
+        let (mut s, r) = channel();
+        let pre = unsafe { REGISTER.compare_and_swap(ptr::null_mut(), &mut s, Ordering::AcqRel) };
+        if pre.is_null() {
+            thread::spawn(move || gc_loop(r));
+            s
+        } else {
+            get_sender()
+        }
+    }
 }
 
 fn gc_loop(r: Receiver<RegMsg>) {
