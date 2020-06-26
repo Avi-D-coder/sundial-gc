@@ -96,6 +96,8 @@ struct TypeState {
     waiting_on_transitive_parents: usize,
 }
 
+
+
 impl TypeState {
     /// Handle messages of Type.
     /// Returns true when no condemned pointers from Type exist.
@@ -630,42 +632,80 @@ fn gc_loop(r: Receiver<RegMsg>) {
                 });
             });
 
-            active.iter_mut().for_each(|(ti, ts)| {
-                let inv = ts.invariant.unwrap();
-                let handlers = ts
-                    .handlers
-                    .as_mut()
-                    .expect("handlers must be Some if an invariant is Some");
-
-                ts.gc_arenas.iter().for_each(|next| {
-                    // trace grey, updating refs
-                    let GcTypeInfo {
-                        align,
-                        size,
-                        evacuate_fn,
+            let mut new_arenas: HashMap<GcTypeInfo, SmallVec<[*mut u8; 4]>> = HashMap::new();
+            active.iter_mut().for_each(
+                |(
+                    ti,
+                    TypeState {
+                        invariant,
+                        gc_arenas,
+                        handlers,
+                        handlers_types,
                         ..
-                    } = *ti;
-                    let next = *next;
-                    let mut ptr = HeaderUnTyped::from(next) as usize
-                        + HeaderUnTyped::high_offset(align, size) as usize;
+                    },
+                )| {
+                    let inv = invariant.unwrap();
+                    let handlers = handlers
+                        .as_mut()
+                        .expect("handlers must be Some if an invariant is Some");
 
-                    while ptr != next as usize {
-                        let t = unsafe { &*(ptr as *const u8) };
-                        unsafe {
-                            mem::transmute::<_, fn(*const u8, u8, u8, Range<usize>, *mut Handlers)>(
-                                evacuate_fn,
-                            )(
-                                t,
-                                0,
-                                inv.grey_feilds,
-                                inv.white_start..inv.white_end,
-                                handlers,
-                            )
-                        };
-                        ptr -= size as usize;
-                    }
-                });
-            });
+                    gc_arenas.iter().for_each(|next| {
+                        // trace grey, updating refs
+                        let GcTypeInfo {
+                            align,
+                            size,
+                            evacuate_fn,
+                            ..
+                        } = *ti;
+                        let next = *next;
+                        let mut ptr = HeaderUnTyped::from(next) as usize
+                            + HeaderUnTyped::high_offset(align, size) as usize;
+
+                        while ptr != next as usize {
+                            let t = unsafe { &*(ptr as *const u8) };
+                            unsafe {
+                                mem::transmute::<
+                                    _,
+                                    fn(*const u8, u8, u8, Range<usize>, *mut Handlers),
+                                >(evacuate_fn)(
+                                    t,
+                                    0,
+                                    inv.grey_feilds,
+                                    inv.white_start..inv.white_end,
+                                    handlers,
+                                )
+                            };
+                            ptr -= size as usize;
+                        }
+
+                        handlers
+                            .filled
+                            .iter_mut()
+                            .enumerate()
+                            .for_each(|(i, headers)| {
+                                let nxts = new_arenas.entry(handlers_types[i]).or_default();
+
+                                headers.into_iter().for_each(|header| {
+                                    let full_next = *header as usize
+                                        + HeaderUnTyped::low_offset(ti.align) as usize;
+                                    nxts.push(full_next as *mut u8)
+                                });
+                                headers.clear();
+                            });
+
+                        handlers.nexts.iter().enumerate().for_each(|(i, next)| {
+                            let nxts = new_arenas.entry(handlers_types[i]).or_default();
+                            nxts.push(*next as *mut u8)
+                        });
+                    });
+                },
+            );
+
+            while new_arenas.len() > 0 {
+                let unclean = new_arenas;
+                new_arenas = HashMap::new();
+                // TODO clean handled, here and after step
+            }
         }
 
         thread::sleep(Duration::from_millis(100))
