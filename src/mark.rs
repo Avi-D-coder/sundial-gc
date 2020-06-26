@@ -137,6 +137,8 @@ pub struct GcTypeInfo {
     pub(crate) direct_gc_types_fn: *const (),
     /// `unsafe fn(*mut u8)`
     pub(crate) drop_in_place_fn: *const (),
+    /// from(effs: &Vec<GcTypeInfo>) -> (Self, u8)
+    pub(crate) translator_from_fn: *const (),
     pub(crate) needs_drop: bool,
     pub(crate) size: u16,
     pub(crate) align: u16,
@@ -149,6 +151,7 @@ impl GcTypeInfo {
             transitive_gc_types_fn: T::transitive_gc_types as *const _,
             direct_gc_types_fn: T::direct_gc_types as *const _,
             drop_in_place_fn: ptr::drop_in_place::<T> as *const _,
+            translator_from_fn: Translator::from::<T> as *const _,
             needs_drop: mem::needs_drop::<T>(),
             size: mem::size_of::<T>() as u16,
             align: mem::align_of::<T>() as u16,

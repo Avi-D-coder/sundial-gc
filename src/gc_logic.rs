@@ -391,6 +391,7 @@ fn start() -> Sender<RegMsg> {
 fn gc_loop(r: Receiver<RegMsg>) {
     let mut free: Vec<*mut HeaderUnTyped> = Vec::with_capacity(100);
     let mut types = TypeRelations::new();
+    let mut pre_arena_count: usize = 1;
 
     loop {
         for msg in r.try_iter() {
@@ -544,6 +545,99 @@ fn gc_loop(r: Receiver<RegMsg>) {
                 });
             });
         });
+
+        if !gc_in_progress && arena_count > pre_arena_count {
+            pre_arena_count = arena_count;
+            active.iter_mut().for_each(|(ti, ts)| {
+                let inv = Invariant {
+                    white_start: 0,
+                    white_end: usize::MAX,
+                    grey_feilds: 0b1111_1111,
+                    grey_self: true,
+                };
+
+                let direct_gc_types = unsafe {
+                    mem::transmute::<_, fn(&mut HashMap<GcTypeInfo, TypeRow>, u8)>(
+                        ti.direct_gc_types_fn,
+                    )
+                };
+                let translator_from = unsafe {
+                    mem::transmute::<_, fn(&Vec<GcTypeInfo>) -> (Translator, u8)>(
+                        ti.translator_from_fn,
+                    )
+                };
+
+                let mut dgt = HashMap::with_capacity(20);
+                direct_gc_types(&mut dgt, 0);
+                let children: Vec<_> = dgt.into_iter().map(|(i, _)| i).collect();
+
+                let mut nexts = SmallVec::with_capacity(children.len());
+                let mut filled = SmallVec::new();
+                for _ in 0..children.len() {
+                    filled.push(SmallVec::new());
+                    nexts.push(
+                        free.pop()
+                            .map(|header| {
+                                HeaderUnTyped::init(header);
+                                (header as usize
+                                    + HeaderUnTyped::high_offset(ti.align, ti.size) as usize)
+                                    as *mut u8
+                            })
+                            .unwrap_or(Arena::alloc()),
+                    );
+                }
+
+                let handlers = Handlers {
+                    translator: translator_from(&children).0,
+                    nexts,
+                    filled,
+                    free: &mut free as *mut _,
+                };
+                ts.set_invariant(inv, handlers);
+
+                ts.gc_arenas_full.iter().for_each(|header| {
+                    let header = unsafe { &mut **header };
+                    header.condemned = true;
+                });
+            });
+
+            active.iter_mut().for_each(|(ti, ts)| {
+                let inv = ts.invariant.unwrap();
+                let handlers = ts
+                    .handlers
+                    .as_mut()
+                    .expect("handlers must be Some if an invariant is Some");
+
+                ts.gc_arenas.iter().for_each(|next| {
+                    // trace grey, updating refs
+                    let GcTypeInfo {
+                        align,
+                        size,
+                        evacuate_fn,
+                        ..
+                    } = *ti;
+                    let next = *next;
+                    let mut ptr = HeaderUnTyped::from(next) as usize
+                        + HeaderUnTyped::high_offset(align, size) as usize;
+
+                    while ptr != next as usize {
+                        let t = unsafe { &*(ptr as *const u8) };
+                        unsafe {
+                            mem::transmute::<_, fn(*const u8, u8, u8, Range<usize>, *mut Handlers)>(
+                                evacuate_fn,
+                            )(
+                                t,
+                                0,
+                                inv.grey_feilds,
+                                inv.white_start..inv.white_end,
+                                handlers,
+                            )
+                        };
+                        ptr -= size as usize;
+                    }
+                });
+            });
+        }
 
         thread::sleep(Duration::from_millis(100))
     }
