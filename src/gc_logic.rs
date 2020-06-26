@@ -22,6 +22,12 @@ pub(crate) static mut REGISTER: AtomicPtr<Sender<RegMsg>> = AtomicPtr::new(ptr::
 #[derive(Copy, Clone)]
 pub(crate) struct BusPtr(&'static Bus);
 
+impl BusPtr {
+    pub unsafe fn new(ptr: *mut Bus) -> Self {
+        BusPtr(&*ptr)
+    }
+}
+
 unsafe impl Send for BusPtr {}
 unsafe impl Sync for BusPtr {}
 

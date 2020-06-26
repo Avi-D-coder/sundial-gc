@@ -1,6 +1,9 @@
 use crate::auto_traits::*;
 use crate::gc::*;
-use crate::mark::{Condemned, GcTypeInfo, Mark};
+use crate::{
+    gc_logic::{get_sender, BusPtr, RegMsg},
+    mark::{Condemned, GcTypeInfo, Mark},
+};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::any::type_name;
 use std::cell::UnsafeCell;
@@ -8,8 +11,11 @@ use std::collections::HashMap;
 use std::mem::{self, transmute};
 use std::ops::Range;
 use std::ptr;
-use std::sync::Mutex;
-use std::thread_local;
+use std::sync::{mpsc::Sender, Mutex};
+use std::{
+    thread::{self, ThreadId},
+    thread_local,
+};
 
 pub const ARENA_SIZE: usize = 16384;
 
@@ -193,7 +199,7 @@ unsafe impl<'o, 'n, 'r: 'n, O: Immutable + 'o, N: Immutable + 'r> Mark<'o, 'n, '
 impl<T: Immutable + Condemned> Drop for Arena<T> {
     fn drop(&mut self) {
         GC_BUS.with(|tm| {
-            let tm = unsafe { &mut *tm.get() };
+            let (_, tm) = unsafe { &mut *tm.get() };
             tm.entry(key::<T>()).and_modify(|bus| {
                 let next = unsafe { *self.next.get() } as *const u8;
                 let capacity = self.capacity();
@@ -261,10 +267,21 @@ impl<T: Immutable + Condemned> Arena<T> {
             panic!("You need to derive Condemned for T")
         };
 
-        let bus = GC_BUS.with(|tm| {
-            let tm = unsafe { &mut *tm.get() };
+        let bus: &'static mut ((Option<_>, GcInvariant), Bus) = GC_BUS.with(|tm| {
+            let (reg_sender, tm) = unsafe { &mut *tm.get() };
             tm.entry(key::<T>()).or_insert_with(|| {
-                Box::new(((None, GcInvariant::none()), Mutex::new([Msg::Slot; 8])))
+                let bus: &'static mut ((Option<_>, GcInvariant), Bus) = Box::leak(Box::new((
+                    (None, GcInvariant::none()),
+                    Mutex::new([Msg::Slot; 8]),
+                )));
+                reg_sender
+                    .send(RegMsg::Reg(
+                        thread::current().id(),
+                        GcTypeInfo::new::<T>(),
+                        unsafe { BusPtr::new(&mut bus.1) },
+                    ))
+                    .expect("could not register type");
+                bus
             })
         });
 
@@ -452,9 +469,10 @@ thread_local! {
     /// Map from type to GC communication bus.
     /// `Arena.next` from an `Msg::End` with excise capacity.
     /// Cached invariant from last `Msg::Gc`.
-    static GC_BUS: UnsafeCell<
-        HashMap<(GcTypeInfo, usize), Box<((Option<*mut u8>, GcInvariant), Bus)>>,
-    > = UnsafeCell::new(HashMap::new());
+    static GC_BUS: UnsafeCell<(
+        Sender<RegMsg>,
+        HashMap<(GcTypeInfo, usize), &'static mut ((Option<*mut u8>, GcInvariant), Bus)>,
+    )> = UnsafeCell::new((get_sender(), HashMap::new()));
 
     // FIXME upon drop/thread end send End for cached_next and Msg::Gc.next
 }
