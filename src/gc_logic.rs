@@ -9,6 +9,7 @@ use std::sync::{
 use std::thread::{self, ThreadId};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
+    cmp::max,
     mem,
     ops::Range,
     ptr,
@@ -158,7 +159,8 @@ struct TypeState {
     worker_arenas: HashMap<*const HeaderUnTyped, *const u8>,
     /// Arena owned by GC, that have not been completely filled.
     gc_arenas: BTreeSet<*mut u8>,
-    gc_arenas_full: BTreeSet<*mut HeaderUnTyped>,
+    gc_arenas_full: HashSet<*mut HeaderUnTyped>,
+    condemned_arenas: HashSet<*mut u8>,
     /// Count of Arenas started before transitive_epoch.
     pending_known_transitive_grey: usize,
     /// Count of Arenas started before `invariant`.
@@ -481,7 +483,8 @@ impl TypeRelations {
                 buses: HashMap::new(),
                 worker_arenas: HashMap::new(),
                 gc_arenas: BTreeSet::new(),
-                gc_arenas_full: BTreeSet::new(),
+                gc_arenas_full: HashSet::new(),
+                condemned_arenas: HashSet::new(),
                 pending_known_transitive_grey: 0,
                 pending_known_grey: 0,
                 pending: HashMap::new(),
@@ -583,50 +586,49 @@ fn gc_loop(r: Receiver<RegMsg>) {
                 if ts.waiting_on_transitive_parents == 0 {
                     let inv = ts.handler.as_ref().expect("Removed").invariant;
                     // Free memory
-                    ts.gc_arenas_full
-                        .range((inv.white_start as *mut _)..(inv.white_end as *mut _))
-                        .cloned()
-                        .into_iter()
-                        .filter(|header| unsafe { (&(**header)).condemned })
-                        .for_each(|header| {
-                            if cti.needs_drop {
-                                let GcTypeInfo {
-                                    align,
-                                    size,
-                                    drop_in_place_fn,
-                                    ..
-                                } = ti;
-                                let low =
-                                    header as usize + HeaderUnTyped::low_offset(align) as usize;
-                                let mut ptr =
-                                    low as usize + HeaderUnTyped::high_offset(align, size) as usize;
+                    ts.condemned_arenas.drain().into_iter().for_each(|next| {
+                        let header = HeaderUnTyped::from(next) as *mut HeaderUnTyped;
+                        if cti.needs_drop {
+                            let GcTypeInfo {
+                                align,
+                                size,
+                                drop_in_place_fn,
+                                ..
+                            } = ti;
 
-                                let drop_in_place =
-                                    unsafe { mem::transmute::<_, fn(*mut u8)>(drop_in_place_fn) };
+                            let low = max(
+                                next as usize,
+                                header as usize + HeaderUnTyped::low_offset(align) as usize,
+                            );
+                            let mut ptr =
+                                low as usize + HeaderUnTyped::high_offset(align, size) as usize;
 
-                                while ptr >= low {
-                                    unsafe {
-                                        let header = &mut *header;
-                                        // TODO sort and iterate between evacuated
-                                        if header.evacuated.get_mut().unwrap().contains_key(&index(
-                                            ptr as *const u8,
-                                            ti.size,
-                                            ti.align,
-                                        )) {
-                                            drop_in_place(ptr as *mut u8)
-                                        };
-                                    }
-                                    ptr -= size as usize;
+                            let drop_in_place =
+                                unsafe { mem::transmute::<_, fn(*mut u8)>(drop_in_place_fn) };
+
+                            while ptr >= low {
+                                unsafe {
+                                    let header = &mut *header;
+                                    // TODO sort and iterate between evacuated
+                                    if header.evacuated.get_mut().unwrap().contains_key(&index(
+                                        ptr as *const u8,
+                                        ti.size,
+                                        ti.align,
+                                    )) {
+                                        drop_in_place(ptr as *mut u8)
+                                    };
                                 }
-                            };
-
-                            unsafe { ptr::drop_in_place(header) }
-                            if free.len() < arena_count {
-                                free.push(header);
-                            } else {
-                                unsafe { System.dealloc(header as *mut u8, Layout::new::<Mem>()) };
+                                ptr -= size as usize;
                             }
-                        });
+                        };
+
+                        unsafe { ptr::drop_in_place(header) }
+                        if free.len() < arena_count {
+                            free.push(header);
+                        } else {
+                            unsafe { System.dealloc(header as *mut u8, Layout::new::<Mem>()) };
+                        }
+                    });
 
                     // TODO replace with Drop for HandlerManager
                     debug_assert!(ts.handler.is_some());
@@ -644,7 +646,12 @@ fn gc_loop(r: Receiver<RegMsg>) {
                                 .zip(handlers_types.into_iter())
                                 .for_each(|(next, ti)| {
                                     let ts = active.get_mut(&ti).unwrap();
-                                    ts.gc_arenas.insert(next);
+                                    // Add arenas left in Handler to the pool;
+                                    if next as usize % ARENA_SIZE == 0 {
+                                        ts.gc_arenas_full.insert(next as *mut HeaderUnTyped);
+                                    } else {
+                                        ts.gc_arenas.insert(next);
+                                    }
                                 })
                         },
                     );
@@ -686,10 +693,26 @@ fn gc_loop(r: Receiver<RegMsg>) {
 
                 ts.set_invariant(inv, condemned_children, &mut free);
 
+                // Mark all the GC's arenas as condemned.
                 ts.gc_arenas_full.iter().for_each(|header| {
                     let header = unsafe { &mut **header };
                     header.condemned = true;
                 });
+
+                debug_assert_eq!(ts.condemned_arenas.len(), 0);
+                unsafe {
+                    ptr::swap(
+                        ts.gc_arenas_full as *mut _ as *mut HashSet<*mut u8>,
+                        &mut ts.condemned_arenas,
+                    )
+                }
+
+                ts.gc_arenas.into_iter().for_each(|next| {
+                    let header = unsafe { &mut *(HeaderUnTyped::from(next) as *mut HeaderUnTyped) };
+                    header.condemned = true;
+                });
+
+                ts.gc_arenas = BTreeSet::new();
             });
 
             active.iter_mut().for_each(
