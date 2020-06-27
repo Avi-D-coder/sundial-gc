@@ -93,6 +93,8 @@ unsafe impl<'r, T: Immutable + NoGc + 'r> Condemned for List<'r, T> {
 
 #[test]
 fn churn_list() {
+    env_logger::init();
+
     let usizes: Arena<usize> = Arena::new();
     let gc_one = usizes.gc_alloc(1);
 
@@ -142,6 +144,7 @@ struct Foo<'r> {
 
 #[test]
 fn churn() {
+    env_logger::init();
     let usizes: Arena<usize> = Arena::new();
     let gced_usize = usizes.gc_alloc(1);
 
@@ -240,5 +243,6 @@ fn immutable_test() {
     //~ trait bound `std::cell::UnsafeCell<usize>: Immutable` is not satisfied
     // let mutexes: Arena<Mutex<usize>> = Arena::new();
 
+    env_logger::init();
     let _mutexes: Arena<Box<std::sync::Arc<usize>>> = Arena::new();
 }

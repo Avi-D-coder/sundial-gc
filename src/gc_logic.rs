@@ -1,6 +1,7 @@
 use crate::arena::*;
 use crate::mark::*;
 use smallvec::SmallVec;
+use log::info;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{
     atomic::{AtomicPtr, Ordering},
@@ -507,6 +508,7 @@ pub(crate) fn get_sender() -> Sender<RegMsg> {
         let s = unsafe { &*reg };
         s.clone()
     } else {
+        info!("Starting GC thread");
         let (mut s, r) = channel();
         let pre = unsafe { REGISTER.compare_and_swap(ptr::null_mut(), &mut s, Ordering::AcqRel) };
         if pre.is_null() {
@@ -524,9 +526,13 @@ fn gc_loop(r: Receiver<RegMsg>) {
     let mut pre_arena_count: usize = 1;
 
     loop {
+        info!("New loop");
         for msg in r.try_iter() {
             match msg {
-                RegMsg::Reg(id, ty, bus) => types.reg(ty, id, bus),
+                RegMsg::Reg(id, ty, bus) => {
+                    info!("Thread: {:?} registered for GcTypeInfo: {:?}", id, ty);
+                    types.reg(ty, id, bus)
+                },
                 RegMsg::Un(id, ty) => {
                     // The thread was dropped
                     // TODO Currently `Un` is never sent.
@@ -550,6 +556,8 @@ fn gc_loop(r: Receiver<RegMsg>) {
 
         let mut new_arenas: HashMap<GcTypeInfo, SmallVec<[*mut u8; 4]>> = HashMap::new();
 
+
+        info!("calling step on active");
         active.iter_mut().for_each(|(ti, ts)| {
             if ts.step(&mut free) {
                 if let Some(ps) = parents.get(ti) {
@@ -669,6 +677,7 @@ fn gc_loop(r: Receiver<RegMsg>) {
         });
 
         if !gc_in_progress && arena_count > pre_arena_count {
+            info!("Starting major GC");
             pre_arena_count = arena_count;
 
             // Set the invariants
@@ -736,6 +745,7 @@ fn gc_loop(r: Receiver<RegMsg>) {
         }
 
         while new_arenas.len() > 0 {
+            info!("new_arenas.len: {}", new_arenas.len());
             let mut unclean = new_arenas;
             new_arenas = HashMap::new();
             unclean.drain().into_iter().for_each(|(ti, nexts)| {
