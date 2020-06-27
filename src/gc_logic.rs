@@ -1,6 +1,6 @@
 use crate::arena::*;
 use crate::mark::*;
-use smallvec::{smallvec, SmallVec};
+use smallvec::SmallVec;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{
     atomic::{AtomicPtr, Ordering},
