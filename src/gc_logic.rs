@@ -58,11 +58,98 @@ impl Default for Parents {
     }
 }
 
+struct HandlerManager {
+    handlers: Handlers,
+    handlers_types: Vec<GcTypeInfo>,
+    invariant: Invariant,
+    evacuate_fn: fn(*const u8, u8, u8, Range<usize>, *mut Handlers),
+    /// A snapshot of nexts at last call to `unclean_children`.
+    last_nexts: SmallVec<[*mut u8; 4]>,
+}
+
+impl HandlerManager {
+    /// Roots next..high_offset for this GC.
+    /// Returns unclean *nexts of child types
+    fn root(&mut self, next: *mut u8, align: u16, size: u16) {
+        let HandlerManager {
+            handlers,
+            invariant,
+            evacuate_fn,
+            ..
+        } = self;
+        let Invariant {
+            white_start,
+            white_end,
+            grey_feilds,
+            ..
+        } = invariant;
+
+        let mut ptr =
+            HeaderUnTyped::from(next) as usize + HeaderUnTyped::high_offset(align, size) as usize;
+
+        while ptr != next as usize {
+            let t = unsafe { &*(ptr as *const u8) };
+            evacuate_fn(t, 0, *grey_feilds, *white_start..*white_end, handlers);
+            ptr -= size as usize;
+        }
+    }
+
+    fn unclean_children(
+        &mut self,
+        align: u16,
+    ) -> SmallVec<[(&GcTypeInfo, SmallVec<[*mut u8; 4]>); 4]> {
+        let HandlerManager {
+            handlers,
+            handlers_types,
+            last_nexts,
+            ..
+        } = self;
+        let mut unclean: SmallVec<[(&GcTypeInfo, SmallVec<[*mut u8; 4]>); 4]> = handlers_types
+            .iter()
+            .map(|ti| (ti, SmallVec::new()))
+            .collect();
+
+        handlers
+            .filled
+            .iter_mut()
+            .enumerate()
+            .for_each(|(i, headers)| {
+                headers.into_iter().for_each(|header| {
+                    let full_next = *header as usize + HeaderUnTyped::low_offset(align) as usize;
+                    unclean[i].1.push(full_next as *mut u8)
+                });
+                headers.clear();
+            });
+
+        handlers
+            .nexts
+            .iter()
+            .enumerate()
+            .zip(last_nexts.iter())
+            .filter_map(|(n, o)| if n.1 == o { None } else { Some(n) })
+            .for_each(|(i, next)| unclean[i].1.push(*next));
+
+        unclean
+    }
+
+    fn new_arenas(
+        &mut self,
+        align: u16,
+        new_arenas: &mut HashMap<GcTypeInfo, SmallVec<[*mut u8; 4]>>,
+    ) {
+        self.unclean_children(align)
+            .into_iter()
+            .for_each(|(t, nxts)| {
+                let nexts = new_arenas.entry(*t).or_default();
+                nexts.extend(nxts);
+            });
+    }
+}
+
 /// This whole struct is unsafe!
 struct TypeState {
     type_info: GcTypeInfo,
-    handlers: Option<Handlers>,
-    handlers_types: Vec<GcTypeInfo>,
+    handler: Option<HandlerManager>,
     /// Map Type to Bit
     buses: HashMap<ThreadId, BusPtr>,
     /// The last seen `next`. ptr + size..high_offset is owned by gc
@@ -92,11 +179,8 @@ struct TypeState {
     transitive_epoch: usize,
     /// Waiting for transitive parents to clear their stack
     phase2: bool,
-    invariant: Option<Invariant>,
     waiting_on_transitive_parents: usize,
 }
-
-
 
 impl TypeState {
     /// Handle messages of Type.
@@ -116,12 +200,12 @@ impl TypeState {
             epoch,
             transitive_epoch,
             phase2,
-            invariant,
-            handlers,
+            handler,
             ..
         } = self;
         *epoch += 1;
 
+        let inv = handler.as_ref().map(|h| h.invariant).clone();
         // TODO lift allocation
         let mut grey: SmallVec<[(*const u8, u8); 8]> = SmallVec::new();
         buses.iter().for_each(|(_, bus)| {
@@ -137,8 +221,8 @@ impl TypeState {
                     if *epoch < *transitive_epoch {
                         *pending_known_transitive_grey += 1;
                     }
-                    if invariant
-                        .map(|ci| ci.white_start == *white_start && ci.white_end == *white_end)
+                    if inv
+                        .map(|inv| inv.white_start == *white_start && inv.white_end == *white_end)
                         .unwrap_or(true)
                     {
                         let next = *next;
@@ -159,39 +243,39 @@ impl TypeState {
                     white_end,
                 } => {
                     let next = *next;
-                    let ret = invariant
-                        .map(|i| {
-                            if i.white_start == *white_start && i.white_end == *white_end {
-                                if let Some(e) = pending.remove(&HeaderUnTyped::from(next)) {
-                                    if e < *transitive_epoch {
-                                        *pending_known_transitive_grey =
-                                            pending_known_transitive_grey.saturating_sub(1);
-                                    }
-                                } else if !*new_allocation {
-                                    *pending_known_grey -= 1;
-                                };
-
-                                // Nothing was marked.
-                                // Allocated objects contain no condemned pointers into the white set.
-                                if *grey_feilds == 0b0000_0000 {
-                                    None
-                                } else {
-                                    *latest_grey = *epoch;
-                                    Some((next, *grey_feilds))
+                    let ret = if let Some(inv) = inv {
+                        if inv.white_start == *white_start && inv.white_end == *white_end {
+                            if let Some(e) = pending.remove(&HeaderUnTyped::from(next)) {
+                                if e < *transitive_epoch {
+                                    *pending_known_transitive_grey =
+                                        pending_known_transitive_grey.saturating_sub(1);
                                 }
+                            } else if !*new_allocation {
+                                *pending_known_grey -= 1;
+                            };
+
+                            // Nothing was marked.
+                            // Allocated objects contain no condemned pointers into the white set.
+                            if *grey_feilds == 0b0000_0000 {
+                                None
                             } else {
                                 *latest_grey = *epoch;
-                                Some((next, 0b1111_1111))
+                                Some((next, *grey_feilds))
                             }
-                        })
-                        .flatten();
+                        } else {
+                            *latest_grey = *epoch;
+                            Some((next, 0b1111_1111))
+                        }
+                    } else {
+                        None
+                    };
 
                     if *release_to_gc {
                         if full(next, type_info.align) {
-                            gc_arenas.insert(next as *mut _);
-                        } else {
                             let header = HeaderUnTyped::from(next) as *mut _;
                             gc_arenas_full.insert(header);
+                        } else {
+                            gc_arenas.insert(next as *mut _);
                         };
                     } else {
                         // store active worker arenas
@@ -228,7 +312,7 @@ impl TypeState {
                         grey_self,
                         white_start,
                         white_end,
-                    }) = *invariant
+                    }) = inv
                     {
                         *slot = Msg::Gc {
                             next,
@@ -251,33 +335,11 @@ impl TypeState {
         });
 
         // trace grey, updating refs
-        if let Some(inv) = *invariant {
-            let handlers = handlers
-                .as_mut()
-                .expect("handlers must be Some if an invariant is Some");
-
+        if let Some(handler) = handler {
+            // TODO bring back granular tracing using bits
             grey.iter().for_each(|(next, bits)| {
-                let GcTypeInfo {
-                    align,
-                    size,
-                    evacuate_fn,
-                    ..
-                } = *type_info;
-                let next = *next;
-                let mut ptr = HeaderUnTyped::from(next) as usize
-                    + HeaderUnTyped::high_offset(align, size) as usize;
-
-                while ptr != next as usize {
-                    let t = unsafe { &*(ptr as *const u8) };
-                    unsafe {
-                        mem::transmute::<_, fn(*const u8, u8, u8, Range<usize>, *mut Handlers)>(
-                            evacuate_fn,
-                        )(
-                            t, 0, *bits, inv.white_start..inv.white_end, handlers
-                        )
-                    };
-                    ptr -= size as usize;
-                }
+                let GcTypeInfo { align, size, .. } = *type_info;
+                handler.root(*next as *mut u8, align, size)
             });
         }
 
@@ -317,7 +379,12 @@ impl TypeState {
             && self.transitive_epoch != 0
     }
 
-    fn set_invariant(&mut self, inv: Invariant, handlers: Handlers) {
+    fn set_invariant(
+        &mut self,
+        inv: Invariant,
+        condemned_children: Vec<GcTypeInfo>,
+        free: &mut Vec<*mut HeaderUnTyped>,
+    ) {
         self.phase2 = false;
         self.pending_known_transitive_grey = 0;
         self.pending_known_grey = self.pending.len();
@@ -325,8 +392,47 @@ impl TypeState {
         self.epoch = 0;
         self.latest_grey = 1;
         self.pending = HashMap::new();
-        self.invariant = Some(inv);
-        self.handlers = Some(handlers);
+
+        let evacuate_fn = unsafe {
+            mem::transmute::<*const (), fn(*const u8, u8, u8, Range<usize>, *mut Handlers)>(
+                self.type_info.evacuate_fn,
+            )
+        };
+        let translator_from = unsafe {
+            mem::transmute::<*const (), fn(&Vec<GcTypeInfo>) -> (Translator, u8)>(
+                self.type_info.translator_from_fn,
+            )
+        };
+
+        let mut nexts = SmallVec::with_capacity(condemned_children.len());
+        let mut filled = SmallVec::new();
+        for _ in 0..condemned_children.len() {
+            filled.push(SmallVec::new());
+            nexts.push(
+                free.pop()
+                    .map(|header| {
+                        HeaderUnTyped::init(header);
+                        (header as usize
+                            + HeaderUnTyped::high_offset(self.type_info.align, self.type_info.size)
+                                as usize) as *mut u8
+                    })
+                    .unwrap_or(Arena::alloc()),
+            );
+        }
+        let handlers = Handlers {
+            translator: translator_from(&condemned_children).0,
+            nexts,
+            filled,
+            free,
+        };
+
+        self.handler = Some(HandlerManager {
+            last_nexts: SmallVec::from_elem(ptr::null_mut(), condemned_children.len()),
+            handlers_types: condemned_children,
+            handlers,
+            invariant: inv,
+            evacuate_fn,
+        });
     }
 }
 
@@ -371,8 +477,7 @@ impl TypeRelations {
 
             TypeState {
                 type_info,
-                handlers: None,
-                handlers_types: Vec::new(),
+                handler: None,
                 buses: HashMap::new(),
                 worker_arenas: HashMap::new(),
                 gc_arenas: BTreeSet::new(),
@@ -384,7 +489,6 @@ impl TypeRelations {
                 epoch: 0,
                 transitive_epoch: 0,
                 phase2: false,
-                invariant: None,
                 waiting_on_transitive_parents: 0,
             }
         });
@@ -422,6 +526,7 @@ fn gc_loop(r: Receiver<RegMsg>) {
                 RegMsg::Reg(id, ty, bus) => types.reg(ty, id, bus),
                 RegMsg::Un(id, ty) => {
                     // The thread was dropped
+                    // TODO Currently `Un` is never sent.
                     let type_state = types.active.get_mut(&ty).unwrap();
                     type_state.step(&mut free);
                     type_state.buses.remove(&id);
@@ -440,6 +545,8 @@ fn gc_loop(r: Receiver<RegMsg>) {
         let mut gc_in_progress = false;
         let mut arena_count: usize = 0;
 
+        let mut new_arenas: HashMap<GcTypeInfo, SmallVec<[*mut u8; 4]>> = HashMap::new();
+
         active.iter_mut().for_each(|(ti, ts)| {
             if ts.step(&mut free) {
                 if let Some(ps) = parents.get(ti) {
@@ -453,35 +560,35 @@ fn gc_loop(r: Receiver<RegMsg>) {
                 }
             }
 
+            ts.handler
+                .as_mut()
+                .map(|hm| hm.new_arenas(ti.align, &mut new_arenas));
+
             // TODO This is slower than it could be like everything
             if ts.is_stack_clear() && clear_stack_old.contains_key(ti) {
                 stack_cleared.insert(*ti);
             };
 
-            if ts.invariant.is_some() {
+            if ts.handler.is_some() {
                 gc_in_progress = true;
             };
 
             arena_count += ts.gc_arenas_full.len();
         });
 
-        let mut gen2_arenas: HashMap<
-            GcTypeInfo,
-            (SmallVec<[*mut HeaderUnTyped; 1]>, Vec<*mut u8>),
-        > = HashMap::new();
         stack_cleared.drain().for_each(|ti| {
             clear_stack_old.remove(&ti).unwrap().iter().for_each(|cti| {
                 let ts = active.get_mut(cti).unwrap();
                 ts.waiting_on_transitive_parents -= 1;
                 if ts.waiting_on_transitive_parents == 0 {
-                    let inv = ts.invariant.unwrap();
+                    let inv = ts.handler.as_ref().expect("Removed").invariant;
                     // Free memory
                     ts.gc_arenas_full
                         .range((inv.white_start as *mut _)..(inv.white_end as *mut _))
+                        .cloned()
                         .into_iter()
+                        .filter(|header| unsafe { (&(**header)).condemned })
                         .for_each(|header| {
-                            let header = *header;
-
                             if cti.needs_drop {
                                 let GcTypeInfo {
                                     align,
@@ -494,6 +601,9 @@ fn gc_loop(r: Receiver<RegMsg>) {
                                 let mut ptr =
                                     low as usize + HeaderUnTyped::high_offset(align, size) as usize;
 
+                                let drop_in_place =
+                                    unsafe { mem::transmute::<_, fn(*mut u8)>(drop_in_place_fn) };
+
                                 while ptr >= low {
                                     unsafe {
                                         let header = &mut *header;
@@ -503,10 +613,8 @@ fn gc_loop(r: Receiver<RegMsg>) {
                                             ti.size,
                                             ti.align,
                                         )) {
-                                            mem::transmute::<_, fn(*mut u8)>(drop_in_place_fn)(
-                                                ptr as *mut u8,
-                                            )
-                                        }
+                                            drop_in_place(ptr as *mut u8)
+                                        };
                                     }
                                     ptr -= size as usize;
                                 }
@@ -520,53 +628,29 @@ fn gc_loop(r: Receiver<RegMsg>) {
                             }
                         });
 
-                    ts.invariant = None;
-                    ts.handlers.take().map(|h| {
-                        h.filled
-                            .into_iter()
-                            .enumerate()
-                            .into_iter()
-                            .for_each(|(i, headers)| {
-                                gen2_arenas
-                                    .entry(ts.handlers_types[i])
-                                    .and_modify(|(hs, _)| hs.extend(headers.iter().cloned()))
-                                    .or_insert((headers, Vec::new()));
-                            });
-
-                        h.nexts
-                            .into_iter()
-                            .enumerate()
-                            .into_iter()
-                            .for_each(|(i, next)| {
-                                if HeaderUnTyped::from(next) == next as *const _ {
-                                    gen2_arenas
-                                        .entry(ts.handlers_types[i])
-                                        .and_modify(|(hs, _)| hs.push(next as *mut HeaderUnTyped))
-                                        .or_insert((
-                                            smallvec![next as *mut HeaderUnTyped],
-                                            Vec::new(),
-                                        ));
-                                } else {
-                                    gen2_arenas
-                                        .entry(ts.handlers_types[i])
-                                        .and_modify(|(_, nx)| nx.push(next))
-                                        .or_insert((SmallVec::new(), vec![next]));
-                                }
-                            });
-                    });
+                    // TODO replace with Drop for HandlerManager
+                    debug_assert!(ts.handler.is_some());
+                    ts.handler.take().map(
+                        |HandlerManager {
+                             handlers,
+                             handlers_types,
+                             ..
+                         }| {
+                            debug_assert_eq!(handlers.filled.iter().flatten().count(), 0);
+                            debug_assert_eq!(handlers.nexts.len(), handlers_types.len());
+                            handlers
+                                .nexts
+                                .into_iter()
+                                .zip(handlers_types.into_iter())
+                                .for_each(|(next, ti)| {
+                                    let ts = active.get_mut(&ti).unwrap();
+                                    ts.gc_arenas.insert(next);
+                                })
+                        },
+                    );
                 }
             })
         });
-
-        // Reset TypeState by adding contents of Handlers
-        gen2_arenas
-            .drain()
-            .into_iter()
-            .for_each(|(ti, (headers, next))| {
-                let ts = active.get_mut(&ti).unwrap();
-                ts.gc_arenas_full.extend(headers.into_iter());
-                ts.gc_arenas.extend(next.into_iter());
-            });
 
         clear_stack_new.drain().for_each(|(pti, mut ctis)| {
             active.get_mut(&pti).unwrap().request_clear_stack();
@@ -579,6 +663,9 @@ fn gc_loop(r: Receiver<RegMsg>) {
 
         if !gc_in_progress && arena_count > pre_arena_count {
             pre_arena_count = arena_count;
+
+            // Set the invariants
+            // Since this is a major GC / two space everything is condemned
             active.iter_mut().for_each(|(ti, ts)| {
                 let inv = Invariant {
                     white_start: 0,
@@ -588,43 +675,16 @@ fn gc_loop(r: Receiver<RegMsg>) {
                 };
 
                 let direct_gc_types = unsafe {
-                    mem::transmute::<_, fn(&mut HashMap<GcTypeInfo, TypeRow>, u8)>(
+                    mem::transmute::<*const (), fn(&mut HashMap<GcTypeInfo, TypeRow>, u8)>(
                         ti.direct_gc_types_fn,
-                    )
-                };
-                let translator_from = unsafe {
-                    mem::transmute::<_, fn(&Vec<GcTypeInfo>) -> (Translator, u8)>(
-                        ti.translator_from_fn,
                     )
                 };
 
                 let mut dgt = HashMap::with_capacity(20);
                 direct_gc_types(&mut dgt, 0);
-                let children: Vec<_> = dgt.into_iter().map(|(i, _)| i).collect();
+                let condemned_children: Vec<_> = dgt.into_iter().map(|(i, _)| i).collect();
 
-                let mut nexts = SmallVec::with_capacity(children.len());
-                let mut filled = SmallVec::new();
-                for _ in 0..children.len() {
-                    filled.push(SmallVec::new());
-                    nexts.push(
-                        free.pop()
-                            .map(|header| {
-                                HeaderUnTyped::init(header);
-                                (header as usize
-                                    + HeaderUnTyped::high_offset(ti.align, ti.size) as usize)
-                                    as *mut u8
-                            })
-                            .unwrap_or(Arena::alloc()),
-                    );
-                }
-
-                let handlers = Handlers {
-                    translator: translator_from(&children).0,
-                    nexts,
-                    filled,
-                    free: &mut free as *mut _,
-                };
-                ts.set_invariant(inv, handlers);
+                ts.set_invariant(inv, condemned_children, &mut free);
 
                 ts.gc_arenas_full.iter().for_each(|header| {
                     let header = unsafe { &mut **header };
@@ -632,80 +692,49 @@ fn gc_loop(r: Receiver<RegMsg>) {
                 });
             });
 
-            let mut new_arenas: HashMap<GcTypeInfo, SmallVec<[*mut u8; 4]>> = HashMap::new();
             active.iter_mut().for_each(
                 |(
                     ti,
                     TypeState {
-                        invariant,
-                        gc_arenas,
-                        handlers,
-                        handlers_types,
+                        worker_arenas,
+                        handler,
                         ..
                     },
                 )| {
-                    let inv = invariant.unwrap();
-                    let handlers = handlers
-                        .as_mut()
-                        .expect("handlers must be Some if an invariant is Some");
+                    if let Some(hm) = handler {
+                        worker_arenas
+                            .iter()
+                            .for_each(|(_, next)| hm.root(*next as *mut u8, ti.align, ti.size));
 
-                    gc_arenas.iter().for_each(|next| {
-                        // trace grey, updating refs
-                        let GcTypeInfo {
-                            align,
-                            size,
-                            evacuate_fn,
-                            ..
-                        } = *ti;
-                        let next = *next;
-                        let mut ptr = HeaderUnTyped::from(next) as usize
-                            + HeaderUnTyped::high_offset(align, size) as usize;
-
-                        while ptr != next as usize {
-                            let t = unsafe { &*(ptr as *const u8) };
-                            unsafe {
-                                mem::transmute::<
-                                    _,
-                                    fn(*const u8, u8, u8, Range<usize>, *mut Handlers),
-                                >(evacuate_fn)(
-                                    t,
-                                    0,
-                                    inv.grey_feilds,
-                                    inv.white_start..inv.white_end,
-                                    handlers,
-                                )
-                            };
-                            ptr -= size as usize;
-                        }
-
-                        handlers
-                            .filled
-                            .iter_mut()
-                            .enumerate()
-                            .for_each(|(i, headers)| {
-                                let nxts = new_arenas.entry(handlers_types[i]).or_default();
-
-                                headers.into_iter().for_each(|header| {
-                                    let full_next = *header as usize
-                                        + HeaderUnTyped::low_offset(ti.align) as usize;
-                                    nxts.push(full_next as *mut u8)
-                                });
-                                headers.clear();
-                            });
-
-                        handlers.nexts.iter().enumerate().for_each(|(i, next)| {
-                            let nxts = new_arenas.entry(handlers_types[i]).or_default();
-                            nxts.push(*next as *mut u8)
-                        });
-                    });
+                        hm.new_arenas(ti.align, &mut new_arenas);
+                    };
                 },
             );
+        }
 
-            while new_arenas.len() > 0 {
-                let unclean = new_arenas;
-                new_arenas = HashMap::new();
-                // TODO clean handled, here and after step
-            }
+        while new_arenas.len() > 0 {
+            let mut unclean = new_arenas;
+            new_arenas = HashMap::new();
+            unclean.drain().into_iter().for_each(|(ti, nexts)| {
+                let ts = active.get_mut(&ti).unwrap();
+                let hm = ts.handler.as_mut().unwrap();
+
+                ts.gc_arenas_full.extend(
+                    nexts
+                        .iter()
+                        .cloned()
+                        // Only add Headers
+                        // nexts are still owned by Handlers
+                        .filter(|ptr| *ptr as usize % ARENA_SIZE == 0)
+                        .map(|header| header as *mut HeaderUnTyped),
+                );
+
+                nexts
+                    .into_iter()
+                    .for_each(|next| hm.root(next as *mut u8, ti.align, ti.size));
+
+                hm.new_arenas(ti.align, &mut new_arenas);
+            });
         }
 
         thread::sleep(Duration::from_millis(100))
