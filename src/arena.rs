@@ -425,12 +425,15 @@ impl HeaderUnTyped {
 
     pub(crate) fn init(ptr: *mut HeaderUnTyped) {
         unsafe {
-            *ptr = HeaderUnTyped {
-                evacuated: Mutex::new(HashMap::new()),
-                roots: 0,
-                finalizers: 0,
-                condemned: false,
-            }
+            ptr::write(
+                ptr,
+                HeaderUnTyped {
+                    evacuated: Mutex::new(HashMap::new()),
+                    roots: 0,
+                    finalizers: 0,
+                    condemned: false,
+                },
+            )
         }
     }
 }
