@@ -110,8 +110,10 @@ pub(crate) fn capacity(next: *const u8, size: u16, align: u16) -> u16 {
 
 #[inline(always)]
 pub(crate) fn full(next: *const u8, align: u16) -> bool {
-    let low = HeaderUnTyped::from(next) as usize + HeaderUnTyped::low_offset(align) as usize;
-    (next as usize) <= low
+    let low_offset = HeaderUnTyped::low_offset(align) as usize;
+    let header = HeaderUnTyped::from(next) as usize;
+    let next_addr = next as usize;
+    next_addr < header + low_offset
 }
 
 #[inline(always)]
@@ -404,8 +406,9 @@ pub(crate) struct HeaderUnTyped {
 impl HeaderUnTyped {
     #[inline(always)]
     pub fn from(ptr: *const u8) -> *const HeaderUnTyped {
-        let offset = ptr as usize % ARENA_SIZE;
-        (ptr as usize - offset) as *const _
+        let addr = ptr as usize;
+        let offset = addr % ARENA_SIZE;
+        (addr - offset) as *const _
     }
 
     #[inline(always)]
@@ -419,7 +422,7 @@ impl HeaderUnTyped {
     // TODO is this right?
     /// The offset of the first T in the Arena.
     pub(crate) const fn high_offset(align: u16, size: u16) -> u16 {
-        let cap = (ARENA_SIZE as u16 - HeaderUnTyped::low_offset(align)) / size;
+        let cap = ((ARENA_SIZE as u16 - HeaderUnTyped::low_offset(align)) / size) - 1;
         HeaderUnTyped::low_offset(align) + (cap * size)
     }
 
