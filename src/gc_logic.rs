@@ -702,12 +702,12 @@ fn gc_loop(r: Receiver<RegMsg>) {
                 debug_assert_eq!(ts.condemned_arenas.len(), 0);
                 unsafe {
                     ptr::swap(
-                        ts.gc_arenas_full as *mut _ as *mut HashSet<*mut u8>,
+                        &mut ts.gc_arenas_full as *mut HashSet<*mut HeaderUnTyped> as *mut HashSet<*mut u8>,
                         &mut ts.condemned_arenas,
                     )
                 }
 
-                ts.gc_arenas.into_iter().for_each(|next| {
+                ts.gc_arenas.iter().cloned().for_each(|next| {
                     let header = unsafe { &mut *(HeaderUnTyped::from(next) as *mut HeaderUnTyped) };
                     header.condemned = true;
                 });
