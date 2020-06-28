@@ -209,7 +209,7 @@ unsafe impl<'r, T: Immutable + Condemned> Condemned for Gc<'r, T> {
     /// Returns the bit associated with a condemned ptr
     fn feilds(s: &Self, offset: u8, grey_feilds: u8, condemned: std::ops::Range<usize>) -> u8 {
         let bit = 1 << (offset % 8);
-        let ptr = s.ptr as *const T;
+        let ptr = s.0 as *const T;
         if grey_feilds & bit == bit
             && condemned.contains(&(ptr as usize))
             && (unsafe { (&*Header::from(ptr)).condemned })
@@ -227,7 +227,7 @@ unsafe impl<'r, T: Immutable + Condemned> Condemned for Gc<'r, T> {
         region: std::ops::Range<usize>,
         handlers: &mut Handlers,
     ) {
-        let ptr = sellf.ptr as *const T;
+        let ptr = sellf.0 as *const T;
         let addr = ptr as usize;
         if region.contains(&addr) {
             let i = handlers.translator[offset];

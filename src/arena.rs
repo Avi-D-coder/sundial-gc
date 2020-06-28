@@ -12,10 +12,7 @@ use std::mem::{self, transmute};
 use std::ops::Range;
 use std::ptr;
 use std::sync::{mpsc::Sender, Mutex};
-use std::{
-    thread::{self, ThreadId},
-    thread_local,
-};
+use std::{thread, thread_local};
 
 pub const ARENA_SIZE: usize = 16384;
 
@@ -155,11 +152,11 @@ unsafe impl<'o, 'n, 'r: 'n, O: Immutable + 'o, N: Immutable + 'r> Mark<'o, 'n, '
             panic!("O is a different type then N, mark only changes lifetimes")
         };
 
-        let old_ptr = old.ptr as *const O as *const N;
+        let old_ptr = old.0 as *const O as *const N;
         let condemned_self = self.grey_self && self.white_region.contains(&(old_ptr as usize));
 
         let grey_feilds = unsafe { &mut *self.grey_feilds.get() };
-        let cf = Condemned::feilds(old.ptr, 0, *grey_feilds, self.white_region.clone());
+        let cf = Condemned::feilds(old.0, 0, *grey_feilds, self.white_region.clone());
 
         if condemned_self || (0b0000_0000 != cf) {
             let next_slot = self.next.get();
@@ -184,13 +181,11 @@ unsafe impl<'o, 'n, 'r: 'n, O: Immutable + 'o, N: Immutable + 'r> Mark<'o, 'n, '
             let evacuated = old_header.evacuated.lock();
             evacuated
                 .unwrap()
-                .entry(Arena::index(old.ptr as *const O))
+                .entry(Arena::index(old.0 as *const O))
                 .and_modify(|evacuated_ptr| new_ptr = *evacuated_ptr as *mut N)
                 .or_insert(next);
 
-            Gc {
-                ptr: unsafe { &*new_ptr },
-            }
+            Gc(unsafe { &*new_ptr })
         } else {
             // old contains no direct condemned ptrs
             unsafe { std::mem::transmute(old) }
@@ -254,9 +249,7 @@ unsafe impl<'o, 'n, 'r: 'n, O: NoGc + Immutable + 'o, N: NoGc + Immutable + 'r>
                     unsafe { *next = ((*next as usize) - mem::size_of::<N>()) as *mut N };
                     new_gc
                 });
-            Gc {
-                ptr: unsafe { &*new_gc },
-            }
+            Gc(unsafe { &*new_gc })
         } else {
             unsafe { std::mem::transmute(o) }
         }
@@ -368,7 +361,7 @@ impl<T: Immutable + Condemned> Arena<T> {
             let ptr = *self.next.get();
             *self.next.get() = self.bump_down() as *mut T;
             ptr::write(ptr, t);
-            Gc { ptr: &*ptr }
+            Gc(&*ptr)
         }
     }
 
