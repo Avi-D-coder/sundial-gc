@@ -20,3 +20,4 @@ pub mod auto_traits;
 pub mod gc;
 mod gc_logic;
 pub mod mark;
+pub mod collections;
