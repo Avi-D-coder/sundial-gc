@@ -1,29 +1,99 @@
 use crate::arena::*;
 use crate::mark::*;
-use smallvec::SmallVec;
 use log::info;
+use smallvec::SmallVec;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{
     atomic::{AtomicPtr, Ordering},
-    mpsc::*,
+    Mutex,
 };
+
+use std::io::Write;
+use std::panic;
 use std::thread::{self, ThreadId};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     cmp::max,
+    fs::File,
     mem,
     ops::Range,
-    ptr,
+    process, ptr,
     time::Duration,
 };
 
-pub(crate) static mut REGISTER: AtomicPtr<Sender<RegMsg>> = AtomicPtr::new(ptr::null_mut());
+/// Used to register a thread's interest in a type.
+/// Before a worker thread can allocate or read a `Gc<T>`, it must register for `T`.
+pub(crate) static THREAD_TYPE_REG_BUS: AtomicPtr<Mutex<GcThreadBus>> =
+    AtomicPtr::new(ptr::null_mut());
+
+// TODO replace with a real bus.
+// It was a std::sync::mpsc, but mpsc is broken: https://github.com/rust-lang/rust/issues/39364
+pub(crate) struct GcThreadBus {
+    bus: SmallVec<[RegMsg; 10]>,
+}
+
+impl GcThreadBus {
+    /// Start the Gc thread if needed and return type registration bus.
+    #[inline(always)]
+    pub(crate) fn get() -> &'static Mutex<Self> {
+        let bus = THREAD_TYPE_REG_BUS.load(Ordering::Relaxed);
+        if bus != ptr::null_mut() {
+            unsafe { &*bus }
+        } else {
+            panic::set_hook(Box::new(|panic_info| {
+                log::error!("PANIC");
+                let mut err_log =
+                    File::create("SUNDIAL_BACKTRACE").expect("could not create SUNDIAL_BACKTRACE");
+                if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+                    let _ = writeln!(&mut err_log, "panic occurred: {}", s);
+                } else {
+                    println!("panic occurred");
+                }
+
+                let _ = writeln!(
+                    &mut err_log,
+                    "{}",
+                    std::backtrace::Backtrace::force_capture()
+                );
+                process::exit(0);
+            }));
+
+            let mut bus = Box::new(Mutex::new(GcThreadBus {
+                bus: SmallVec::new(),
+            }));
+
+            if ptr::null_mut()
+                == THREAD_TYPE_REG_BUS.compare_and_swap(
+                    ptr::null_mut(),
+                    bus.as_mut(),
+                    Ordering::AcqRel,
+                )
+            {
+                info!("Starting GC thread");
+                thread::spawn(|| gc_loop());
+                info!("Spawned GC thread");
+
+                Box::leak(bus)
+            } else {
+                GcThreadBus::get()
+            }
+        }
+    }
+
+    pub(crate) fn register<T: Condemned>(&mut self, bus: *const Bus) {
+        self.bus.push(RegMsg::Reg(
+            thread::current().id(),
+            GcTypeInfo::new::<T>(),
+            unsafe { BusPtr::new(bus) },
+        ))
+    }
+}
 
 #[derive(Copy, Clone)]
 pub(crate) struct BusPtr(&'static Bus);
 
 impl BusPtr {
-    pub unsafe fn new(ptr: *mut Bus) -> Self {
+    pub unsafe fn new(ptr: *const Bus) -> Self {
         BusPtr(&*ptr)
     }
 }
@@ -501,38 +571,28 @@ impl TypeRelations {
     }
 }
 
-/// Start the Gc thread if needed and return type registration bus.
-pub(crate) fn get_sender() -> Sender<RegMsg> {
-    let reg = unsafe { REGISTER.load(Ordering::Relaxed) };
-    if !reg.is_null() {
-        let s = unsafe { &*reg };
-        s.clone()
-    } else {
-        info!("Starting GC thread");
-        let (mut s, r) = channel();
-        let pre = unsafe { REGISTER.compare_and_swap(ptr::null_mut(), &mut s, Ordering::AcqRel) };
-        if pre.is_null() {
-            thread::spawn(move || gc_loop(r));
-            s
-        } else {
-            get_sender()
-        }
-    }
-}
-
-fn gc_loop(r: Receiver<RegMsg>) {
+fn gc_loop() {
     let mut free: Vec<*mut HeaderUnTyped> = Vec::with_capacity(100);
     let mut types = TypeRelations::new();
     let mut pre_arena_count: usize = 1;
 
+    let mut bus = ptr::null_mut();
+    while bus == ptr::null_mut() {
+        bus = THREAD_TYPE_REG_BUS.load(Ordering::Relaxed);
+    }
+    let bus = unsafe { &*bus };
+
     loop {
+        // Take a snapshot of the thread type reg bus
+        let reg_msgs = { bus.lock().unwrap().bus.clone() };
+
         info!("New loop");
-        for msg in r.try_iter() {
+        for msg in reg_msgs.into_iter() {
             match msg {
                 RegMsg::Reg(id, ty, bus) => {
                     info!("Thread: {:?} registered for GcTypeInfo: {:?}", id, ty);
                     types.reg(ty, id, bus)
-                },
+                }
                 RegMsg::Un(id, ty) => {
                     // The thread was dropped
                     // TODO Currently `Un` is never sent.
@@ -555,7 +615,6 @@ fn gc_loop(r: Receiver<RegMsg>) {
         let mut arena_count: usize = 0;
 
         let mut new_arenas: HashMap<GcTypeInfo, SmallVec<[*mut u8; 4]>> = HashMap::new();
-
 
         info!("calling step on active");
         active.iter_mut().for_each(|(ti, ts)| {
@@ -592,7 +651,6 @@ fn gc_loop(r: Receiver<RegMsg>) {
                 let ts = active.get_mut(cti).unwrap();
                 ts.waiting_on_transitive_parents -= 1;
                 if ts.waiting_on_transitive_parents == 0 {
-                    let inv = ts.handler.as_ref().expect("Removed").invariant;
                     // Free memory
                     ts.condemned_arenas.drain().into_iter().for_each(|next| {
                         let header = HeaderUnTyped::from(next) as *mut HeaderUnTyped;
@@ -711,7 +769,8 @@ fn gc_loop(r: Receiver<RegMsg>) {
                 debug_assert_eq!(ts.condemned_arenas.len(), 0);
                 unsafe {
                     ptr::swap(
-                        &mut ts.gc_arenas_full as *mut HashSet<*mut HeaderUnTyped> as *mut HashSet<*mut u8>,
+                        &mut ts.gc_arenas_full as *mut HashSet<*mut HeaderUnTyped>
+                            as *mut HashSet<*mut u8>,
                         &mut ts.condemned_arenas,
                     )
                 }
@@ -770,6 +829,6 @@ fn gc_loop(r: Receiver<RegMsg>) {
             });
         }
 
-        thread::sleep(Duration::from_millis(100))
+        // thread::sleep(Duration::from_millis(100))
     }
 }

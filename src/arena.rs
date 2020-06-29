@@ -1,7 +1,7 @@
 use crate::auto_traits::*;
 use crate::gc::{self, Gc};
 use crate::{
-    gc_logic::{get_sender, BusPtr, RegMsg},
+    gc_logic::GcThreadBus,
     mark::{Condemned, GcTypeInfo, Mark},
 };
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use std::mem::{self, transmute};
 use std::ops::Range;
 use std::ptr;
-use std::sync::{mpsc::Sender, Mutex};
-use std::{thread, thread_local};
+use std::sync::Mutex;
+use std::{thread, thread_local, time::Duration};
 
 pub const ARENA_SIZE: usize = 16384;
 
@@ -196,7 +196,7 @@ unsafe impl<'o, 'n, 'r: 'n, O: Immutable + 'o, N: Immutable + 'r> Mark<'o, 'n, '
 impl<T: Immutable + Condemned> Drop for Arena<T> {
     fn drop(&mut self) {
         GC_BUS.with(|tm| {
-            let (_, tm) = unsafe { &mut *tm.get() };
+            let tm = unsafe { &mut *tm.get() };
             tm.entry(key::<T>()).and_modify(|bus| {
                 let next = unsafe { *self.next.get() } as *const u8;
                 let capacity = self.capacity();
@@ -262,23 +262,33 @@ impl<T: Immutable + Condemned> Arena<T> {
             panic!("You need to derive Condemned for T")
         };
 
+        // Register a bus for this thread type combo.
         let bus: &'static mut ((Option<_>, GcInvariant), Bus) = GC_BUS.with(|tm| {
-            let (reg_sender, tm) = unsafe { &mut *tm.get() };
+            let tm = unsafe { &mut *tm.get() };
             tm.entry(key::<T>()).or_insert_with(|| {
                 let bus: &'static mut ((Option<_>, GcInvariant), Bus) = Box::leak(Box::new((
                     (None, GcInvariant::none()),
                     Mutex::new([Msg::Slot; 8]),
                 )));
-                reg_sender
-                    .send(RegMsg::Reg(
-                        thread::current().id(),
-                        GcTypeInfo::new::<T>(),
-                        unsafe { BusPtr::new(&mut bus.1) },
-                    ))
-                    .expect("could not register type");
+
+                let mut reg = GcThreadBus::get().lock().expect("Could not unlock RegBus");
+                reg.register::<T>(&(bus.1));
                 bus
             })
         });
+
+        // FIXME(extend_bus) This is a pause on the worker!
+        loop {
+            let msgs = bus.1.lock().expect("Could not unlock bus");
+            let slot = msgs.iter().filter(|o| o.is_gc() || o.is_slot()).next();
+
+            if slot.is_some() {
+                break;
+            } else {
+                log::info!("Worker sleeping 5ms");
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
 
         let mut msgs = bus.1.lock().expect("Could not unlock bus");
         let slot = msgs
@@ -328,6 +338,7 @@ impl<T: Immutable + Condemned> Arena<T> {
                 Arena::alloc()
             };
 
+            // TODO(extend_bus)
             let (bus_idx, slot) = msgs
                 .iter_mut()
                 .enumerate()
@@ -530,10 +541,7 @@ thread_local! {
     /// Map from type to GC communication bus.
     /// `Arena.next` from an `Msg::End` with excise capacity.
     /// Cached invariant from last `Msg::Gc`.
-    static GC_BUS: UnsafeCell<(
-        Sender<RegMsg>,
-        HashMap<(GcTypeInfo, usize), &'static mut ((Option<*mut u8>, GcInvariant), Bus)>,
-    )> = UnsafeCell::new((get_sender(), HashMap::new()));
+    static GC_BUS: UnsafeCell<HashMap<(GcTypeInfo, usize), &'static mut ((Option<*mut u8>, GcInvariant), Bus)>> = UnsafeCell::new(HashMap::new());
 
     // FIXME upon drop/thread end send End for cached_next and Msg::Gc.next
 }

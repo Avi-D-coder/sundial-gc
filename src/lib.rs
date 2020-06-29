@@ -14,10 +14,11 @@
 #![feature(trivial_bounds)]
 #![feature(bindings_after_at)]
 #![feature(map_first_last)]
+#![feature(backtrace)]
 
 pub mod arena;
 pub mod auto_traits;
+pub mod collections;
 pub mod gc;
 mod gc_logic;
 pub mod mark;
-pub mod collections;
