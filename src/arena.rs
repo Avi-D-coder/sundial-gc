@@ -185,7 +185,7 @@ unsafe impl<'o, 'n, 'r: 'n, O: Immutable + 'o, N: Immutable + 'r> Mark<'o, 'n, '
                 .and_modify(|evacuated_ptr| new_ptr = *evacuated_ptr as *mut N)
                 .or_insert(next);
 
-            Gc(unsafe { &*new_ptr })
+            Gc::new(unsafe { &*new_ptr })
         } else {
             // old contains no direct condemned ptrs
             unsafe { std::mem::transmute(old) }
@@ -249,7 +249,7 @@ unsafe impl<'o, 'n, 'r: 'n, O: NoGc + Immutable + 'o, N: NoGc + Immutable + 'r>
                     unsafe { *next = ((*next as usize) - mem::size_of::<N>()) as *mut N };
                     new_gc
                 });
-            Gc(unsafe { &*new_gc })
+            Gc::new(unsafe { &*new_gc })
         } else {
             unsafe { std::mem::transmute(o) }
         }
@@ -361,7 +361,7 @@ impl<T: Immutable + Condemned> Arena<T> {
             let ptr = *self.next.get();
             *self.next.get() = self.bump_down() as *mut T;
             ptr::write(ptr, t);
-            Gc(&*ptr)
+            Gc::new(&*ptr)
         }
     }
 
