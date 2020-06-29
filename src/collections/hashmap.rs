@@ -1,8 +1,13 @@
-use crate::{arena::Arena, gc::Gc, mark::Condemned};
+use crate::{
+    arena::Arena,
+    auto_traits::Immutable,
+    gc::Gc,
+    mark::{Condemned, GcTypeInfo, Handlers, Tti, TypeRow},
+};
 use rustc_hash::FxHasher;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
-use std::{mem, ptr};
+use std::{mem, ops::Range, ptr};
 
 /// TODO support other hashes, FxHash is not secure.
 
@@ -16,6 +21,7 @@ pub struct HashMap<'r, K, V> {
     /// Bit map 1 denotes a value.
     has_val: u16,
     arr: [*const (); 15],
+    // TODO have another go at using a union
     kv: PhantomData<Gc<'r, (&'r K, &'r V)>>,
 }
 
