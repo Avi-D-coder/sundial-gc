@@ -10,6 +10,8 @@ impl<'r, T> Gc<'r, T> {
     }
 }
 
+/// Just here to prevent construction of `Gc` & `Box`.
+/// Use `_` to pattern match against `Gc` & `Box`.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct P(());
 
@@ -38,7 +40,14 @@ impl<'r, T> From<Box<'r, T>> for Gc<'r, T> {
 /// Mutability is only available while the Arena it was allocated into is live.
 /// Can be turned into a immutable `Gc<T>`, in order to extend it's lifetime.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Box<'r, T>(pub &'r mut T);
+pub struct Box<'r, T>(pub &'r mut T, pub P);
+
+impl<'r, T> Box<'r, T> {
+    #[inline(always)]
+    pub(crate) fn new(t: &'r mut T) -> Self {
+        Box(t, P(()))
+    }
+}
 
 impl<'r, T> Deref for Box<'r, T> {
     type Target = T;

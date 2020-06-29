@@ -1,5 +1,5 @@
 use crate::auto_traits::*;
-use crate::gc::Gc;
+use crate::gc::{self, Gc};
 use crate::{
     gc_logic::{get_sender, BusPtr, RegMsg},
     mark::{Condemned, GcTypeInfo, Mark},
@@ -353,6 +353,8 @@ impl<T: Immutable + Condemned> Arena<T> {
         }
     }
 
+    /// Create a new `Gc<T>`.
+    /// If `T : Copy` & `size_of::<T>() > 8`, you should use `self.gc_copy(&T)` instead.
     pub fn gc_alloc<'a, 'r: 'a>(&'a self, t: T) -> Gc<'r, T> {
         unsafe {
             if self.full() {
@@ -362,6 +364,18 @@ impl<T: Immutable + Condemned> Arena<T> {
             *self.next.get() = self.bump_down() as *mut T;
             ptr::write(ptr, t);
             Gc::new(&*ptr)
+        }
+    }
+
+    pub fn box_alloc<'a, 'r: 'a>(&'a self, t: T) -> gc::Box<'r, T> {
+        unsafe {
+            if self.full() {
+                panic!("Growing `Arena`s not yet implemented")
+            }
+            let ptr = *self.next.get();
+            *self.next.get() = self.bump_down() as *mut T;
+            ptr::write(ptr, t);
+            gc::Box::new(&mut *ptr)
         }
     }
 
@@ -383,6 +397,60 @@ impl<T: Immutable + Condemned> Arena<T> {
         HeaderUnTyped::init(header as *mut _);
 
         (header as usize + Header::<T>::high_offset() as usize) as *mut T
+    }
+}
+
+impl<T: Immutable + Condemned + Copy> Arena<T> {
+    /// Directly copies T instead of reading it onto the stack first.
+    pub fn gc_copy<'a, 'r: 'a>(&'a self, t: &T) -> Gc<'r, T> {
+        unsafe {
+            if self.full() {
+                panic!("Growing `Arena`s not yet implemented")
+            }
+            let ptr = *self.next.get();
+            *self.next.get() = self.bump_down() as *mut T;
+            ptr::copy(t, ptr, 1);
+            Gc::new(&*ptr)
+        }
+    }
+
+    /// Directly copies T instead of reading it onto the stack first.
+    pub fn box_copy<'a, 'r: 'a>(&'a self, t: &T) -> gc::Box<'r, T> {
+        unsafe {
+            if self.full() {
+                panic!("Growing `Arena`s not yet implemented")
+            }
+            let ptr = *self.next.get();
+            *self.next.get() = self.bump_down() as *mut T;
+            ptr::copy(t, ptr, 1);
+            gc::Box::new(&mut *ptr)
+        }
+    }
+}
+
+impl<T: Immutable + Condemned + Clone> Arena<T> {
+    pub fn gc_clone<'a, 'r: 'a>(&'a self, t: &T) -> Gc<'r, T> {
+        unsafe {
+            if self.full() {
+                panic!("Growing `Arena`s not yet implemented")
+            }
+            let ptr = *self.next.get();
+            *self.next.get() = self.bump_down() as *mut T;
+            ptr::write(ptr, t.clone());
+            Gc::new(&*ptr)
+        }
+    }
+
+    pub fn box_clone<'a, 'r: 'a>(&'a self, t: &T) -> gc::Box<'r, T> {
+        unsafe {
+            if self.full() {
+                panic!("Growing `Arena`s not yet implemented")
+            }
+            let ptr = *self.next.get();
+            *self.next.get() = self.bump_down() as *mut T;
+            ptr::write(ptr, t.clone());
+            gc::Box::new(&mut *ptr)
+        }
     }
 }
 
