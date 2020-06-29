@@ -178,12 +178,12 @@ unsafe impl<'o, 'n, 'r: 'n, O: Immutable + 'o, N: Immutable + 'r> Mark<'o, 'n, '
 
             let mut new_ptr = next;
             let old_header = unsafe { &*Header::from(old_ptr) };
-            let evacuated = old_header.evacuated.lock();
+            let evacuated = old_header.intern.evacuated.lock();
             evacuated
                 .unwrap()
                 .entry(Arena::index(old.0 as *const O))
                 .and_modify(|evacuated_ptr| new_ptr = *evacuated_ptr as *mut N)
-                .or_insert(next);
+                .or_insert(next as *const u8);
 
             Gc::new(unsafe { &*new_ptr })
         } else {
@@ -239,15 +239,15 @@ unsafe impl<'o, 'n, 'r: 'n, O: NoGc + Immutable + 'o, N: NoGc + Immutable + 'r>
             let old_addr = &*o as *const O as usize;
             let offset = old_addr % ARENA_SIZE;
             let old_header = unsafe { &*((old_addr - offset) as *const Header<N>) };
-            let evacuated = old_header.evacuated.lock();
+            let evacuated = old_header.intern.evacuated.lock();
             evacuated
                 .unwrap()
                 .entry((offset / mem::size_of::<N>()) as u16)
-                .and_modify(|gc| new_gc = *gc)
+                .and_modify(|gc| new_gc = *gc as *const N)
                 .or_insert_with(|| {
                     // FIXME overrun
                     unsafe { *next = ((*next as usize) - mem::size_of::<N>()) as *mut N };
-                    new_gc
+                    new_gc as *const u8
                 });
             Gc::new(unsafe { &*new_gc })
         } else {
@@ -455,13 +455,17 @@ impl<T: Immutable + Condemned + Clone> Arena<T> {
 }
 
 pub(crate) struct HeaderUnTyped {
-    // TODO private
-    pub evacuated: Mutex<HashMap<u16, *const u8>>,
+    pub(crate) evacuated: Mutex<HashMap<u16, *const u8>>,
     // roots: HashMap<u16, *const Box<UnsafeCell<*const T>>>,
     // finalizers: TODO
-    roots: usize,
+    pub(crate) roots: Mutex<HashMap<u16, *mut u8>>,
     finalizers: usize,
     pub(crate) condemned: bool,
+}
+
+pub struct Header<T> {
+    pub(crate) intern: HeaderUnTyped,
+    t: std::marker::PhantomData<*const T>,
 }
 
 impl HeaderUnTyped {
@@ -493,23 +497,13 @@ impl HeaderUnTyped {
                 ptr,
                 HeaderUnTyped {
                     evacuated: Mutex::new(HashMap::new()),
-                    roots: 0,
+                    roots: Mutex::new(HashMap::new()),
                     finalizers: 0,
                     condemned: false,
                 },
             )
         }
     }
-}
-
-pub struct Header<T> {
-    // TODO private
-    pub evacuated: Mutex<HashMap<u16, *const T>>,
-    // roots: HashMap<u16, *const Box<UnsafeCell<*const T>>>,
-    // finalizers: TODO
-    roots: usize,
-    finalizers: usize,
-    pub condemned: bool,
 }
 
 impl<T> Header<T> {

@@ -87,10 +87,12 @@ impl Handlers {
     ) -> *const T {
         let header = &mut *(Header::from(condemned) as *mut Header<T>);
         // This will race if multiple threads are tracing!
-        let evacuated = header.evacuated.get_mut().unwrap();
+        let evacuated = header.intern.evacuated.get_mut().unwrap();
 
         // Add a forwarding ptr to the condemned Arena
-        *evacuated.entry(Arena::index(condemned)).or_insert(new)
+        *evacuated
+            .entry(Arena::index(condemned))
+            .or_insert(new as *const u8) as *const T
     }
 }
 
@@ -212,7 +214,7 @@ unsafe impl<'r, T: Immutable + Condemned> Condemned for Gc<'r, T> {
         let ptr = s.0 as *const T;
         if grey_feilds & bit == bit
             && condemned.contains(&(ptr as usize))
-            && (unsafe { (&*Header::from(ptr)).condemned })
+            && (unsafe { (&*Header::from(ptr)).intern.condemned })
         {
             bit
         } else {
