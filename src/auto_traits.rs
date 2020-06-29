@@ -1,4 +1,4 @@
-use super::gc::*;
+use super::gc::Gc;
 use std::cell::UnsafeCell;
 
 pub unsafe auto trait NoGc {}

@@ -15,7 +15,7 @@
 
 use sundial_gc::arena::*;
 use sundial_gc::auto_traits::*;
-use sundial_gc::gc::*;
+use sundial_gc::gc::Gc;
 use sundial_gc::mark::*;
 
 use std::ops::Range;

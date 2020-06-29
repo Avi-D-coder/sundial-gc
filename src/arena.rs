@@ -1,5 +1,5 @@
 use crate::auto_traits::*;
-use crate::gc::*;
+use crate::gc::Gc;
 use crate::{
     gc_logic::{get_sender, BusPtr, RegMsg},
     mark::{Condemned, GcTypeInfo, Mark},
