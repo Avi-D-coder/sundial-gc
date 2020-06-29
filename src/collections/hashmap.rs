@@ -208,6 +208,68 @@ impl<'r, K: Hash + Eq + Clone + Condemned, V: Clone + Condemned> HashMap<'r, K, 
     }
 }
 
+// There is no way to derive Condemed since HashMap uses unsafe casts
+unsafe impl<'r, K: Condemned + 'r, V: Condemned> Condemned for HashMap<'r, K, V> {
+    default fn feilds(x: &Self, offset: u8, grey_feilds: u8, condemned: Range<usize>) -> u8 {
+        assert!(Self::PRE_CONDTION);
+        let mut bloom = 0b0000000;
+
+        for i in 0..16 {
+            let mask = 1 << i;
+            let has_val = (x.has_val & mask) != 0;
+            let sub_map = (x.entries & mask) != 0;
+
+            if has_val {
+                let kv: Gc<(K, V)> = unsafe { mem::transmute(x.arr[i]) };
+                bloom |= Condemned::feilds(&kv, offset, grey_feilds, condemned.clone())
+            } else if sub_map {
+                let hm: Gc<HashMap<K, V>> = unsafe { mem::transmute(x.arr[i]) };
+                bloom |= Condemned::feilds(&hm, offset, grey_feilds, condemned.clone())
+            };
+        }
+        bloom
+    }
+
+    default unsafe fn evacuate<'e>(
+        x: &Self,
+        offset: u8,
+        grey_feilds: u8,
+        condemned: Range<usize>,
+        handlers: &mut Handlers,
+    ) {
+        for i in 0..16 {
+            let mask = 1 << i;
+            let has_val = (x.has_val & mask) != 0;
+            let sub_map = (x.entries & mask) != 0;
+
+            if has_val {
+                let kv: Gc<(K, V)> = mem::transmute(x.arr[i]);
+                Condemned::evacuate(&kv, offset, grey_feilds, condemned.clone(), handlers);
+            } else if sub_map {
+                let hm: Gc<HashMap<K, V>> = mem::transmute(x.arr[i]);
+                Condemned::evacuate(&hm, offset, grey_feilds, condemned.clone(), handlers);
+            };
+        }
+    }
+
+    default fn direct_gc_types(t: &mut std::collections::HashMap<GcTypeInfo, TypeRow>, offset: u8) {
+        Gc::<HashMap<K, V>>::direct_gc_types(t, offset);
+        Gc::<(K, V)>::direct_gc_types(t, offset);
+    }
+
+    default fn transitive_gc_types(tti: *mut Tti) {
+        Gc::<HashMap<K, V>>::transitive_gc_types(tti);
+        Gc::<(K, V)>::transitive_gc_types(tti);
+    }
+
+    default const GC_COUNT: u8 = Gc::<(K, V)>::GC_COUNT + Gc::<HashMap<K, V>>::GC_COUNT;
+    default const PRE_CONDTION: bool = if K::PRE_CONDTION && V::PRE_CONDTION {
+        true
+    } else {
+        panic!("You need to derive Condemned for your type. Required due to a direct Gc<T>");
+    };
+}
+
 // /// TODO A HAMT, specialized to untagged ptrs.
 // pub struct HashMapPtrs<T> {
 //     /// A tagged ptr to HashMap or .
