@@ -200,14 +200,15 @@ impl<T: Immutable + Condemned> Drop for Arena<T> {
             tm.entry(key::<T>()).and_modify(|bus| {
                 let next = unsafe { *self.next.get() } as *const u8;
                 let capacity = self.capacity();
-                let cached_next = bus.cached_next;
 
                 let release_to_gc = if capacity != 0
                     && capacity
-                        > cached_next
+                        > bus
+                            .cached_next
                             .map(|cn| Self::capacity_ptr(cn as *const T))
                             .unwrap_or(0)
                 {
+                    // FIXME leaking cached_next
                     bus.cached_next = Some(next as *mut _);
                     false
                 } else {
@@ -326,6 +327,7 @@ impl<T: Immutable + Condemned> Arena<T> {
         };
 
         let next = if let Some(n) = bus.cached_next {
+            bus.cached_next = None;
             n as *mut T
         } else {
             new_allocation = true;
