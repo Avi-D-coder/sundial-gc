@@ -17,8 +17,12 @@
 #![feature(backtrace)]
 
 pub mod arena;
+pub use arena::Arena;
 pub mod auto_traits;
+pub use auto_traits::{Immutable, NoGc};
 pub mod collections;
 pub mod gc;
+pub use gc::{Gc, Box};
 mod gc_logic;
 pub mod mark;
+pub use mark::Mark;
