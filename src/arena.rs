@@ -200,18 +200,23 @@ impl<T: Immutable + Condemned> Drop for Arena<T> {
             tm.entry(key::<T>()).and_modify(|bus| {
                 let next = unsafe { *self.next.get() } as *const u8;
                 let capacity = self.capacity();
-                let cached_next = bus.0 .0;
+                let cached_next = bus.cached_next;
 
                 let release_to_gc = if capacity != 0
-                    && cached_next.is_some()
-                    && capacity > Self::capacity_ptr(cached_next.unwrap() as *const T)
+                    && capacity
+                        > cached_next
+                            .map(|cn| Self::capacity_ptr(cn as *const T))
+                            .unwrap_or(0)
                 {
-                    bus.0 .0 = Some(next as *mut _);
+                    bus.cached_next = Some(next as *mut _);
                     false
                 } else {
                     true
                 };
-                let mut msgs = bus.1.lock().unwrap();
+                let mut msgs = bus
+                    .bus
+                    .lock()
+                    .expect("Could not unlock bus while dropping Arena");
                 msgs[self.bus_idx as usize] = Msg::End {
                     release_to_gc,
                     new_allocation: self.new_allocation,
@@ -263,23 +268,24 @@ impl<T: Immutable + Condemned> Arena<T> {
         };
 
         // Register a bus for this thread type combo.
-        let bus: &'static mut ((Option<_>, GcInvariant), Bus) = GC_BUS.with(|tm| {
+        let bus = GC_BUS.with(|tm| {
             let tm = unsafe { &mut *tm.get() };
             tm.entry(key::<T>()).or_insert_with(|| {
-                let bus: &'static mut ((Option<_>, GcInvariant), Bus) = Box::leak(Box::new((
-                    (None, GcInvariant::none()),
-                    Mutex::new([Msg::Slot; 8]),
-                )));
+                let bus = Box::leak(Box::new(CacheBus {
+                    cached_next: None,
+                    known_invariant: GcInvariant::none(),
+                    bus: Mutex::new([Msg::Slot; 8]),
+                }));
 
                 let mut reg = GcThreadBus::get().lock().expect("Could not unlock RegBus");
-                reg.register::<T>(&(bus.1));
+                reg.register::<T>(&(bus.bus));
                 bus
             })
         });
 
         // FIXME(extend_bus) This is a pause on the worker!
         loop {
-            let msgs = bus.1.lock().expect("Could not unlock bus");
+            let msgs = bus.bus.lock().expect("Could not unlock bus");
             let slot = msgs.iter().filter(|o| o.is_gc() || o.is_slot()).next();
 
             if slot.is_some() {
@@ -290,13 +296,14 @@ impl<T: Immutable + Condemned> Arena<T> {
             }
         }
 
-        let mut msgs = bus.1.lock().expect("Could not unlock bus");
+        let mut msgs = bus.bus.lock().expect("Could not unlock bus");
         let slot = msgs
             .iter_mut()
             .enumerate()
             .filter(|(_, o)| o.is_gc())
             .next();
 
+        // First look for a Gc msg then a empty Slot msg.
         if let Some((
             bus_idx,
             &mut Msg::Gc {
@@ -308,10 +315,11 @@ impl<T: Immutable + Condemned> Arena<T> {
             },
         )) = slot
         {
+            // Found a Gc msg.
             let mut new_allocation = false;
             let next = UnsafeCell::new(if let Some(n) = next {
                 n as *mut T
-            } else if let Some(n) = bus.0 .0 {
+            } else if let Some(n) = bus.cached_next {
                 n as *mut T
             } else {
                 new_allocation = true;
@@ -328,10 +336,10 @@ impl<T: Immutable + Condemned> Arena<T> {
                 white_region: white_start..white_end,
             }
         } else {
-            let inv = bus.0 .1;
+            let inv = bus.known_invariant;
 
             let mut new_allocation = false;
-            let next = if let Some(n) = bus.0 .0 {
+            let next = if let Some(n) = bus.cached_next {
                 n as *mut T
             } else {
                 new_allocation = true;
@@ -369,7 +377,8 @@ impl<T: Immutable + Condemned> Arena<T> {
     pub fn gc_alloc<'a, 'r: 'a>(&'a self, t: T) -> Gc<'r, T> {
         unsafe {
             if self.full() {
-                panic!("Growing `Arena`s not yet implemented")
+                log::error!("Growing Arenas not yet implemented");
+                panic!("Growing Arenas not yet implemented")
             }
             let ptr = *self.next.get();
             *self.next.get() = self.bump_down() as *mut T;
@@ -381,7 +390,8 @@ impl<T: Immutable + Condemned> Arena<T> {
     pub fn box_alloc<'a, 'r: 'a>(&'a self, t: T) -> gc::Box<'r, T> {
         unsafe {
             if self.full() {
-                panic!("Growing `Arena`s not yet implemented")
+                log::error!("Growing Arenas not yet implemented");
+                panic!("Growing Arenas not yet implemented")
             }
             let ptr = *self.next.get();
             *self.next.get() = self.bump_down() as *mut T;
@@ -416,7 +426,8 @@ impl<T: Immutable + Condemned + Copy> Arena<T> {
     pub fn gc_copy<'a, 'r: 'a>(&'a self, t: &T) -> Gc<'r, T> {
         unsafe {
             if self.full() {
-                panic!("Growing `Arena`s not yet implemented")
+                log::error!("Growing Arenas not yet implemented");
+                panic!("Growing Arenas not yet implemented")
             }
             let ptr = *self.next.get();
             *self.next.get() = self.bump_down() as *mut T;
@@ -429,7 +440,8 @@ impl<T: Immutable + Condemned + Copy> Arena<T> {
     pub fn box_copy<'a, 'r: 'a>(&'a self, t: &T) -> gc::Box<'r, T> {
         unsafe {
             if self.full() {
-                panic!("Growing `Arena`s not yet implemented")
+                log::error!("Growing Arenas not yet implemented");
+                panic!("Growing Arenas not yet implemented")
             }
             let ptr = *self.next.get();
             *self.next.get() = self.bump_down() as *mut T;
@@ -439,11 +451,104 @@ impl<T: Immutable + Condemned + Copy> Arena<T> {
     }
 }
 
+#[test]
+fn gc_alloc_test() {
+    let a: Arena<usize> = Arena::new();
+    let n1 = unsafe { *a.next.get() } as usize;
+    a.gc_alloc(1);
+    let n2 = unsafe { *a.next.get() } as usize;
+    assert!(n1 == n2 + 8)
+}
+
+#[test]
+fn gc_clone_test() {
+    let a: Arena<usize> = Arena::new();
+    let n1 = unsafe { *a.next.get() } as usize;
+    a.gc_clone(&1);
+    let n2 = unsafe { *a.next.get() } as usize;
+    assert!(n1 == n2 + 8)
+}
+
+#[test]
+fn gc_copy_test() {
+    let a: Arena<usize> = Arena::new();
+    let n1 = unsafe { *a.next.get() } as usize;
+    a.gc_copy(&1);
+    let n2 = unsafe { *a.next.get() } as usize;
+    assert!(n1 == n2 + 8)
+}
+
+// #[test]
+// fn gc_allocs_test() {
+//     for _ in 0..ARENA_SIZE {
+//         let a: Arena<usize> = Arena::new();
+//         let n1 = unsafe { *a.next.get() } as usize;
+//         a.gc_alloc(1);
+//         let n2 = unsafe { *a.next.get() } as usize;
+//         assert!(n1 == n2 + 8)
+//     }
+// }
+
+// #[test]
+// fn gc_clones_test() {
+//     for _ in 0..ARENA_SIZE {
+//         let a: Arena<usize> = Arena::new();
+//         let n1 = unsafe { *a.next.get() } as usize;
+//         a.gc_clone(&1);
+//         let n2 = unsafe { *a.next.get() } as usize;
+//         assert!(n1 == n2 + 8)
+//     }
+// }
+
+// #[test]
+// fn gc_copys_test() {
+//     for _ in 0..ARENA_SIZE {
+//         let a: Arena<usize> = Arena::new();
+//         let n1 = unsafe { *a.next.get() } as usize;
+//         a.gc_copy(&1);
+//         let n2 = unsafe { *a.next.get() } as usize;
+//         assert!(n1 == n2 + 8)
+//     }
+// }
+
+#[test]
+fn capacity_test() {
+    let a: Arena<usize> = Arena::new();
+    let c1 = a.capacity();
+    a.gc_alloc(1);
+    let c2 = a.capacity();
+    assert!(c1 - 1 == c2)
+}
+
+#[test]
+fn capacitys_test() {
+    let (mut next, mut cap) = {
+        let a = Arena::<usize>::new();
+        (unsafe { *a.next.get() }, a.capacity())
+    };
+    for _ in 0..ARENA_SIZE {
+        let a: Arena<usize> = Arena::new();
+        assert_eq!(next, unsafe { *a.next.get() });
+        assert!(!a.full());
+        a.gc_alloc(1);
+        let c = a.capacity();
+        dbg!(cap, c);
+        assert!(cap - 1 == c);
+
+        cap -= 1;
+        next = unsafe { *a.next.get() };
+        if a.full() {
+            break;
+        }
+    }
+}
+
 impl<T: Immutable + Condemned + Clone> Arena<T> {
     pub fn gc_clone<'a, 'r: 'a>(&'a self, t: &T) -> Gc<'r, T> {
         unsafe {
             if self.full() {
-                panic!("Growing `Arena`s not yet implemented")
+                log::error!("Growing Arenas not yet implemented");
+                panic!("Growing Arenas not yet implemented")
             }
             let ptr = *self.next.get();
             *self.next.get() = self.bump_down() as *mut T;
@@ -455,7 +560,8 @@ impl<T: Immutable + Condemned + Clone> Arena<T> {
     pub fn box_clone<'a, 'r: 'a>(&'a self, t: &T) -> gc::Box<'r, T> {
         unsafe {
             if self.full() {
-                panic!("Growing `Arena`s not yet implemented")
+                log::error!("Growing Arenas not yet implemented");
+                panic!("Growing Arenas not yet implemented")
             }
             let ptr = *self.next.get();
             *self.next.get() = self.bump_down() as *mut T;
@@ -537,11 +643,19 @@ impl<T> Header<T> {
 
 pub(crate) type Bus = Mutex<[Msg; 8]>;
 
+struct CacheBus {
+    // TODO remove Option,
+    // it does not get optized away.
+    cached_next: Option<*mut u8>,
+    known_invariant: GcInvariant,
+    bus: Bus,
+}
+
 thread_local! {
     /// Map from type to GC communication bus.
     /// `Arena.next` from an `Msg::End` with excise capacity.
     /// Cached invariant from last `Msg::Gc`.
-    static GC_BUS: UnsafeCell<HashMap<(GcTypeInfo, usize), &'static mut ((Option<*mut u8>, GcInvariant), Bus)>> = UnsafeCell::new(HashMap::new());
+    static GC_BUS: UnsafeCell<HashMap<(GcTypeInfo, usize), &'static mut CacheBus>> = UnsafeCell::new(HashMap::new());
 
     // FIXME upon drop/thread end send End for cached_next and Msg::Gc.next
 }

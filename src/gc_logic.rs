@@ -14,7 +14,6 @@ use std::thread::{self, ThreadId};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     cmp::max,
-    fs::File,
     mem,
     ops::Range,
     process, ptr,
@@ -40,24 +39,6 @@ impl GcThreadBus {
         if bus != ptr::null_mut() {
             unsafe { &*bus }
         } else {
-            panic::set_hook(Box::new(|panic_info| {
-                log::error!("PANIC");
-                let mut err_log =
-                    File::create("SUNDIAL_BACKTRACE").expect("could not create SUNDIAL_BACKTRACE");
-                if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
-                    let _ = writeln!(&mut err_log, "panic occurred: {}", s);
-                } else {
-                    println!("panic occurred");
-                }
-
-                let _ = writeln!(
-                    &mut err_log,
-                    "{}",
-                    std::backtrace::Backtrace::force_capture()
-                );
-                process::exit(0);
-            }));
-
             let mut bus = Box::new(Mutex::new(GcThreadBus {
                 bus: SmallVec::new(),
             }));
@@ -345,9 +326,11 @@ impl TypeState {
 
                     if *release_to_gc {
                         if full(next, type_info.align) {
+                            log::trace!("Full Arena released");
                             let header = HeaderUnTyped::from(next) as *mut _;
                             gc_arenas_full.insert(header);
                         } else {
+                            log::trace!("Non full Arena released");
                             gc_arenas.insert(next as *mut _);
                         };
                     } else {
@@ -361,7 +344,15 @@ impl TypeState {
                 Msg::Gc { next, .. } => {
                     has_new = true;
                     if next.is_none() {
-                        *next = Some(0 as *mut u8);
+                        *next = gc_arenas
+                            .pop_first()
+                            .map(|p| p as *mut _)
+                            .or(free.pop().map(|header| {
+                                HeaderUnTyped::init(header);
+                                (header as usize
+                                    + HeaderUnTyped::high_offset(type_info.align, type_info.size)
+                                        as usize) as *mut u8
+                            }));
                     }
                     None
                 }
@@ -572,6 +563,19 @@ impl TypeRelations {
 }
 
 fn gc_loop() {
+    panic::set_hook(Box::new(|panic_info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+            println!("panic occurred: {},\n\n{}", s, backtrace);
+            log::error!("panic occurred: {},\n\n{}", s, backtrace);
+        } else {
+            println!("panic occurred");
+            log::error!("panic occurred,\n\n{}", backtrace);
+        }
+
+        process::exit(0);
+    }));
+
     let mut free: Vec<*mut HeaderUnTyped> = Vec::with_capacity(100);
     let mut types = TypeRelations::new();
     let mut pre_arena_count: usize = 1;
@@ -584,9 +588,15 @@ fn gc_loop() {
 
     loop {
         // Take a snapshot of the thread type reg bus
-        let reg_msgs = { bus.lock().unwrap().bus.clone() };
+        let reg_msgs = {
+            let mut bus = bus.lock().unwrap();
+            let mut new = SmallVec::new();
 
-        info!("New loop");
+            mem::swap(&mut bus.bus, &mut new);
+            new
+        };
+
+        info!("New types registered: {}", reg_msgs.len());
         for msg in reg_msgs.into_iter() {
             match msg {
                 RegMsg::Reg(id, ty, bus) => {
