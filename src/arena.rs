@@ -102,7 +102,11 @@ impl<T: Immutable + Condemned> Arena<T> {
 pub(crate) fn capacity(next: *const u8, size: u16, align: u16) -> u16 {
     let next_addr = next as usize;
     let low = HeaderUnTyped::from(next) as usize + HeaderUnTyped::low_offset(align) as usize;
-    (next_addr - low) as u16 / size
+    if next_addr < low {
+        0
+    } else {
+        ((next_addr - low) as u16 / size) + 1
+    }
 }
 
 #[inline(always)]
@@ -287,12 +291,12 @@ impl<T: Immutable + Condemned> Arena<T> {
         // FIXME(extend_bus) This is a pause on the worker!
         loop {
             let msgs = bus.bus.lock().expect("Could not unlock bus");
-            let slot = msgs.iter().filter(|o| o.is_gc() || o.is_slot()).next();
+            let slot = msgs.iter().filter(|o| o.is_slot()).next();
 
             if slot.is_some() {
                 break;
             } else {
-                log::info!("Worker sleeping 5ms");
+                log::trace!("Worker sleeping 5ms");
                 thread::sleep(Duration::from_millis(5));
             }
         }
@@ -505,8 +509,10 @@ fn gc_copy_test() {
 
 #[test]
 fn capacity_test() {
-    let a: Arena<usize> = Arena::new();
+    let a: Arena<u64> = Arena::new();
     let c1 = a.capacity();
+    // size_of Header == 160
+    assert_eq!((ARENA_SIZE - 160) / 8, c1 as usize);
     a.gc_alloc(1);
     let c2 = a.capacity();
     assert!(c1 - 1 == c2)
@@ -514,17 +520,18 @@ fn capacity_test() {
 
 #[test]
 fn capacitys_test() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let (mut next, mut cap) = {
         let a = Arena::<usize>::new();
         (unsafe { *a.next.get() }, a.capacity())
     };
-    for _ in 0..ARENA_SIZE {
+    for _ in 0.. {
         let a: Arena<usize> = Arena::new();
-        assert_eq!(next, unsafe { *a.next.get() });
+        let nxt = unsafe { *a.next.get() };
+        assert_eq!(next, nxt);
         assert!(!a.full());
         a.gc_alloc(1);
         let c = a.capacity();
-        dbg!(cap, c);
         assert!(cap - 1 == c);
 
         cap -= 1;
