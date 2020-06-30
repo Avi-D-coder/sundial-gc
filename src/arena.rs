@@ -592,8 +592,10 @@ fn send(bus: &Bus, msg: Msg) -> usize {
             .next()
         {
             *slot = msg;
+            drop(msgs);
             break i;
         } else {
+            drop(msgs);
             let since = waiting_since.unwrap_or_else(|| {
                 let n = Instant::now();
                 waiting_since = Some(n);
@@ -604,7 +606,6 @@ fn send(bus: &Bus, msg: Msg) -> usize {
             log::info!("Worker has waited for {}ms", elapsed.as_millis());
             sleep *= 2;
         };
-        drop(msgs)
     }
 }
 
