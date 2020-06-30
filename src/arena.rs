@@ -297,78 +297,68 @@ impl<T: Immutable + Condemned> Arena<T> {
         }
 
         let mut msgs = bus.bus.lock().expect("Could not unlock bus");
+        let gc_idx = msgs
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| o.is_gc())
+            .map(|(i, _)| i)
+            .next();
+
+        let mut new_allocation = false;
+        if let Some(&mut Msg::Gc {
+            ref mut next,
+            grey_self,
+            grey_feilds,
+            white_start,
+            white_end,
+        }) = gc_idx.map(|i| &mut msgs[i])
+        {
+            if bus.cached_next.is_none() {
+                bus.cached_next = *next;
+                *next = None;
+            };
+            bus.known_invariant = GcInvariant {
+                grey_feilds,
+                grey_self,
+                white_start,
+                white_end,
+            }
+        };
+
+        let next = if let Some(n) = bus.cached_next {
+            n as *mut T
+        } else {
+            new_allocation = true;
+            Arena::alloc()
+        };
+
+        let inv = bus.known_invariant;
+
+        // TODO(extend_bus)
         let slot = msgs
             .iter_mut()
             .enumerate()
-            .filter(|(_, o)| o.is_gc())
-            .next();
+            .filter(|(_, o)| o.is_slot())
+            .map(|(i, _)| i)
+            .next()
+            // TODO enable using GC msg slot
+            // .or(gc_idx)
+            .expect("No space on bus left. Extending the bus not yet supported.");
 
-        // First look for a Gc msg then a empty Slot msg.
-        if let Some((
-            bus_idx,
-            &mut Msg::Gc {
-                next,
-                grey_self,
-                grey_feilds,
-                white_start,
-                white_end,
-            },
-        )) = slot
-        {
-            // Found a Gc msg.
-            let mut new_allocation = false;
-            let next = UnsafeCell::new(if let Some(n) = next {
-                n as *mut T
-            } else if let Some(n) = bus.cached_next {
-                n as *mut T
-            } else {
-                new_allocation = true;
-                Arena::alloc()
-            });
+        // send start message to gc
+        msgs[slot] = Msg::Start {
+            next: next as *const u8,
+            white_start: 0,
+            white_end: 1,
+        };
 
-            msgs[bus_idx] = Msg::Slot;
-            Arena {
-                bus_idx: bus_idx as u8,
-                new_allocation,
-                next,
-                grey_self,
-                grey_feilds: UnsafeCell::new(grey_feilds),
-                white_region: white_start..white_end,
-            }
-        } else {
-            let inv = bus.known_invariant;
-
-            let mut new_allocation = false;
-            let next = if let Some(n) = bus.cached_next {
-                n as *mut T
-            } else {
-                new_allocation = true;
-                Arena::alloc()
-            };
-
-            // TODO(extend_bus)
-            let (bus_idx, slot) = msgs
-                .iter_mut()
-                .enumerate()
-                .filter(|(_, o)| o.is_slot())
-                .next()
-                .expect("No space on bus left. Extending the bus not yet supported.");
-
-            // send start message to gc
-            *slot = Msg::Start {
-                next: next as *const u8,
-                white_start: 0,
-                white_end: 1,
-            };
-
-            Arena {
-                bus_idx: bus_idx as u8,
-                new_allocation,
-                next: UnsafeCell::new(next),
-                grey_self: inv.grey_self,
-                grey_feilds: UnsafeCell::new(inv.grey_feilds),
-                white_region: inv.white_start..inv.white_end,
-            }
+        Arena {
+            bus_idx: slot as u8,
+            new_allocation,
+            next: UnsafeCell::new(next),
+            grey_self: inv.grey_self,
+            grey_feilds: UnsafeCell::new(inv.grey_feilds),
+            white_region: inv.white_start..inv.white_end,
         }
     }
 
