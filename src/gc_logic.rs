@@ -88,12 +88,23 @@ pub(crate) enum RegMsg {
     Un(ThreadId, GcTypeInfo),
 }
 
-#[derive(Copy, Clone)]
-struct Invariant {
-    white_start: usize,
-    white_end: usize,
-    grey_feilds: u8,
-    grey_self: bool,
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Invariant {
+    pub(crate) white_start: usize,
+    pub(crate) white_end: usize,
+    pub(crate) grey_feilds: u8,
+    pub(crate) grey_self: bool,
+}
+
+impl Invariant {
+    pub(crate) const fn none() -> Self {
+        Self {
+            grey_self: false,
+            grey_feilds: 0b0000_0000,
+            white_start: 0,
+            white_end: 0,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -265,6 +276,25 @@ impl TypeState {
         buses.iter().for_each(|(_, bus)| {
             let mut has_new = false;
             let mut bus = bus.0.lock().expect("Could not unlock bus");
+
+            let worker_has_empty = bus
+                .iter()
+                .filter(|m| match m {
+                    Msg::Gc { next: Some(_), .. } => true,
+                    _ => false,
+                })
+                .next()
+                .is_some();
+
+            let worker_sent_msg = bus
+                .iter()
+                .filter(|m| match m {
+                    Msg::Start { .. } | Msg::End { .. } => true,
+                    _ => false,
+                })
+                .next()
+                .is_some();
+
             // TODO fill gc_arenas by sending them to workers.
             grey.extend(bus.iter_mut().filter_map(|msg| match msg {
                 Msg::Start {
@@ -285,7 +315,7 @@ impl TypeState {
                         *latest_grey = *epoch;
                         *pending_known_grey += 1;
                     }
-                    // *msg = Msg::Slot;
+                    *msg = Msg::Slot;
                     None
                 }
                 Msg::End {
@@ -334,6 +364,7 @@ impl TypeState {
                             gc_arenas.insert(next as *mut _);
                         };
                     } else {
+                        debug_assert!(!full(next, type_info.align));
                         // store active worker arenas
                         worker_arenas.insert(HeaderUnTyped::from(next), next);
                     };
@@ -395,7 +426,8 @@ impl TypeState {
                         };
                     }
                 });
-            }
+            };
+            log::trace!("\n\n GC sent:\n {:?}\n\n", bus);
         });
 
         // trace grey, updating refs

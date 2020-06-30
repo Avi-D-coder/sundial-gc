@@ -1,7 +1,7 @@
 use crate::auto_traits::*;
 use crate::gc::{self, Gc};
 use crate::{
-    gc_logic::GcThreadBus,
+    gc_logic::{GcThreadBus, Invariant},
     mark::{Condemned, GcTypeInfo, Mark},
 };
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -12,7 +12,10 @@ use std::mem::{self, transmute};
 use std::ops::Range;
 use std::ptr;
 use std::sync::Mutex;
-use std::{thread, thread_local, time::Duration};
+use std::{
+    thread, thread_local,
+    time::{Duration, Instant},
+};
 
 pub const ARENA_SIZE: usize = 16384;
 
@@ -218,17 +221,28 @@ impl<T: Immutable + Condemned> Drop for Arena<T> {
                 } else {
                     true
                 };
-                let mut msgs = bus
-                    .bus
-                    .lock()
-                    .expect("Could not unlock bus while dropping Arena");
-                msgs[self.bus_idx as usize] = Msg::End {
+
+                let end = Msg::End {
                     release_to_gc,
                     new_allocation: self.new_allocation,
                     next,
                     grey_feilds: unsafe { *self.grey_feilds.get() },
                     white_start: self.white_region.start,
                     white_end: self.white_region.end,
+                };
+
+                let mut msgs = bus
+                    .bus
+                    .lock()
+                    .expect("Could not unlock bus while dropping Arena");
+                let msg = &mut msgs[self.bus_idx as usize];
+
+                match msg {
+                    Msg::Slot | Msg::Start { .. } => *msg = end,
+                    _ => {
+                        drop(msgs);
+                        send(&bus.bus, end);
+                    }
                 };
             });
         });
@@ -278,7 +292,7 @@ impl<T: Immutable + Condemned> Arena<T> {
             tm.entry(key::<T>()).or_insert_with(|| {
                 let bus = Box::leak(Box::new(CacheBus {
                     cached_next: None,
-                    known_invariant: GcInvariant::none(),
+                    known_invariant: Invariant::none(),
                     bus: Mutex::new([Msg::Slot; 8]),
                 }));
 
@@ -287,19 +301,6 @@ impl<T: Immutable + Condemned> Arena<T> {
                 bus
             })
         });
-
-        // FIXME(extend_bus) This is a pause on the worker!
-        loop {
-            let msgs = bus.bus.lock().expect("Could not unlock bus");
-            let slot = msgs.iter().filter(|o| o.is_slot()).next();
-
-            if slot.is_some() {
-                break;
-            } else {
-                log::trace!("Worker sleeping 5ms");
-                thread::sleep(Duration::from_millis(5));
-            }
-        }
 
         let mut msgs = bus.bus.lock().expect("Could not unlock bus");
         let gc_idx = msgs
@@ -322,7 +323,7 @@ impl<T: Immutable + Condemned> Arena<T> {
                 bus.cached_next = *next;
                 *next = None;
             };
-            bus.known_invariant = GcInvariant {
+            bus.known_invariant = Invariant {
                 grey_feilds,
                 grey_self,
                 white_start,
@@ -338,33 +339,30 @@ impl<T: Immutable + Condemned> Arena<T> {
             Arena::alloc()
         };
 
-        let inv = bus.known_invariant;
-
-        // TODO(extend_bus)
-        let slot = msgs
-            .iter_mut()
-            .enumerate()
-            .filter(|(_, o)| o.is_slot())
-            .map(|(i, _)| i)
-            .next()
-            // TODO enable using GC msg slot
-            // .or(gc_idx)
-            .expect("No space on bus left. Extending the bus not yet supported.");
-
+        drop(msgs);
         // send start message to gc
-        msgs[slot] = Msg::Start {
-            next: next as *const u8,
-            white_start: 0,
-            white_end: 1,
-        };
+        let slot = send(
+            &bus.bus,
+            Msg::Start {
+                next: next as *const u8,
+                white_start: 0,
+                white_end: 1,
+            },
+        );
 
+        let Invariant {
+            grey_self,
+            grey_feilds,
+            white_start,
+            white_end,
+        } = bus.known_invariant;
         Arena {
             bus_idx: slot as u8,
             new_allocation,
             next: UnsafeCell::new(next),
-            grey_self: inv.grey_self,
-            grey_feilds: UnsafeCell::new(inv.grey_feilds),
-            white_region: inv.white_start..inv.white_end,
+            grey_self,
+            grey_feilds: UnsafeCell::new(grey_feilds),
+            white_region: white_start..white_end,
         }
     }
 
@@ -474,74 +472,6 @@ fn gc_copy_test() {
     assert!(n1 == n2 + 8)
 }
 
-// #[test]
-// fn gc_allocs_test() {
-//     for _ in 0..ARENA_SIZE {
-//         let a: Arena<usize> = Arena::new();
-//         let n1 = unsafe { *a.next.get() } as usize;
-//         a.gc_alloc(1);
-//         let n2 = unsafe { *a.next.get() } as usize;
-//         assert!(n1 == n2 + 8)
-//     }
-// }
-
-// #[test]
-// fn gc_clones_test() {
-//     for _ in 0..ARENA_SIZE {
-//         let a: Arena<usize> = Arena::new();
-//         let n1 = unsafe { *a.next.get() } as usize;
-//         a.gc_clone(&1);
-//         let n2 = unsafe { *a.next.get() } as usize;
-//         assert!(n1 == n2 + 8)
-//     }
-// }
-
-// #[test]
-// fn gc_copys_test() {
-//     for _ in 0..ARENA_SIZE {
-//         let a: Arena<usize> = Arena::new();
-//         let n1 = unsafe { *a.next.get() } as usize;
-//         a.gc_copy(&1);
-//         let n2 = unsafe { *a.next.get() } as usize;
-//         assert!(n1 == n2 + 8)
-//     }
-// }
-
-#[test]
-fn capacity_test() {
-    let a: Arena<u64> = Arena::new();
-    let c1 = a.capacity();
-    // size_of Header == 160
-    assert_eq!((ARENA_SIZE - 160) / 8, c1 as usize);
-    a.gc_alloc(1);
-    let c2 = a.capacity();
-    assert!(c1 - 1 == c2)
-}
-
-#[test]
-fn capacitys_test() {
-    let _ = env_logger::builder().is_test(true).try_init();
-    let (mut next, mut cap) = {
-        let a = Arena::<usize>::new();
-        (unsafe { *a.next.get() }, a.capacity())
-    };
-    for _ in 0.. {
-        let a: Arena<usize> = Arena::new();
-        let nxt = unsafe { *a.next.get() };
-        assert_eq!(next, nxt);
-        assert!(!a.full());
-        a.gc_alloc(1);
-        let c = a.capacity();
-        assert!(cap - 1 == c);
-
-        cap -= 1;
-        next = unsafe { *a.next.get() };
-        if a.full() {
-            break;
-        }
-    }
-}
-
 impl<T: Immutable + Condemned + Clone> Arena<T> {
     pub fn gc_clone<'a, 'r: 'a>(&'a self, t: &T) -> Gc<'r, T> {
         unsafe {
@@ -622,6 +552,12 @@ impl HeaderUnTyped {
     }
 }
 
+#[test]
+fn low_offset_test() {
+    assert_eq!(mem::size_of::<HeaderUnTyped>(), 160);
+    assert_eq!(Header::<usize>::low_offset(), 160)
+}
+
 impl<T> Header<T> {
     #[inline(always)]
     pub fn from(ptr: *const T) -> *const Header<T> {
@@ -642,11 +578,42 @@ impl<T> Header<T> {
 
 pub(crate) type Bus = Mutex<[Msg; 8]>;
 
+/// FIXME(extend_bus) This is a pause on the worker!
+/// Returns index of sent message.
+fn send(bus: &Bus, msg: Msg) -> usize {
+    let mut waiting_since: Option<Instant> = None;
+    let mut sleep = 2;
+    loop {
+        let mut msgs = bus.lock().expect("Could not unlock bus");
+        if let Some((i, slot)) = msgs
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, o)| o.is_slot())
+            .next()
+        {
+            *slot = msg;
+            break i;
+        } else {
+            let since = waiting_since.unwrap_or_else(|| {
+                let n = Instant::now();
+                waiting_since = Some(n);
+                n
+            });
+            let elapsed = since.elapsed();
+            thread::sleep(Duration::from_millis(sleep));
+            log::info!("Worker has waited for {}ms", elapsed.as_millis());
+            sleep *= 2;
+        };
+        drop(msgs)
+    }
+}
+
+#[derive(Debug)]
 struct CacheBus {
     // TODO remove Option,
     // it does not get optized away.
     cached_next: Option<*mut u8>,
-    known_invariant: GcInvariant,
+    known_invariant: Invariant,
     bus: Bus,
 }
 
@@ -714,26 +681,6 @@ impl Msg {
         match self {
             Msg::Gc { .. } => true,
             _ => false,
-        }
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-struct GcInvariant {
-    grey_feilds: u8,
-    grey_self: bool,
-    /// The condemned ptr range
-    white_start: usize,
-    white_end: usize,
-}
-
-impl GcInvariant {
-    const fn none() -> Self {
-        Self {
-            grey_self: false,
-            grey_feilds: 0b0000_0000,
-            white_start: 0,
-            white_end: 0,
         }
     }
 }
