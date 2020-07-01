@@ -124,7 +124,7 @@ impl Default for Parents {
 
 struct HandlerManager {
     handlers: Handlers,
-    handlers_types: Vec<GcTypeInfo>,
+    eff_types: EffTypes,
     invariant: Invariant,
     evacuate_fn: fn(*const u8, u8, u8, Range<usize>, *mut Handlers),
     /// A snapshot of nexts at last call to `unclean_children`.
@@ -164,14 +164,12 @@ impl HandlerManager {
     ) -> SmallVec<[(&GcTypeInfo, SmallVec<[*mut u8; 4]>); 4]> {
         let HandlerManager {
             handlers,
-            handlers_types,
+            eff_types,
             last_nexts,
             ..
         } = self;
-        let mut unclean: SmallVec<[(&GcTypeInfo, SmallVec<[*mut u8; 4]>); 4]> = handlers_types
-            .iter()
-            .map(|ti| (ti, SmallVec::new()))
-            .collect();
+        let mut unclean: SmallVec<[(&GcTypeInfo, SmallVec<[*mut u8; 4]>); 4]> =
+            eff_types.iter().map(|ti| (ti, SmallVec::new())).collect();
 
         handlers
             .filled
@@ -235,6 +233,7 @@ impl Default for Arenas {
 /// This whole struct is unsafe!
 struct TypeState {
     type_info: GcTypeInfo,
+    direct_children: SmallVec<[GcTypeInfo; 2]>,
     handler: Option<HandlerManager>,
     /// Map Type to Bit
     buses: HashMap<ThreadId, BusPtr>,
@@ -506,8 +505,8 @@ impl TypeState {
     fn set_invariant(
         &mut self,
         inv: Invariant,
-        condemned_children: Vec<GcTypeInfo>,
         free: &mut Vec<*mut HeaderUnTyped>,
+        condemned_children: &EffTypes,
     ) {
         self.phase2 = false;
         self.pending_known_transitive_grey = 0;
@@ -516,17 +515,6 @@ impl TypeState {
         self.epoch = 0;
         self.latest_grey = 1;
         self.pending = HashMap::new();
-
-        let evacuate_fn = unsafe {
-            mem::transmute::<*const (), fn(*const u8, u8, u8, Range<usize>, *mut Handlers)>(
-                self.type_info.evacuate_fn,
-            )
-        };
-        let translator_from = unsafe {
-            mem::transmute::<*const (), fn(&Vec<GcTypeInfo>) -> (Translator, u8)>(
-                self.type_info.translator_from_fn,
-            )
-        };
 
         let mut nexts = SmallVec::with_capacity(condemned_children.len());
         let mut filled = SmallVec::new();
@@ -544,7 +532,7 @@ impl TypeState {
             );
         }
         let handlers = Handlers {
-            translator: translator_from(&condemned_children).0,
+            translator: self.type_info.translator_from_fn()(condemned_children).0,
             nexts,
             filled,
             free,
@@ -552,10 +540,10 @@ impl TypeState {
 
         self.handler = Some(HandlerManager {
             last_nexts: SmallVec::from_elem(ptr::null_mut(), condemned_children.len()),
-            handlers_types: condemned_children,
+            eff_types: condemned_children.clone(),
             handlers,
             invariant: inv,
-            evacuate_fn,
+            evacuate_fn: unsafe { self.type_info.evacuate_fn() },
         });
     }
 }
@@ -579,21 +567,18 @@ impl TypeRelations {
         } = self;
         let ts = active.entry(type_info).or_insert_with(|| {
             let mut direct_children: HashMap<GcTypeInfo, TypeRow> = HashMap::new();
-            let direct_gc_types = unsafe {
-                mem::transmute::<_, fn(&mut HashMap<GcTypeInfo, TypeRow>, u8)>(
-                    type_info.direct_gc_types_fn,
-                )
-            };
-            direct_gc_types(&mut direct_children, 0);
-            direct_children.iter().for_each(|(child, row)| {
-                let cp = parents.entry(*child).or_default();
-                cp.direct.insert(type_info, row.1);
-            });
+            type_info.direct_gc_types_fn()(&mut direct_children, 0);
+            let direct_children = direct_children
+                .into_iter()
+                .map(|(child, row)| {
+                    let cp = parents.entry(child).or_default();
+                    cp.direct.insert(type_info, row.1);
+                    child
+                })
+                .collect();
 
             let mut tti = Tti::new();
-            let tti_fn =
-                unsafe { mem::transmute::<_, fn(*mut Tti)>(type_info.transitive_gc_types_fn) };
-            tti_fn(&mut tti as *mut Tti);
+            type_info.transitive_gc_types_fn()(&mut tti as *mut Tti);
             tti.type_info.iter().for_each(|child| {
                 let cp = parents.entry(*child).or_default();
                 cp.transitive.insert(type_info);
@@ -601,6 +586,7 @@ impl TypeRelations {
 
             TypeState {
                 type_info,
+                direct_children,
                 handler: None,
                 buses: HashMap::new(),
                 arenas: Arenas::default(),
@@ -722,12 +708,7 @@ fn gc_loop() {
                     ts.arenas.condemned.drain().into_iter().for_each(|next| {
                         let header = HeaderUnTyped::from(next) as *mut HeaderUnTyped;
                         if cti.needs_drop {
-                            let GcTypeInfo {
-                                align,
-                                size,
-                                drop_in_place_fn,
-                                ..
-                            } = ti;
+                            let GcTypeInfo { align, size, .. } = ti;
 
                             let low = max(
                                 next as usize,
@@ -736,8 +717,7 @@ fn gc_loop() {
                             let mut ptr =
                                 low as usize + HeaderUnTyped::high_offset(align, size) as usize;
 
-                            let drop_in_place =
-                                unsafe { mem::transmute::<_, fn(*mut u8)>(drop_in_place_fn) };
+                            let drop_in_place = unsafe { ti.drop_in_place_fn() };
 
                             while ptr >= low {
                                 unsafe {
@@ -768,15 +748,15 @@ fn gc_loop() {
                     ts.handler.take().map(
                         |HandlerManager {
                              handlers,
-                             handlers_types,
+                             eff_types,
                              ..
                          }| {
                             debug_assert_eq!(handlers.filled.iter().flatten().count(), 0);
-                            debug_assert_eq!(handlers.nexts.len(), handlers_types.len());
+                            debug_assert_eq!(handlers.nexts.len(), eff_types.len());
                             handlers
                                 .nexts
                                 .into_iter()
-                                .zip(handlers_types.into_iter())
+                                .zip(eff_types.into_iter())
                                 .for_each(|(next, ti)| {
                                     let ts = active.get_mut(&ti).unwrap();
                                     // Add arenas left in Handler to the pool;
@@ -815,18 +795,7 @@ fn gc_loop() {
                     grey_self: true,
                 };
 
-                let direct_gc_types = unsafe {
-                    mem::transmute::<*const (), fn(&mut HashMap<GcTypeInfo, TypeRow>, u8)>(
-                        ti.direct_gc_types_fn,
-                    )
-                };
-
-                let mut dgt = HashMap::with_capacity(20);
-                direct_gc_types(&mut dgt, 0);
-                let condemned_children: Vec<_> = dgt.into_iter().map(|(i, _)| i).collect();
-                info!("Condemned children: {:?}", condemned_children);
-
-                ts.set_invariant(inv, condemned_children, &mut free);
+                ts.set_invariant(inv, &mut free, &ts.direct_children.clone());
 
                 // Mark all the GC's arenas as condemned.
                 ts.arenas.full.iter().for_each(|header| {

@@ -26,8 +26,10 @@ pub(crate) struct Translator {
     offsets: SmallVec<[Offset; 16]>,
 }
 
+pub(crate) type EffTypes = SmallVec<[GcTypeInfo; 2]>;
+
 impl Translator {
-    pub(crate) fn from<T: Condemned>(effs: &Vec<GcTypeInfo>) -> (Self, u8) {
+    pub(crate) fn from<T: Condemned>(effs: &EffTypes) -> (Translator, u8) {
         let mut types: HashMap<GcTypeInfo, TypeRow> = HashMap::with_capacity(16);
         T::direct_gc_types(&mut types, 0);
 
@@ -131,16 +133,16 @@ pub type TypeRow = (SmallVec<[u8; 8]>, u8);
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GcTypeInfo {
     /// `fn(*const u8, u8, u8, Range<usize>, *mut Handlers)`
-    pub(crate) evacuate_fn: *const (),
+    evacuate_fn: *const (),
     /// `fn(*mut Tti)`
-    pub(crate) transitive_gc_types_fn: *const (),
+    transitive_gc_types_fn: *const (),
     /// `direct_gc_types(&mut HashMap<GcTypeInfo, ([offset: u8], bits: u8)>, starting_offset: u8 = 0)`
     /// `fn(&mut HashMap<GcTypeInfo, TypeRow>, u8)`
-    pub(crate) direct_gc_types_fn: *const (),
+    direct_gc_types_fn: *const (),
     /// `unsafe fn(*mut u8)`
-    pub(crate) drop_in_place_fn: *const (),
+    drop_in_place_fn: *const (),
     /// from(effs: &Vec<GcTypeInfo>) -> (Self, u8)
-    pub(crate) translator_from_fn: *const (),
+    translator_from_fn: *const (),
     pub(crate) needs_drop: bool,
     pub(crate) size: u16,
     pub(crate) align: u16,
@@ -158,6 +160,29 @@ impl GcTypeInfo {
             size: mem::size_of::<T>() as u16,
             align: mem::align_of::<T>() as u16,
         }
+    }
+
+    pub(crate) const unsafe fn evacuate_fn(
+        &self,
+    ) -> fn(*const u8, offset: Offset, grey_feilds: u8, region: Range<usize>, handlers: *mut Handlers)
+    {
+        mem::transmute(self.evacuate_fn)
+    }
+
+    pub(crate) const fn transitive_gc_types_fn(&self) -> fn(*mut Tti) {
+        unsafe { mem::transmute(self.transitive_gc_types_fn) }
+    }
+
+    pub(crate) const fn direct_gc_types_fn(&self) -> fn(*mut HashMap<GcTypeInfo, TypeRow>, u8) {
+        unsafe { mem::transmute(self.direct_gc_types_fn) }
+    }
+
+    pub(crate) const unsafe fn drop_in_place_fn(&self) -> fn(*mut u8) {
+        mem::transmute(self.drop_in_place_fn)
+    }
+
+    pub(crate) const fn translator_from_fn(&self) -> fn(&EffTypes) -> (Translator, u8) {
+        unsafe { mem::transmute(self.translator_from_fn) }
     }
 }
 
