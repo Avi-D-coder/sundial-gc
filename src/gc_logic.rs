@@ -210,20 +210,35 @@ impl HandlerManager {
     }
 }
 
+struct Arenas {
+    /// The last seen `next`. ptr + size..high_offset is owned by gc
+    /// Will not include all Arenas owned by workers.
+    /// Only contains Arenas that the gc owns some of.
+    worker: HashMap<*const HeaderUnTyped, *const u8>,
+    /// Arena owned by GC, that have not been completely filled.
+    partial: BTreeSet<*mut u8>,
+    full: HashSet<*mut HeaderUnTyped>,
+    condemned: HashSet<*mut u8>,
+}
+
+impl Default for Arenas {
+    fn default() -> Self {
+        Arenas {
+            worker: HashMap::new(),
+            partial: BTreeSet::new(),
+            full: HashSet::new(),
+            condemned: HashSet::new(),
+        }
+    }
+}
+
 /// This whole struct is unsafe!
 struct TypeState {
     type_info: GcTypeInfo,
     handler: Option<HandlerManager>,
     /// Map Type to Bit
     buses: HashMap<ThreadId, BusPtr>,
-    /// The last seen `next`. ptr + size..high_offset is owned by gc
-    /// Will not include all Arenas owned by workers.
-    /// Only contains Arenas that the gc owns some of.
-    worker_arenas: HashMap<*const HeaderUnTyped, *const u8>,
-    /// Arena owned by GC, that have not been completely filled.
-    gc_arenas: BTreeSet<*mut u8>,
-    gc_arenas_full: HashSet<*mut HeaderUnTyped>,
-    condemned_arenas: HashSet<*mut u8>,
+    arenas: Arenas,
     /// Count of Arenas started before transitive_epoch.
     pending_known_transitive_grey: usize,
     /// Count of Arenas started before `invariant`.
@@ -255,9 +270,7 @@ impl TypeState {
         let Self {
             type_info,
             buses,
-            worker_arenas,
-            gc_arenas_full,
-            gc_arenas,
+            arenas,
             pending_known_transitive_grey,
             pending_known_grey,
             pending,
@@ -269,39 +282,36 @@ impl TypeState {
             ..
         } = self;
         *epoch += 1;
+        log::trace!(
+            "\n  epoch: {}\n  type: {:?}\n  buses: {}\n\n",
+            epoch,
+            type_info,
+            buses.len()
+        );
 
         let inv = handler.as_ref().map(|h| h.invariant).clone();
         // TODO lift allocation
         let mut grey: SmallVec<[(*const u8, u8); 8]> = SmallVec::new();
         buses.iter().for_each(|(_, bus)| {
-            let mut has_new = false;
+            let mut has_gc_msg = false;
             let mut bus = bus.0.lock().expect("Could not unlock bus");
+            log::trace!("GC Locked bus");
 
-            let worker_has_empty = bus
-                .iter()
-                .filter(|m| match m {
-                    Msg::Gc { next: Some(_), .. } => true,
-                    _ => false,
-                })
-                .next()
-                .is_some();
-
-            let worker_sent_msg = bus
-                .iter()
-                .filter(|m| match m {
-                    Msg::Start { .. } | Msg::End { .. } => true,
-                    _ => false,
-                })
-                .next()
-                .is_some();
-
-            // TODO fill gc_arenas by sending them to workers.
+            // TODO fill partial by sending them to workers.
             grey.extend(bus.iter_mut().filter_map(|msg| match msg {
                 Msg::Start {
                     white_start,
                     white_end,
                     next,
                 } => {
+                    log::trace!(
+                        "GC received: {:?}",
+                        Msg::Start {
+                            white_start: *white_start,
+                            white_end: *white_end,
+                            next: *next
+                        }
+                    );
                     if *epoch < *transitive_epoch {
                         *pending_known_transitive_grey += 1;
                     }
@@ -326,6 +336,18 @@ impl TypeState {
                     white_start,
                     white_end,
                 } => {
+                    log::trace!(
+                        "GC received: {:?}",
+                        Msg::End {
+                            white_start: *white_start,
+                            white_end: *white_end,
+                            next: *next,
+                            release_to_gc: *release_to_gc,
+                            new_allocation: *new_allocation,
+                            grey_feilds: *grey_feilds,
+                        }
+                    );
+
                     let next = *next;
                     let ret = if let Some(inv) = inv {
                         if inv.white_start == *white_start && inv.white_end == *white_end {
@@ -358,41 +380,45 @@ impl TypeState {
                         if full(next, type_info.align) {
                             log::trace!("Full Arena released");
                             let header = HeaderUnTyped::from(next) as *mut _;
-                            gc_arenas_full.insert(header);
+                            arenas.full.insert(header);
                         } else {
                             log::trace!("Non full Arena released");
-                            gc_arenas.insert(next as *mut _);
+                            arenas.partial.insert(next as *mut _);
                         };
                     } else {
                         debug_assert!(!full(next, type_info.align));
                         // store active worker arenas
-                        worker_arenas.insert(HeaderUnTyped::from(next), next);
+                        arenas.worker.insert(HeaderUnTyped::from(next), next);
                     };
 
                     *msg = Msg::Slot;
                     ret
                 }
-                Msg::Gc { next, .. } => {
-                    has_new = true;
-                    if next.is_none() {
-                        *next = gc_arenas
-                            .pop_first()
-                            .map(|p| p as *mut _)
-                            .or(free.pop().map(|header| {
-                                HeaderUnTyped::init(header);
-                                (header as usize
-                                    + HeaderUnTyped::high_offset(type_info.align, type_info.size)
-                                        as usize) as *mut u8
-                            }));
-                    }
+                Msg::Gc {
+                    next: next @ None, ..
+                } => {
+                    has_gc_msg = true;
+                    *next = arenas
+                        .partial
+                        .pop_first()
+                        .map(|p| p as *mut _)
+                        .or(free.pop().map(|header| {
+                            HeaderUnTyped::init(header);
+                            (header as usize
+                                + HeaderUnTyped::high_offset(type_info.align, type_info.size)
+                                    as usize) as *mut u8
+                        }));
+                    log::trace!("GC sent Arena {:?}", *next);
                     None
                 }
                 _ => None,
             }));
 
-            if !has_new {
+            if !has_gc_msg {
+                log::trace!("Adding Msg::GC to bus");
                 bus.iter_mut().filter(|m| m.is_slot()).next().map(|slot| {
-                    let next = gc_arenas
+                    let next = arenas
+                        .partial
                         .pop_first()
                         .map(|p| p as *mut _)
                         .or(free.pop().map(|header| {
@@ -427,7 +453,9 @@ impl TypeState {
                     }
                 });
             };
+
             log::trace!("\n\n GC sent:\n {:?}\n\n", bus);
+            drop(bus);
         });
 
         // trace grey, updating refs
@@ -575,10 +603,7 @@ impl TypeRelations {
                 type_info,
                 handler: None,
                 buses: HashMap::new(),
-                worker_arenas: HashMap::new(),
-                gc_arenas: BTreeSet::new(),
-                gc_arenas_full: HashSet::new(),
-                condemned_arenas: HashSet::new(),
+                arenas: Arenas::default(),
                 pending_known_transitive_grey: 0,
                 pending_known_grey: 0,
                 pending: HashMap::new(),
@@ -685,7 +710,7 @@ fn gc_loop() {
                 gc_in_progress = true;
             };
 
-            arena_count += ts.gc_arenas_full.len();
+            arena_count += ts.arenas.full.len();
         });
 
         stack_cleared.drain().for_each(|ti| {
@@ -694,7 +719,7 @@ fn gc_loop() {
                 ts.waiting_on_transitive_parents -= 1;
                 if ts.waiting_on_transitive_parents == 0 {
                     // Free memory
-                    ts.condemned_arenas.drain().into_iter().for_each(|next| {
+                    ts.arenas.condemned.drain().into_iter().for_each(|next| {
                         let header = HeaderUnTyped::from(next) as *mut HeaderUnTyped;
                         if cti.needs_drop {
                             let GcTypeInfo {
@@ -756,9 +781,9 @@ fn gc_loop() {
                                     let ts = active.get_mut(&ti).unwrap();
                                     // Add arenas left in Handler to the pool;
                                     if next as usize % ARENA_SIZE == 0 {
-                                        ts.gc_arenas_full.insert(next as *mut HeaderUnTyped);
+                                        ts.arenas.full.insert(next as *mut HeaderUnTyped);
                                     } else {
-                                        ts.gc_arenas.insert(next);
+                                        ts.arenas.partial.insert(next);
                                     }
                                 })
                         },
@@ -799,43 +824,55 @@ fn gc_loop() {
                 let mut dgt = HashMap::with_capacity(20);
                 direct_gc_types(&mut dgt, 0);
                 let condemned_children: Vec<_> = dgt.into_iter().map(|(i, _)| i).collect();
+                info!("Condemned children: {:?}", condemned_children);
 
                 ts.set_invariant(inv, condemned_children, &mut free);
 
                 // Mark all the GC's arenas as condemned.
-                ts.gc_arenas_full.iter().for_each(|header| {
+                ts.arenas.full.iter().for_each(|header| {
                     let header = unsafe { &mut **header };
                     header.condemned = true;
                 });
 
-                debug_assert_eq!(ts.condemned_arenas.len(), 0);
+                debug_assert_eq!(ts.arenas.condemned.len(), 0);
                 unsafe {
                     ptr::swap(
-                        &mut ts.gc_arenas_full as *mut HashSet<*mut HeaderUnTyped>
+                        &mut ts.arenas.full as *mut HashSet<*mut HeaderUnTyped>
                             as *mut HashSet<*mut u8>,
-                        &mut ts.condemned_arenas,
+                        &mut ts.arenas.condemned,
                     )
                 }
 
-                ts.gc_arenas.iter().cloned().for_each(|next| {
+                let TypeState {
+                    arenas:
+                        Arenas {
+                            ref mut condemned,
+                            partial,
+                            ..
+                        },
+                    ..
+                } = ts;
+                partial.iter().cloned().for_each(|next| {
                     let header = unsafe { &mut *(HeaderUnTyped::from(next) as *mut HeaderUnTyped) };
                     header.condemned = true;
+                    condemned.insert(next);
                 });
 
-                ts.gc_arenas = BTreeSet::new();
+                ts.arenas.partial = BTreeSet::new();
+
+                info!("Condemed {} Arenas", condemned.len());
             });
 
             active.iter_mut().for_each(
                 |(
                     ti,
                     TypeState {
-                        worker_arenas,
-                        handler,
-                        ..
+                        arenas, handler, ..
                     },
                 )| {
                     if let Some(hm) = handler {
-                        worker_arenas
+                        arenas
+                            .worker
                             .iter()
                             .for_each(|(_, next)| hm.root(*next as *mut u8, ti.align, ti.size));
 
@@ -853,7 +890,7 @@ fn gc_loop() {
                 let ts = active.get_mut(&ti).unwrap();
                 let hm = ts.handler.as_mut().unwrap();
 
-                ts.gc_arenas_full.extend(
+                ts.arenas.full.extend(
                     nexts
                         .iter()
                         .cloned()
