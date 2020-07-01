@@ -1,10 +1,5 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use sundial_gc::gc::Gc;
-use sundial_gc::{
-    arena::Arena,
-    collections::HashMap,
-    mark::{Condemned, Mark},
-};
+use sundial_gc::{collections::HashMap, *};
 
 fn new_arenas() {
     let _arena_hm = Arena::<HashMap<usize, usize>>::new();
