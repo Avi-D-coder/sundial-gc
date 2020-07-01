@@ -122,6 +122,7 @@ impl Default for Parents {
     }
 }
 
+#[derive(Debug)]
 struct HandlerManager {
     handlers: Handlers,
     eff_types: EffTypes,
@@ -137,21 +138,23 @@ impl HandlerManager {
     fn root(&mut self, next: *mut u8, align: u16, size: u16) {
         let HandlerManager {
             handlers,
-            invariant,
+            invariant:
+                Invariant {
+                    white_start,
+                    white_end,
+                    grey_feilds,
+                    ..
+                },
             evacuate_fn,
             ..
         } = self;
-        let Invariant {
-            white_start,
-            white_end,
-            grey_feilds,
-            ..
-        } = invariant;
 
-        let mut ptr =
-            HeaderUnTyped::from(next) as usize + HeaderUnTyped::high_offset(align, size) as usize;
+        let header = HeaderUnTyped::from(next) as usize;
+        let low = header + HeaderUnTyped::low_offset(align) as usize;
+        let last = max(low, size as usize + next as usize);
+        let mut ptr = header + HeaderUnTyped::high_offset(align, size) as usize;
 
-        while ptr != next as usize {
+        while ptr >= last {
             let t = unsafe { &*(ptr as *const u8) };
             evacuate_fn(t, 0, *grey_feilds, *white_start..*white_end, handlers);
             ptr -= size as usize;
@@ -168,6 +171,12 @@ impl HandlerManager {
             last_nexts,
             ..
         } = self;
+
+        if handlers.nexts != *last_nexts {
+            log::trace!("last_nexts: {:?}", last_nexts);
+            log::trace!("this_nexts: {:?}", handlers.nexts);
+        };
+
         let mut unclean: SmallVec<[(&GcTypeInfo, SmallVec<[*mut u8; 4]>); 4]> =
             eff_types.iter().map(|ti| (ti, SmallVec::new())).collect();
 
@@ -191,7 +200,11 @@ impl HandlerManager {
             .filter_map(|(n, o)| if n.1 == o { None } else { Some(n) })
             .for_each(|(i, next)| unclean[i].1.push(*next));
 
-        unclean
+        *last_nexts = handlers.nexts.clone();
+        log::trace!("Cleaned handlers: {:?}", handlers);
+        log::trace!("Cleaned unclean: {:?}", unclean);
+
+        unclean.into_iter().filter(|(_, v)| !v.is_empty()).collect()
     }
 
     fn new_arenas(
@@ -630,6 +643,7 @@ fn gc_loop() {
     let bus = unsafe { &*bus };
 
     loop {
+        log::trace!("GC loop");
         // Take a snapshot of the thread type reg bus
         let reg_msgs = {
             let mut bus = bus.lock().unwrap();
@@ -856,24 +870,28 @@ fn gc_loop() {
             let mut unclean = new_arenas;
             new_arenas = HashMap::new();
             unclean.drain().into_iter().for_each(|(ti, nexts)| {
-                let ts = active.get_mut(&ti).unwrap();
-                let hm = ts.handler.as_mut().unwrap();
+                if ti.gc_count != 0 {
+                    let ts = active.get_mut(&ti).unwrap();
+                    let hm = ts.handler.as_mut().unwrap();
 
-                ts.arenas.full.extend(
+                    ts.arenas.full.extend(
+                        nexts
+                            .iter()
+                            .cloned()
+                            // Only add Headers
+                            // nexts are still owned by Handlers
+                            .filter(|ptr| *ptr as usize % ARENA_SIZE == 0)
+                            .map(|header| header as *mut HeaderUnTyped),
+                    );
+
+                    log::trace!("rooting nexts");
                     nexts
-                        .iter()
-                        .cloned()
-                        // Only add Headers
-                        // nexts are still owned by Handlers
-                        .filter(|ptr| *ptr as usize % ARENA_SIZE == 0)
-                        .map(|header| header as *mut HeaderUnTyped),
-                );
+                        .into_iter()
+                        .for_each(|next| hm.root(next as *mut u8, ti.align, ti.size));
 
-                nexts
-                    .into_iter()
-                    .for_each(|next| hm.root(next as *mut u8, ti.align, ti.size));
-
-                hm.new_arenas(ti.align, &mut new_arenas);
+                    log::trace!("new_arenas: {:?}", new_arenas);
+                    hm.new_arenas(ti.align, &mut new_arenas);
+                }
             });
         }
 

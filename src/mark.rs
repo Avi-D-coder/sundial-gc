@@ -22,6 +22,7 @@ pub unsafe trait Mark<'o, 'n, 'r: 'n, O: 'o, N: 'r> {
 
 pub type Offset = u8;
 
+#[derive(Debug)]
 pub(crate) struct Translator {
     offsets: SmallVec<[Offset; 16]>,
 }
@@ -65,6 +66,7 @@ impl Index<Offset> for Translator {
 }
 
 /// Currently just holds Arenas
+#[derive(Debug)]
 pub struct Handlers {
     // TODO benchmark sizes
     pub(crate) translator: Translator,
@@ -146,6 +148,7 @@ pub struct GcTypeInfo {
     pub(crate) needs_drop: bool,
     pub(crate) size: u16,
     pub(crate) align: u16,
+    pub(crate) gc_count: u8,
 }
 
 impl GcTypeInfo {
@@ -159,6 +162,7 @@ impl GcTypeInfo {
             needs_drop: mem::needs_drop::<T>(),
             size: mem::size_of::<T>() as u16,
             align: mem::align_of::<T>() as u16,
+            gc_count: T::GC_COUNT,
         }
     }
 
