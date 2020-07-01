@@ -2,7 +2,7 @@ use crate::{
     arena::Arena,
     auto_traits::Immutable,
     gc::Gc,
-    mark::{Condemned, GcTypeInfo, Handlers, Tti, TypeRow},
+    mark::{Condemned, GcTypeInfo, Handlers, Tti, TypeRow, Translator},
 };
 use rustc_hash::FxHasher;
 use std::hash::{Hash, Hasher};
@@ -230,7 +230,7 @@ unsafe impl<'r, K: Condemned + 'r, V: Condemned> Condemned for HashMap<'r, K, V>
                 bloom |= Condemned::feilds(&kv, offset, grey_feilds, condemned.clone())
             } else if sub_map {
                 let hm: Gc<HashMap<K, V>> = unsafe { mem::transmute(x.arr[i]) };
-                bloom |= Condemned::feilds(&hm, offset, grey_feilds, condemned.clone())
+                bloom |= Condemned::feilds(&hm, offset + 1, grey_feilds, condemned.clone())
             };
         }
         bloom
@@ -253,14 +253,14 @@ unsafe impl<'r, K: Condemned + 'r, V: Condemned> Condemned for HashMap<'r, K, V>
                 Condemned::evacuate(&kv, offset, grey_feilds, condemned.clone(), handlers);
             } else if sub_map {
                 let hm: Gc<HashMap<K, V>> = mem::transmute(x.arr[i]);
-                Condemned::evacuate(&hm, offset, grey_feilds, condemned.clone(), handlers);
+                Condemned::evacuate(&hm, offset + 1, grey_feilds, condemned.clone(), handlers);
             };
         }
     }
 
     default fn direct_gc_types(t: &mut std::collections::HashMap<GcTypeInfo, TypeRow>, offset: u8) {
-        Gc::<HashMap<K, V>>::direct_gc_types(t, offset);
         Gc::<(K, V)>::direct_gc_types(t, offset);
+        Gc::<HashMap<K, V>>::direct_gc_types(t, offset + 1);
     }
 
     default fn transitive_gc_types(tti: *mut Tti) {
@@ -268,12 +268,36 @@ unsafe impl<'r, K: Condemned + 'r, V: Condemned> Condemned for HashMap<'r, K, V>
         Gc::<(K, V)>::transitive_gc_types(tti);
     }
 
+    /// 2
     default const GC_COUNT: u8 = Gc::<(K, V)>::GC_COUNT + Gc::<HashMap<K, V>>::GC_COUNT;
     default const PRE_CONDTION: bool = if K::PRE_CONDTION && V::PRE_CONDTION {
         true
     } else {
         panic!("You need to derive Condemned for your type. Required due to a direct Gc<T>");
     };
+}
+
+#[test]
+fn direct_gc_types_hamt_test() {
+    let mut dgt = std::collections::HashMap::with_capacity(20);
+    HashMap::<usize, usize>::direct_gc_types(&mut dgt, 0);
+    let tys: Vec<_> = dgt.into_iter().map(|(i, _)| i).collect();
+    assert_eq!(tys.len(), 2)
+}
+
+#[test]
+fn gc_count_hamt_test() {
+    assert_eq!(2, HashMap::<usize, usize>::GC_COUNT);
+    assert_eq!(2, HashMap::<usize, Gc<(usize, usize)>>::GC_COUNT);
+}
+
+#[test]
+fn translator_hamt_test() {
+    let mut dgt = std::collections::HashMap::with_capacity(20);
+    HashMap::<usize, usize>::direct_gc_types(&mut dgt, 0);
+    let t = Translator::from::<HashMap<usize, usize>>(&dgt.into_iter().map(|(ti, _)| ti).collect());
+    assert_ne!(t.0[0], 255);
+    assert_ne!(t.0[1], 255);
 }
 
 // /// TODO A HAMT, specialized to untagged ptrs.
