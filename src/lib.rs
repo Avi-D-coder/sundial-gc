@@ -15,6 +15,7 @@
 #![feature(bindings_after_at)]
 #![feature(map_first_last)]
 #![feature(backtrace)]
+#![feature(arbitrary_self_types)]
 
 pub mod arena;
 pub use arena::Arena;

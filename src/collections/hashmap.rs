@@ -1,8 +1,8 @@
 use crate::{
     arena::Arena,
     auto_traits::Immutable,
-    gc::Gc,
-    mark::{Condemned, GcTypeInfo, Handlers, Tti, TypeRow, Translator},
+    gc::{self, Gc},
+    mark::{Condemned, GcTypeInfo, Handlers, Translator, Tti, TypeRow},
 };
 use rustc_hash::FxHasher;
 use std::hash::{Hash, Hasher};
@@ -86,12 +86,12 @@ impl<'r, K: Hash + Eq + Clone + Condemned, V: Clone + Condemned> HashMap<'r, K, 
         }
     }
 
-    pub fn set(
-        &'r self,
+    pub fn set<'a, 'b>(
+        self: Gc<'r, HashMap<'r, K, V>>,
         key: K,
         value: V,
-        arena_kv: &Arena<(K, V)>,
-        arena_hm: &Arena<Self>,
+        arena_kv: &'a Arena<(K, V)>,
+        arena_hm: &'b Arena<Self>,
     ) -> Gc<'r, HashMap<'r, K, V>> {
         let mut hasher = FxHasher::default();
         key.hash(&mut hasher);
@@ -101,16 +101,16 @@ impl<'r, K: Hash + Eq + Clone + Condemned, V: Clone + Condemned> HashMap<'r, K, 
     }
 
     #[inline(always)]
-    pub unsafe fn set_hashed(
-        &'r self,
+    pub unsafe fn set_hashed<'a, 'b>(
+        self: Gc<'r, HashMap<'r, K, V>>,
         key: K,
         hash: u64,
         on_bit: u8,
         value: V,
-        arena_kv: &Arena<(K, V)>,
-        arena_hm: &Arena<Self>,
+        arena_kv: &'a Arena<(K, V)>,
+        arena_hm: &'b Arena<Self>,
     ) -> Gc<'r, HashMap<'r, K, V>> {
-        let mut spine = arena_hm.box_copy(self);
+        let mut spine = arena_hm.box_copy(&*self);
 
         // FIXME  32 bit systems
         // FIXME  Big endian bit systems
@@ -161,7 +161,7 @@ impl<'r, K: Hash + Eq + Clone + Condemned, V: Clone + Condemned> HashMap<'r, K, 
             }
         } else {
             // Slot is a child HashMap
-            let child: &'r Self = mem::transmute(self.arr[slot as usize]);
+            let child: Gc<'r, HashMap<'r, K, V>> = mem::transmute(self.arr[slot as usize]);
             child.set_hashed(key, hash >> 4, on_bit + 4, value, arena_kv, arena_hm)
         }
     }
@@ -212,6 +212,16 @@ impl<'r, K: Hash + Eq + Clone + Condemned, V: Clone + Condemned> HashMap<'r, K, 
             self.arr[slot2 as usize] = kv2.0 as *const (K, V) as *const ();
         }
     }
+}
+
+#[test]
+fn hamt_get_set_test() {
+    let arena_hm = &Arena::<HashMap<usize, usize>>::new();
+    let arena_kv = &Arena::<(usize, usize)>::new();
+
+    let empty = arena_hm.gc_alloc(HashMap::default());
+    let one = empty.set(1, 1, arena_kv, arena_hm);
+    assert_eq!(*one.get(&1).unwrap(), 1);
 }
 
 // There is no way to derive Condemed since HashMap uses unsafe casts

@@ -1,9 +1,10 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use sundial_gc::{collections::HashMap, *};
 
-fn new_arenas() {
-    let _arena_hm = Arena::<HashMap<usize, usize>>::new();
-    let _arena_kv = Arena::<(usize, usize)>::new();
+fn new_arenas() -> (u16, u16) {
+    let arena_hm = Arena::<HashMap<usize, usize>>::new();
+    let arena_kv = Arena::<(usize, usize)>::new();
+    (arena_hm.capacity(), arena_kv.capacity())
 }
 
 fn gc_alloc_empty_hamt() {
@@ -23,7 +24,8 @@ fn gc_clone_empty_hamt() {
 
 fn hamt_benchmark(c: &mut Criterion) {
     let _ = env_logger::builder().is_test(true).try_init();
-    c.bench_function("new_arenas", |b| b.iter(|| new_arenas()));
+    // FIXME new_arenas is getting optimized out.
+    c.bench_function("new_arenas", |b| b.iter(|| {black_box(new_arenas())}));
     c.bench_function("gc_alloc_empty_hamt", |b| b.iter(|| gc_alloc_empty_hamt()));
     c.bench_function("gc_copy_empty_hamt", |b| b.iter(|| gc_copy_empty_hamt()));
     c.bench_function("gc_clone_empty_hamt", |b| b.iter(|| gc_clone_empty_hamt()));
