@@ -4,6 +4,7 @@ use crate::{
     gc_logic::{GcThreadBus, Invariant},
     mark::{Condemned, GcTypeInfo, Mark},
 };
+use smallvec::SmallVec;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::any::type_name;
 use std::cell::UnsafeCell;
@@ -31,6 +32,8 @@ pub struct Arena<T: Condemned + Immutable> {
     pub grey_feilds: UnsafeCell<u8>,
     pub white_region: Range<usize>,
     pub next: UnsafeCell<*mut T>,
+    /// (next, new_allocation, grey_fields)
+    full: UnsafeCell<SmallVec<[(*mut T, bool, u8); 2]>>,
 }
 
 impl<T: Immutable + Condemned> Arena<T> {
@@ -169,13 +172,8 @@ unsafe impl<'o, 'n, 'r: 'n, O: Immutable + 'o, N: Immutable + 'r> Mark<'o, 'n, '
             let next_slot = self.next.get();
             let next = unsafe { *next_slot };
             if Self::full_ptr(next) {
-                // TODO
-                panic!("Allocating additional memory for an arena not yet supported");
-            };
-
-            if Self::full_ptr(next) {
-                // TODO
-                panic!("Allocating additional memory for an arena not yet supported");
+                log::info!("Growing an Arena. This is slow!");
+                self.new_block()
             };
 
             unsafe {
@@ -203,47 +201,89 @@ unsafe impl<'o, 'n, 'r: 'n, O: Immutable + 'o, N: Immutable + 'r> Mark<'o, 'n, '
 impl<T: Immutable + Condemned> Drop for Arena<T> {
     fn drop(&mut self) {
         GC_BUS.with(|tm| {
+            let Range {
+                start: white_start,
+                end: white_end,
+            } = self.white_region.clone();
+            let next = unsafe { *self.next.get() } as *const u8;
+            let full = unsafe { &*self.full.get() };
+            let grey_feilds = unsafe { *self.grey_feilds.get() };
             let tm = unsafe { &mut *tm.get() };
             tm.entry(key::<T>()).and_modify(|bus| {
-                let next = unsafe { *self.next.get() } as *const u8;
                 let capacity = self.capacity();
 
-                let release_to_gc = if capacity != 0
-                    && capacity
-                        > bus
-                            .cached_next
-                            .map(|cn| Self::capacity_ptr(cn as *const T))
-                            .unwrap_or(0)
-                {
-                    // FIXME leaking cached_next
-                    bus.cached_next = Some(next as *mut _);
-                    false
-                } else {
+                // A good candidate for https://github.com/rust-lang/rust/issues/53667
+                let release_to_gc = if capacity == 0 {
                     true
-                };
+                } else {
+                    if let Some(cached_next) = bus.cached_next {
+                        if capacity > Self::capacity_ptr(cached_next as *const T) {
+                            send(
+                                &bus.bus,
+                                Msg::End {
+                                    next: cached_next,
+                                    release_to_gc: true,
+                                    new_allocation: false,
+                                    grey_feilds,
+                                    white_start,
+                                    white_end,
+                                },
+                            );
 
+                            debug_assert!(!self.full());
+                            bus.cached_next = Some(next as *mut _);
+                            false
+                        } else {
+                            true
+                        }
+                    } else {
+                        debug_assert!(!self.full());
+                        bus.cached_next = Some(next as *mut _);
+                        false
+                    }
+                };
+                
                 let end = Msg::End {
                     release_to_gc,
                     new_allocation: self.new_allocation,
                     next,
                     grey_feilds: unsafe { *self.grey_feilds.get() },
-                    white_start: self.white_region.start,
-                    white_end: self.white_region.end,
+                    white_start,
+                    white_end,
                 };
 
-                let mut msgs = bus
-                    .bus
-                    .lock()
-                    .expect("Could not unlock bus while dropping Arena");
-                let msg = &mut msgs[self.bus_idx as usize];
+                // locked bus
+                {
+                    let mut msgs = bus
+                        .bus
+                        .lock()
+                        .expect("Could not unlock bus while dropping Arena");
+                    let msg = &mut msgs[self.bus_idx as usize];
 
-                match msg {
-                    Msg::Slot | Msg::Start { .. } => *msg = end,
-                    _ => {
-                        drop(msgs);
-                        send(&bus.bus, end);
-                    }
-                };
+                    match msg {
+                        Msg::Slot | Msg::Start { .. } => *msg = end,
+                        _ => {
+                            drop(msgs);
+                            send(&bus.bus, end);
+                        }
+                    };
+                }
+
+                full.into_iter()
+                    .cloned()
+                    .for_each(|(next, new_allocation, grey_feilds)| {
+                        send(
+                            &bus.bus,
+                            Msg::End {
+                                release_to_gc: true,
+                                new_allocation,
+                                next: next as *mut u8,
+                                grey_feilds,
+                                white_start,
+                                white_end,
+                            },
+                        );
+                    });
             });
         });
     }
@@ -363,6 +403,18 @@ impl<T: Immutable + Condemned> Arena<T> {
             grey_self,
             grey_feilds: UnsafeCell::new(grey_feilds),
             white_region: white_start..white_end,
+            full: UnsafeCell::new(SmallVec::new()),
+        }
+    }
+
+    fn new_block(&self) {
+        unsafe {
+            self.full.get().as_mut().unwrap().push((
+                *self.next.get(),
+                self.new_allocation,
+                *self.grey_feilds.get(),
+            ));
+            *self.next.get() = Self::alloc();
         }
     }
 
@@ -371,8 +423,8 @@ impl<T: Immutable + Condemned> Arena<T> {
     pub fn gc_alloc<'a, 'r: 'a>(&'a self, t: T) -> Gc<'r, T> {
         unsafe {
             if self.full() {
-                log::error!("Growing Arenas not yet implemented");
-                panic!("Growing Arenas not yet implemented")
+                log::info!("Growing an Arena. This is slow!");
+                self.new_block()
             }
             let ptr = *self.next.get();
             *self.next.get() = self.bump_down() as *mut T;
@@ -384,8 +436,8 @@ impl<T: Immutable + Condemned> Arena<T> {
     pub fn box_alloc<'a, 'r: 'a>(&'a self, t: T) -> gc::Box<'r, T> {
         unsafe {
             if self.full() {
-                log::error!("Growing Arenas not yet implemented");
-                panic!("Growing Arenas not yet implemented")
+                log::info!("Growing an Arena. This is slow!");
+                self.new_block()
             }
             let ptr = *self.next.get();
             *self.next.get() = self.bump_down() as *mut T;
@@ -420,8 +472,8 @@ impl<T: Immutable + Condemned + Copy> Arena<T> {
     pub fn gc_copy<'a, 'r: 'a>(&'a self, t: &T) -> Gc<'r, T> {
         unsafe {
             if self.full() {
-                log::error!("Growing Arenas not yet implemented");
-                panic!("Growing Arenas not yet implemented")
+                log::info!("Growing an Arena. This is slow!");
+                self.new_block()
             }
             let ptr = *self.next.get();
             *self.next.get() = self.bump_down() as *mut T;
@@ -434,8 +486,8 @@ impl<T: Immutable + Condemned + Copy> Arena<T> {
     pub fn box_copy<'a, 'r: 'a>(&'a self, t: &T) -> gc::Box<'r, T> {
         unsafe {
             if self.full() {
-                log::error!("Growing Arenas not yet implemented");
-                panic!("Growing Arenas not yet implemented")
+                log::info!("Growing an Arena. This is slow!");
+                self.new_block()
             }
             let ptr = *self.next.get();
             *self.next.get() = self.bump_down() as *mut T;
@@ -476,8 +528,8 @@ impl<T: Immutable + Condemned + Clone> Arena<T> {
     pub fn gc_clone<'a, 'r: 'a>(&'a self, t: &T) -> Gc<'r, T> {
         unsafe {
             if self.full() {
-                log::error!("Growing Arenas not yet implemented");
-                panic!("Growing Arenas not yet implemented")
+                log::info!("Growing an Arena. This is slow!");
+                self.new_block()
             }
             let ptr = *self.next.get();
             *self.next.get() = self.bump_down() as *mut T;
@@ -489,8 +541,8 @@ impl<T: Immutable + Condemned + Clone> Arena<T> {
     pub fn box_clone<'a, 'r: 'a>(&'a self, t: &T) -> gc::Box<'r, T> {
         unsafe {
             if self.full() {
-                log::error!("Growing Arenas not yet implemented");
-                panic!("Growing Arenas not yet implemented")
+                log::info!("Growing an Arena. This is slow!");
+                self.new_block()
             }
             let ptr = *self.next.get();
             *self.next.get() = self.bump_down() as *mut T;
