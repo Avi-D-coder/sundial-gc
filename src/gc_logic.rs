@@ -15,7 +15,6 @@ use std::{
     alloc::{GlobalAlloc, Layout, System},
     cmp::max,
     mem,
-    ops::Range,
     process, ptr,
     time::Duration,
 };
@@ -88,25 +87,6 @@ pub(crate) enum RegMsg {
     Un(ThreadId, GcTypeInfo),
 }
 
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct Invariant {
-    pub(crate) white_start: usize,
-    pub(crate) white_end: usize,
-    pub(crate) grey_feilds: u8,
-    pub(crate) grey_self: bool,
-}
-
-impl Invariant {
-    pub(crate) const fn none() -> Self {
-        Self {
-            grey_self: false,
-            grey_feilds: 0b0000_0000,
-            white_start: 0,
-            white_end: 0,
-        }
-    }
-}
-
 #[derive(Clone)]
 struct Parents {
     direct: HashMap<GcTypeInfo, u8>,
@@ -127,7 +107,7 @@ struct HandlerManager {
     handlers: Handlers,
     eff_types: EffTypes,
     invariant: Invariant,
-    evacuate_fn: fn(*const u8, u8, u8, Range<usize>, *mut Handlers),
+    evacuate_fn: fn(*const u8, u8, u8, *const Invariant, *mut Handlers),
     /// A snapshot of nexts at last call to `unclean_children`.
     last_nexts: SmallVec<[*mut u8; 4]>,
 }
@@ -138,13 +118,7 @@ impl HandlerManager {
     fn root(&mut self, next: *mut u8, align: u16, size: u16) {
         let HandlerManager {
             handlers,
-            invariant:
-                Invariant {
-                    white_start,
-                    white_end,
-                    grey_feilds,
-                    ..
-                },
+            invariant,
             evacuate_fn,
             ..
         } = self;
@@ -156,7 +130,8 @@ impl HandlerManager {
 
         while ptr >= last {
             let t = unsafe { &*(ptr as *const u8) };
-            evacuate_fn(t, 0, *grey_feilds, *white_start..*white_end, handlers);
+            // TODO(mark_evac) There's redundancy in the signature of evacuate.
+            evacuate_fn(t, 0, invariant.grey_feilds, invariant, handlers);
             ptr -= size as usize;
         }
     }

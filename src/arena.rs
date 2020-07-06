@@ -1,8 +1,8 @@
 use crate::auto_traits::*;
 use crate::gc::{self, Gc};
 use crate::{
-    gc_logic::{GcThreadBus, Invariant},
-    mark::{Condemned, GcTypeInfo, Mark},
+    gc_logic::GcThreadBus,
+    mark::{Condemned, GcTypeInfo, Mark, Invariant},
 };
 use smallvec::SmallVec;
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -10,7 +10,6 @@ use std::any::type_name;
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::mem::{self, transmute};
-use std::ops::Range;
 use std::ptr;
 use std::sync::Mutex;
 use std::{
@@ -28,9 +27,9 @@ pub struct Arena<T: Condemned + Immutable> {
     /// Currently infallible
     bus_idx: u8,
     new_allocation: bool,
-    pub grey_self: bool,
-    pub grey_feilds: UnsafeCell<u8>,
-    pub white_region: Range<usize>,
+    invariant: Invariant,
+    marked_grey_fields: UnsafeCell<u8>,
+    // TODO pub(crate)
     pub next: UnsafeCell<*mut T>,
     /// (next, new_allocation, grey_fields)
     full: UnsafeCell<SmallVec<[(*mut T, bool, u8); 2]>>,
@@ -163,10 +162,14 @@ unsafe impl<'o, 'n, 'r: 'n, O: Immutable + 'o, N: Immutable + 'r> Mark<'o, 'n, '
         };
 
         let old_ptr = old.0 as *const O as *const N;
-        let condemned_self = self.grey_self && self.white_region.contains(&(old_ptr as usize));
+        let condemned_self =
+            self.invariant.grey_self && self.invariant.condemned(old.0 as *const O as *const _);
 
-        let grey_feilds = unsafe { &mut *self.grey_feilds.get() };
-        let cf = Condemned::feilds(old.0, 0, *grey_feilds, self.white_region.clone());
+        let grey_feilds = unsafe { &mut *self.marked_grey_fields.get() };
+        let cf = Condemned::feilds(old.0, 0, *grey_feilds, &self.invariant);
+
+        // Worker encountered fields marked in cf.
+        unsafe { *self.marked_grey_fields.get() |= cf }
 
         if condemned_self || (0b0000_0000 != cf) {
             let next_slot = self.next.get();
@@ -201,13 +204,9 @@ unsafe impl<'o, 'n, 'r: 'n, O: Immutable + 'o, N: Immutable + 'r> Mark<'o, 'n, '
 impl<T: Immutable + Condemned> Drop for Arena<T> {
     fn drop(&mut self) {
         GC_BUS.with(|tm| {
-            let Range {
-                start: white_start,
-                end: white_end,
-            } = self.white_region.clone();
             let next = unsafe { *self.next.get() } as *const u8;
             let full = unsafe { &*self.full.get() };
-            let grey_feilds = unsafe { *self.grey_feilds.get() };
+            let grey_feilds = unsafe { *self.marked_grey_fields.get() };
             let tm = unsafe { &mut *tm.get() };
             tm.entry(key::<T>()).and_modify(|bus| {
                 let capacity = self.capacity();
@@ -225,8 +224,8 @@ impl<T: Immutable + Condemned> Drop for Arena<T> {
                                     release_to_gc: true,
                                     new_allocation: false,
                                     grey_feilds,
-                                    white_start,
-                                    white_end,
+                                    white_start: self.invariant.white_start,
+                                    white_end: self.invariant.white_end,
                                 },
                             );
 
@@ -242,14 +241,14 @@ impl<T: Immutable + Condemned> Drop for Arena<T> {
                         false
                     }
                 };
-                
+
                 let end = Msg::End {
                     release_to_gc,
                     new_allocation: self.new_allocation,
                     next,
-                    grey_feilds: unsafe { *self.grey_feilds.get() },
-                    white_start,
-                    white_end,
+                    grey_feilds: unsafe { *self.marked_grey_fields.get() },
+                    white_start: self.invariant.white_start,
+                    white_end: self.invariant.white_end,
                 };
 
                 // locked bus
@@ -279,8 +278,8 @@ impl<T: Immutable + Condemned> Drop for Arena<T> {
                                 new_allocation,
                                 next: next as *mut u8,
                                 grey_feilds,
-                                white_start,
-                                white_end,
+                                white_start: self.invariant.white_start,
+                                white_end: self.invariant.white_end,
                             },
                         );
                     });
@@ -296,7 +295,7 @@ unsafe impl<'o, 'n, 'r: 'n, O: NoGc + Immutable + 'o, N: NoGc + Immutable + 'r>
     default fn mark(&'n self, o: Gc<'o, O>) -> Gc<'r, N> {
         // TODO make const https://github.com/rust-lang/rfcs/pull/2632
         assert_eq!(type_name::<O>(), type_name::<N>());
-        if self.grey_self && self.white_region.contains(&(&*o as *const _ as usize)) {
+        if self.invariant.grey_self && self.invariant.condemned(o.0) {
             let next = self.next.get();
             unsafe { ptr::copy(transmute(o), *next, 1) };
             let mut new_gc = next as *const N;
@@ -390,19 +389,12 @@ impl<T: Immutable + Condemned> Arena<T> {
             },
         );
 
-        let Invariant {
-            grey_self,
-            grey_feilds,
-            white_start,
-            white_end,
-        } = bus.known_invariant;
         Arena {
             bus_idx: slot as u8,
             new_allocation,
+            invariant: bus.known_invariant,
             next: UnsafeCell::new(next),
-            grey_self,
-            grey_feilds: UnsafeCell::new(grey_feilds),
-            white_region: white_start..white_end,
+            marked_grey_fields: UnsafeCell::new(0b0000_0000),
             full: UnsafeCell::new(SmallVec::new()),
         }
     }
@@ -412,7 +404,7 @@ impl<T: Immutable + Condemned> Arena<T> {
             self.full.get().as_mut().unwrap().push((
                 *self.next.get(),
                 self.new_allocation,
-                *self.grey_feilds.get(),
+                *self.marked_grey_fields.get(),
             ));
             *self.next.get() = Self::alloc();
         }

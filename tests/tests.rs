@@ -71,10 +71,10 @@ unsafe impl<'r, T: Immutable + Condemned + 'r> Condemned for List<'r, T> {
 }
 
 unsafe impl<'r, T: Immutable + NoGc + 'r> Condemned for List<'r, T> {
-    fn feilds(x: &Self, offset: u8, grey_feilds: u8, condemned: Range<usize>) -> u8 {
+    fn feilds(x: &Self, offset: u8, grey_feilds: u8, invariant: &Invariant) -> u8 {
         assert!(Self::PRE_CONDTION);
         let mut bloom = 0b0000000;
-        bloom |= Condemned::feilds(&x.next, offset, grey_feilds, condemned);
+        bloom |= Condemned::feilds(&x.next, offset, grey_feilds, invariant);
         bloom
     }
 
@@ -118,10 +118,10 @@ fn churn_list() {
 }
 
 unsafe impl<'r> Condemned for Foo<'r> {
-    fn feilds(s: &Self, offset: u8, grey_feilds: u8, condemned: Range<usize>) -> u8 {
+    fn feilds(s: &Self, offset: u8, grey_feilds: u8, invariant: &Invariant) -> u8 {
         assert!(Self::PRE_CONDTION);
         let mut bloom = 0b0000000;
-        bloom |= Condemned::feilds(&s._bar, offset, grey_feilds, condemned);
+        bloom |= Condemned::feilds(&s._bar, offset, grey_feilds, invariant);
         bloom
     }
 

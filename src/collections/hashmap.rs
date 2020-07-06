@@ -1,13 +1,12 @@
 use crate::{
     arena::Arena,
-    auto_traits::Immutable,
-    gc::{self, Gc},
-    mark::{Condemned, GcTypeInfo, Handlers, Translator, Tti, TypeRow},
+    gc::Gc,
+    mark::*,
 };
 use rustc_hash::FxHasher;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
-use std::{mem, ops::Range, ptr};
+use std::{mem, ptr};
 
 /// TODO support other hashes, FxHash is not secure.
 
@@ -226,7 +225,7 @@ fn hamt_get_set_test() {
 
 // There is no way to derive Condemed since HashMap uses unsafe casts
 unsafe impl<'r, K: Condemned + 'r, V: Condemned> Condemned for HashMap<'r, K, V> {
-    default fn feilds(x: &Self, offset: u8, grey_feilds: u8, condemned: Range<usize>) -> u8 {
+    default fn feilds(x: &Self, offset: u8, grey_feilds: u8, invariant: &Invariant) -> u8 {
         assert!(Self::PRE_CONDTION);
         let mut bloom = 0b0000000;
 
@@ -237,10 +236,10 @@ unsafe impl<'r, K: Condemned + 'r, V: Condemned> Condemned for HashMap<'r, K, V>
 
             if has_val {
                 let kv: Gc<(K, V)> = unsafe { mem::transmute(x.arr[i]) };
-                bloom |= Condemned::feilds(&kv, offset, grey_feilds, condemned.clone())
+                bloom |= Condemned::feilds(&kv, offset, grey_feilds, invariant)
             } else if sub_map {
                 let hm: Gc<HashMap<K, V>> = unsafe { mem::transmute(x.arr[i]) };
-                bloom |= Condemned::feilds(&hm, offset + 1, grey_feilds, condemned.clone())
+                bloom |= Condemned::feilds(&hm, offset + 1, grey_feilds, invariant)
             };
         }
         bloom
@@ -250,7 +249,7 @@ unsafe impl<'r, K: Condemned + 'r, V: Condemned> Condemned for HashMap<'r, K, V>
         x: &Self,
         offset: u8,
         grey_feilds: u8,
-        condemned: Range<usize>,
+        invariant: &Invariant,
         handlers: &mut Handlers,
     ) {
         for i in 0..16 {
@@ -260,10 +259,10 @@ unsafe impl<'r, K: Condemned + 'r, V: Condemned> Condemned for HashMap<'r, K, V>
 
             if has_val {
                 let kv: Gc<(K, V)> = mem::transmute(x.arr[i]);
-                Condemned::evacuate(&kv, offset, grey_feilds, condemned.clone(), handlers);
+                Condemned::evacuate(&kv, offset, grey_feilds, invariant, handlers);
             } else if sub_map {
                 let hm: Gc<HashMap<K, V>> = mem::transmute(x.arr[i]);
-                Condemned::evacuate(&hm, offset + 1, grey_feilds, condemned.clone(), handlers);
+                Condemned::evacuate(&hm, offset + 1, grey_feilds, invariant, handlers);
             };
         }
     }
@@ -305,7 +304,9 @@ fn gc_count_hamt_test() {
 fn translator_hamt_test() {
     let mut dgt = std::collections::HashMap::with_capacity(20);
     HashMap::<usize, usize>::direct_gc_types(&mut dgt, 0);
-    let t = Translator::from::<HashMap<usize, usize>>(&dgt.into_iter().map(|(ti, _)| ti).collect());
+    let t = crate::mark::Translator::from::<HashMap<usize, usize>>(
+        &dgt.into_iter().map(|(ti, _)| ti).collect(),
+    );
     assert_ne!(t.0[0], 255);
     assert_ne!(t.0[1], 255);
 }

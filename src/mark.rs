@@ -2,9 +2,10 @@ use super::gc::*;
 use crate::{
     arena::{Arena, Header, HeaderUnTyped},
     auto_traits::{HasGc, Immutable},
+    gc_logic::Invariant,
 };
 use smallvec::SmallVec;
-use std::ops::{Index, Range};
+use std::ops::Index;
 use std::{
     collections::{HashMap, HashSet},
     iter, mem, ptr,
@@ -134,7 +135,7 @@ pub type TypeRow = (SmallVec<[u8; 8]>, u8);
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GcTypeInfo {
-    /// `fn(*const u8, u8, u8, Range<usize>, *mut Handlers)`
+    /// `fn(*const u8, u8, u8, *Invariant, *mut Handlers)`
     evacuate_fn: *const (),
     /// `fn(*mut Tti)`
     transitive_gc_types_fn: *const (),
@@ -168,8 +169,13 @@ impl GcTypeInfo {
 
     pub(crate) const unsafe fn evacuate_fn(
         &self,
-    ) -> fn(*const u8, offset: Offset, grey_feilds: u8, region: Range<usize>, handlers: *mut Handlers)
-    {
+    ) -> fn(
+        *const u8,
+        offset: Offset,
+        grey_feilds: u8,
+        invariant: *const Invariant,
+        handlers: *mut Handlers,
+    ) {
         mem::transmute(self.evacuate_fn)
     }
 
@@ -193,13 +199,38 @@ impl GcTypeInfo {
 unsafe impl Send for GcTypeInfo {}
 unsafe impl Sync for GcTypeInfo {}
 
+#[derive(Copy, Clone, Debug)]
+pub struct Invariant {
+    pub(crate) white_start: usize,
+    pub(crate) white_end: usize,
+    pub(crate) grey_feilds: u8,
+    pub(crate) grey_self: bool,
+}
+
+impl Invariant {
+    pub(crate) const fn none() -> Self {
+        Self {
+            grey_self: false,
+            grey_feilds: 0b0000_0000,
+            white_start: 0,
+            white_end: 0,
+        }
+    }
+
+    pub(crate) fn condemned<T>(&self, ptr: *const T) -> bool {
+        (self.white_start..self.white_end).contains(&(ptr as usize))
+            && unsafe { &*HeaderUnTyped::from(ptr as *const _) }.condemned
+    }
+}
+
+
 pub unsafe trait Condemned: Immutable {
-    fn feilds(s: &Self, offset: u8, grey_feilds: u8, region: Range<usize>) -> u8;
+    fn feilds(s: &Self, offset: u8, grey_feilds: u8, invariant: &Invariant) -> u8;
     unsafe fn evacuate<'e>(
         s: &Self,
         offset: Offset,
         grey_feilds: u8,
-        region: Range<usize>,
+        invariant: &Invariant,
         handlers: &mut Handlers,
     );
 
@@ -211,7 +242,7 @@ pub unsafe trait Condemned: Immutable {
 }
 
 unsafe impl<T: Immutable> Condemned for T {
-    default fn feilds(_: &Self, _: u8, _: u8, _: Range<usize>) -> u8 {
+    default fn feilds(_: &Self, _: u8, _: u8, _: &Invariant) -> u8 {
         // This check is superfluous
         // TODO ensure if gets optimized out
         if !T::HAS_GC {
@@ -223,7 +254,7 @@ unsafe impl<T: Immutable> Condemned for T {
 
     default fn direct_gc_types(_: &mut HashMap<GcTypeInfo, TypeRow>, _: u8) {}
 
-    default unsafe fn evacuate<'e>(_: &Self, _: u8, _: u8, _: Range<usize>, _: &mut Handlers) {}
+    default unsafe fn evacuate<'e>(_: &Self, _: u8, _: u8, _: &Invariant, _: &mut Handlers) {}
 
     default fn transitive_gc_types(_: *mut Tti) {}
 
@@ -238,13 +269,10 @@ unsafe impl<T: Immutable> Condemned for T {
 
 unsafe impl<'r, T: Immutable + Condemned> Condemned for Gc<'r, T> {
     /// Returns the bit associated with a condemned ptr
-    fn feilds(s: &Self, offset: u8, grey_feilds: u8, condemned: std::ops::Range<usize>) -> u8 {
+    fn feilds(s: &Self, offset: u8, grey_feilds: u8, invariant: &Invariant) -> u8 {
         let bit = 1 << (offset % 8);
         let ptr = s.0 as *const T;
-        if grey_feilds & bit == bit
-            && condemned.contains(&(ptr as usize))
-            && (unsafe { (&*Header::from(ptr)).intern.condemned })
-        {
+        if grey_feilds & bit == bit && invariant.condemned(s.0 as *const T as *const _) {
             bit
         } else {
             0b0000_0000
@@ -255,12 +283,12 @@ unsafe impl<'r, T: Immutable + Condemned> Condemned for Gc<'r, T> {
         sellf: &Self,
         offset: u8,
         _: u8,
-        region: std::ops::Range<usize>,
+        invariant: &Invariant,
         handlers: &mut Handlers,
     ) {
         let ptr = sellf.0 as *const T;
         let addr = ptr as usize;
-        if region.contains(&addr) {
+        if invariant.condemned(&addr) {
             let i = handlers.translator[offset];
             if let Some(next_slot) = handlers.nexts.get_mut(i as usize) {
                 let mut next = *next_slot as *mut T;
@@ -325,9 +353,9 @@ unsafe impl<'r, T: Immutable + Condemned> Condemned for Gc<'r, T> {
 // std impls
 
 unsafe impl<T: Immutable> Condemned for Option<T> {
-    default fn feilds(s: &Self, offset: u8, grey_feilds: u8, region: Range<usize>) -> u8 {
+    default fn feilds(s: &Self, offset: u8, grey_feilds: u8, invariant: &Invariant) -> u8 {
         match s {
-            Some(t) => Condemned::feilds(t, offset, grey_feilds, region),
+            Some(t) => Condemned::feilds(t, offset, grey_feilds, invariant),
             None => 0b0000_0000,
         }
     }
@@ -336,11 +364,11 @@ unsafe impl<T: Immutable> Condemned for Option<T> {
         s: &Self,
         offset: u8,
         grey_feilds: u8,
-        region: Range<usize>,
+        invariant: &Invariant,
         handlers: &mut Handlers,
     ) {
         match s {
-            Some(t) => Condemned::evacuate(t, offset, grey_feilds, region, handlers),
+            Some(t) => Condemned::evacuate(t, offset, grey_feilds, invariant, handlers),
             None => (),
         }
     }
@@ -362,14 +390,14 @@ unsafe impl<T: Immutable> Condemned for Option<T> {
 }
 
 unsafe impl<A: Immutable, B: Immutable> Condemned for (A, B) {
-    fn feilds((a, b): &Self, offset: u8, grey_feilds: u8, region: Range<usize>) -> u8 {
+    fn feilds((a, b): &Self, offset: u8, grey_feilds: u8, invariant: &Invariant) -> u8 {
         let mut r = 0b0000_0000;
         if (grey_feilds & 0b1000_0000) == 0b1000_0000 {
-            r |= Condemned::feilds(a, offset, grey_feilds, region.clone());
+            r |= Condemned::feilds(a, offset, grey_feilds, invariant);
         };
 
         if (grey_feilds & 0b0100_0000) == 0b0100_0000 {
-            r |= Condemned::feilds(b, offset + A::GC_COUNT, grey_feilds, region);
+            r |= Condemned::feilds(b, offset + A::GC_COUNT, grey_feilds, invariant);
         };
 
         r
@@ -379,18 +407,12 @@ unsafe impl<A: Immutable, B: Immutable> Condemned for (A, B) {
         (a, b): &Self,
         offset: u8,
         grey_feilds: u8,
-        region: Range<usize>,
+        invariant: &Invariant,
         handlers: &mut Handlers,
     ) {
-        Condemned::evacuate(a, offset, grey_feilds, region.clone(), handlers);
+        Condemned::evacuate(a, offset, grey_feilds, invariant, handlers);
 
-        Condemned::evacuate(
-            b,
-            offset + A::GC_COUNT,
-            grey_feilds,
-            region.clone(),
-            handlers,
-        );
+        Condemned::evacuate(b, offset + A::GC_COUNT, grey_feilds, invariant, handlers);
     }
 
     fn direct_gc_types(t: &mut HashMap<GcTypeInfo, TypeRow>, offset: u8) {
