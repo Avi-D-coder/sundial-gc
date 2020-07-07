@@ -25,7 +25,7 @@ fn gc_clone_empty_hamt() {
 fn hamt_benchmark(c: &mut Criterion) {
     let _ = env_logger::builder().is_test(true).try_init();
     // FIXME new_arenas is getting optimized out.
-    c.bench_function("new_arenas", |b| b.iter(|| {black_box(new_arenas())}));
+    c.bench_function("new_arenas", |b| b.iter(|| black_box(new_arenas())));
     c.bench_function("gc_alloc_empty_hamt", |b| b.iter(|| gc_alloc_empty_hamt()));
     c.bench_function("gc_copy_empty_hamt", |b| b.iter(|| gc_copy_empty_hamt()));
     c.bench_function("gc_clone_empty_hamt", |b| b.iter(|| gc_clone_empty_hamt()));

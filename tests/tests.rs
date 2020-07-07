@@ -10,15 +10,12 @@
 #![feature(const_mut_refs)]
 #![feature(trivial_bounds)]
 #![feature(associated_type_bounds)]
-#![feature(const_if_match)]
 #![feature(const_panic)]
 
 use sundial_gc::arena::*;
 use sundial_gc::auto_traits::*;
 use sundial_gc::gc::Gc;
 use sundial_gc::mark::*;
-
-use std::ops::Range;
 
 fn log_init() {
     let _ = env_logger::builder().is_test(true).try_init();
@@ -31,12 +28,12 @@ struct List<'r, T: 'r> {
 }
 
 unsafe impl<'r, T: Immutable + Condemned + 'r> Condemned for List<'r, T> {
-    default fn feilds(x: &Self, offset: u8, grey_feilds: u8, condemned: Range<usize>) -> u8 {
+    default fn feilds(x: &Self, offset: u8, grey_feilds: u8, invariant: &Invariant) -> u8 {
         assert!(Self::PRE_CONDTION);
         let mut bloom = 0b0000000;
-        bloom |= Condemned::feilds(&x.t, offset, grey_feilds, condemned.clone());
+        bloom |= Condemned::feilds(&x.t, offset, grey_feilds, invariant);
 
-        bloom |= Condemned::feilds(&x.next, offset + T::GC_COUNT, grey_feilds, condemned);
+        bloom |= Condemned::feilds(&x.next, offset + T::GC_COUNT, grey_feilds, invariant);
         bloom
     }
 
@@ -44,11 +41,11 @@ unsafe impl<'r, T: Immutable + Condemned + 'r> Condemned for List<'r, T> {
         s: &Self,
         offset: u8,
         grey_feilds: u8,
-        condemned: Range<usize>,
+        invariant: &Invariant,
         handlers: &mut Handlers,
     ) {
-        Condemned::evacuate(&s.t, offset, grey_feilds, condemned.clone(), handlers);
-        Condemned::evacuate(&s.next, offset, grey_feilds, condemned, handlers);
+        Condemned::evacuate(&s.t, offset, grey_feilds, invariant, handlers);
+        Condemned::evacuate(&s.next, offset, grey_feilds, invariant, handlers);
     }
 
     default fn direct_gc_types(t: &mut std::collections::HashMap<GcTypeInfo, TypeRow>, offset: u8) {
@@ -251,12 +248,14 @@ fn immutable_test() {
 
 #[test]
 fn binary_tree_test() {
+    #[allow(dead_code)]
     enum BinaryTree<'r, K, V> {
         Empty,
         Branch(Gc<'r, (K, Self, Self, V)>),
     }
 
     impl<'r, K: Ord, V> BinaryTree<'r, K, V> {
+        #[allow(dead_code)]
         fn get(&self, key: &K) -> Option<&V> {
             match self {
                 BinaryTree::Empty => None,
