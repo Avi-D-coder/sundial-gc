@@ -220,6 +220,7 @@ fn hamt_get_set_test() {
 
     let empty = arena_hm.gc_alloc(HashMap::default());
     let one = empty.set(1, 1, arena_kv, arena_hm);
+    // FIXME this paniced once. There's a use after free somewhere.
     assert_eq!(*one.get(&1).unwrap(), 1);
 }
 

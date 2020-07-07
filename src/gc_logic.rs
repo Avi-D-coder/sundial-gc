@@ -1,5 +1,5 @@
 use crate::arena::*;
-use crate::mark::*;
+use crate::{gc::RootIntern, mark::*};
 use log::info;
 use smallvec::SmallVec;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -8,15 +8,12 @@ use std::sync::{
     Mutex,
 };
 
-use std::io::Write;
 use std::panic;
 use std::thread::{self, ThreadId};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     cmp::max,
-    mem,
-    process, ptr,
-    time::Duration,
+    mem, process, ptr,
 };
 
 /// Used to register a thread's interest in a type.
@@ -446,11 +443,75 @@ impl TypeState {
         });
 
         // trace grey, updating refs
-        if let Some(handler) = handler {
+        if let Some(ref mut handler) = handler {
             // TODO bring back granular tracing using bits
             grey.iter().for_each(|(next, bits)| {
                 let GcTypeInfo { align, size, .. } = *type_info;
                 handler.root(*next as *mut u8, align, size)
+            });
+
+            let Arenas {
+                full,
+                partial,
+                condemned,
+                ..
+            } = &mut self.arenas;
+
+            condemned.iter().cloned().for_each(|next| {
+                let header = unsafe { &*HeaderUnTyped::from(next) };
+                let mut roots = header
+                    .roots
+                    .lock()
+                    .expect("Could not unlock roots, in TypeState::step");
+                roots.drain().into_iter().for_each(|(idx, root_ptr)| {
+                    let GcTypeInfo { align, size, .. } = *type_info;
+                    let high = header as *const _ as usize
+                        + HeaderUnTyped::high_offset(align, size) as usize;
+                    let gc = (high - ((idx as usize) * size as usize)) as *const u8;
+                    let HandlerManager {
+                        invariant,
+                        handlers,
+                        evacuate_fn,
+                        ..
+                    } = handler;
+                    evacuate_fn(gc, 1, invariant.grey_feilds, invariant, handlers);
+
+                    let root = unsafe { &mut *(root_ptr as *mut RootIntern<u8>) };
+                    if root.ref_count.load(Ordering::Relaxed) == 0 {
+                        unsafe { ptr::drop_in_place(root) }
+                    } else {
+                        let next = partial
+                            .pop_first()
+                            .map(|p| p as *mut _)
+                            .or(free.pop().map(|header| {
+                                HeaderUnTyped::init(header);
+                                (header as usize
+                                    + HeaderUnTyped::high_offset(type_info.align, type_info.size)
+                                        as usize) as *mut u8
+                            }))
+                            .unwrap_or(Arena::alloc());
+
+                        unsafe { ptr::copy(gc, next, 1) }
+
+                        let mut roots =
+                            unsafe { &mut *(HeaderUnTyped::from(next) as *mut HeaderUnTyped) }
+                                .roots
+                                .lock()
+                                .unwrap();
+
+                        if !roots.insert(index(next, size, align), root_ptr).is_none() {
+                            panic!("Not possible");
+                        };
+
+                        let ptr = bump_down(next, size, align);
+
+                        if ptr as usize % ARENA_SIZE == 0 {
+                            full.insert(ptr as *mut _);
+                        } else {
+                            partial.insert(ptr as *mut _);
+                        }
+                    };
+                });
             });
         }
 
@@ -696,6 +757,16 @@ fn gc_loop() {
                     // Free memory
                     ts.arenas.condemned.drain().into_iter().for_each(|next| {
                         let header = HeaderUnTyped::from(next) as *mut HeaderUnTyped;
+
+                        let roots = unsafe { &*header }
+                            .roots
+                            .lock()
+                            .expect("Could not unlock roots while freeing Arena");
+                        if roots.len() != 0 {
+                            // FIXME shoud reset latest_grey and try again latter.
+                            panic!("Old Arena Rooted");
+                        }
+
                         if cti.needs_drop {
                             let GcTypeInfo { align, size, .. } = ti;
 
@@ -785,6 +856,9 @@ fn gc_loop() {
                 };
 
                 ts.set_invariant(inv, &mut free, &ts.direct_children.clone());
+
+                // FIXME setting header.condemned causes a race with Root::from.
+                // The solution is to move switch away from Mutex<HashMap>
 
                 // Mark all the GC's arenas as condemned.
                 ts.arenas.full.iter().for_each(|header| {

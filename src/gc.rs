@@ -1,7 +1,10 @@
+use crate::{arena::Header, mark::Condemned, Arena};
+use std::boxed;
 use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Gc<'r, T>(pub &'r T, pub P);
+pub struct Gc<'r, T: 'r>(pub &'r T, pub P);
 
 impl<'r, T> Gc<'r, T> {
     #[inline(always)]
@@ -60,4 +63,52 @@ impl<'r, T> DerefMut for Box<'r, T> {
     fn deref_mut(&mut self) -> &mut T {
         self.0
     }
+}
+
+pub struct Root<T> {
+    intern: *const RootIntern<T>,
+}
+
+impl<'r, T: Condemned> From<Gc<'r, T>> for Root<T> {
+    fn from(gc: Gc<'r, T>) -> Root<T> {
+        let header = unsafe { &*Header::from(gc.0) };
+        let mut roots = header.intern.roots.lock().unwrap();
+        let root = roots.entry(Arena::<T>::index(gc.0)).or_insert_with(|| {
+            boxed::Box::leak(boxed::Box::new(RootIntern {
+                ref_count: AtomicUsize::new(1),
+                gc_ptr: AtomicPtr::new(gc.0 as *const T as *mut u8),
+            }))
+        });
+
+        Root {
+            intern: *root as *const RootIntern<T>,
+        }
+    }
+}
+
+impl<T: Condemned> Clone for Root<T> {
+    fn clone(&self) -> Root<T> {
+        unsafe { &*self.intern }
+            .ref_count
+            .fetch_add(1, Ordering::Relaxed);
+        Root {
+            intern: self.intern,
+        }
+    }
+}
+
+impl<T> Drop for Root<T> {
+    fn drop(&mut self) {
+        // Relaxed is safe, since the GC frees RootIntern.
+        // Note the diffrence with Arc.
+        unsafe { &*self.intern }
+            .ref_count
+            .fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+pub(crate) struct RootIntern<T> {
+    pub ref_count: AtomicUsize,
+    /// Pointer is only live while an Arena<T> exists.
+    pub gc_ptr: AtomicPtr<T>,
 }

@@ -8,7 +8,6 @@
 #![feature(const_transmute)]
 #![feature(const_raw_ptr_to_usize_cast)]
 #![feature(const_mut_refs)]
-#![feature(const_if_match)]
 #![feature(const_panic)]
 #![feature(const_type_name)]
 #![feature(trivial_bounds)]
@@ -16,6 +15,7 @@
 #![feature(map_first_last)]
 #![feature(backtrace)]
 #![feature(arbitrary_self_types)]
+#![feature(generic_associated_types)]
 
 pub mod arena;
 pub use arena::Arena;
@@ -23,7 +23,7 @@ pub mod auto_traits;
 pub use auto_traits::{Immutable, NoGc};
 pub mod collections;
 pub mod gc;
-pub use gc::{Gc, Box};
+pub use gc::{Box, Gc};
 mod gc_logic;
 pub mod mark;
 pub use mark::Mark;

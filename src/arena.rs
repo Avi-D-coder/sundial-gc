@@ -4,6 +4,7 @@ use crate::{
     gc_logic::GcThreadBus,
     mark::{Condemned, GcTypeInfo, Mark, Invariant},
 };
+use gc::{Root, RootIntern};
 use smallvec::SmallVec;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::any::type_name;
@@ -548,8 +549,8 @@ pub(crate) struct HeaderUnTyped {
     pub(crate) evacuated: Mutex<HashMap<u16, *const u8>>,
     // roots: HashMap<u16, *const Box<UnsafeCell<*const T>>>,
     // finalizers: TODO
-    pub(crate) roots: Mutex<HashMap<u16, *mut u8>>,
-    finalizers: usize,
+    pub(crate) roots: Mutex<HashMap<u16, *const RootIntern<u8>>>,
+    _finalizers: usize,
     pub(crate) condemned: bool,
 }
 
@@ -588,7 +589,7 @@ impl HeaderUnTyped {
                 HeaderUnTyped {
                     evacuated: Mutex::new(HashMap::new()),
                     roots: Mutex::new(HashMap::new()),
-                    finalizers: 0,
+                    _finalizers: 0,
                     condemned: false,
                 },
             )
