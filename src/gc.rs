@@ -69,6 +69,14 @@ pub struct Root<T> {
     intern: *const RootIntern<T>,
 }
 
+impl<T: Condemned> Root<T> {
+    pub fn to_gc<'a>(&self, arena: &'a Arena<T>) -> Gc<'a, T> {
+        let root = unsafe { &*self.intern };
+        let t = unsafe { &*root.gc_ptr.load(Ordering::Acquire) };
+        arena.mark(Gc(t, P(())))
+    }
+}
+
 impl<'r, T: Condemned> From<Gc<'r, T>> for Root<T> {
     fn from(gc: Gc<'r, T>) -> Root<T> {
         let header = unsafe { &*Header::from(gc.0) };
