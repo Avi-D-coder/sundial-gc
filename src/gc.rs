@@ -1,4 +1,4 @@
-use crate::{arena::Header, mark::Condemned, Arena};
+use crate::{arena::Header, mark::Condemned, Arena, Mark};
 use std::boxed;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};

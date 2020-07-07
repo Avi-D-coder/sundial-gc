@@ -2,9 +2,9 @@ use crate::auto_traits::*;
 use crate::gc::{self, Gc};
 use crate::{
     gc_logic::GcThreadBus,
-    mark::{Condemned, GcTypeInfo, Mark, Invariant},
+    mark::{Condemned, GcTypeInfo, Invariant, Mark},
 };
-use gc::{Root, RootIntern};
+use gc::RootIntern;
 use smallvec::SmallVec;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::any::type_name;
@@ -353,22 +353,14 @@ impl<T: Immutable + Condemned> Arena<T> {
         let mut new_allocation = false;
         if let Some(&mut Msg::Gc {
             ref mut next,
-            grey_self,
-            grey_feilds,
-            white_start,
-            white_end,
+            invariant,
         }) = gc_idx.map(|i| &mut msgs[i])
         {
             if bus.cached_next.is_none() {
                 bus.cached_next = *next;
                 *next = None;
             };
-            bus.known_invariant = Invariant {
-                grey_feilds,
-                grey_self,
-                white_start,
-                white_end,
-            }
+            bus.known_invariant = invariant;
         };
 
         let next = if let Some(n) = bus.cached_next {
@@ -706,11 +698,7 @@ pub(crate) enum Msg {
     },
     Gc {
         next: Option<*mut u8>,
-        grey_feilds: u8,
-        grey_self: bool,
-        /// The condemned ptr range
-        white_start: usize,
-        white_end: usize,
+        invariant: Invariant,
     },
 }
 

@@ -4,7 +4,7 @@ use log::info;
 use smallvec::SmallVec;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{
-    atomic::{AtomicPtr, Ordering, AtomicBool},
+    atomic::{AtomicBool, AtomicPtr, Ordering},
     Mutex,
 };
 
@@ -267,6 +267,7 @@ impl TypeState {
             handler,
             ..
         } = self;
+
         *epoch += 1;
         log::trace!(
             "\n  epoch: {}\n  type: {:?}\n  buses: {}\n\n",
@@ -343,7 +344,8 @@ impl TypeState {
                                         pending_known_transitive_grey.saturating_sub(1);
                                 }
                             } else if !*new_allocation {
-                                *pending_known_grey -= 1;
+                                // TODO hmm
+                                *pending_known_grey = pending_known_grey.saturating_sub(1);
                             };
 
                             // Nothing was marked.
@@ -363,14 +365,16 @@ impl TypeState {
                     };
 
                     if *release_to_gc {
+                        let header = HeaderUnTyped::from(next) as *mut _;
                         if full(next, type_info.align) {
                             log::trace!("Full Arena released");
-                            let header = HeaderUnTyped::from(next) as *mut _;
                             arenas.full.insert(header);
                         } else {
                             log::trace!("Non full Arena released");
                             arenas.partial.insert(next as *mut _);
                         };
+
+                        arenas.worker.remove(&(header as *const _));
                     } else {
                         debug_assert!(!full(next, type_info.align));
                         // store active worker arenas
@@ -380,9 +384,7 @@ impl TypeState {
                     *msg = Msg::Slot;
                     ret
                 }
-                Msg::Gc {
-                    next: next @ None, ..
-                } => {
+                Msg::Gc { next, invariant } => {
                     has_gc_msg = true;
                     *next = arenas
                         .partial
@@ -394,6 +396,13 @@ impl TypeState {
                                 + HeaderUnTyped::high_offset(type_info.align, type_info.size)
                                     as usize) as *mut u8
                         }));
+
+                    inv.map(|inv| {
+                        if inv != *invariant {
+                            *invariant = inv
+                        }
+                    });
+
                     log::trace!("GC sent Arena {:?}", *next);
                     None
                 }
@@ -414,27 +423,12 @@ impl TypeState {
                                     as usize) as *mut u8
                         }));
 
-                    if let Some(Invariant {
-                        grey_feilds,
-                        grey_self,
-                        white_start,
-                        white_end,
-                    }) = inv
-                    {
-                        *slot = Msg::Gc {
-                            next,
-                            grey_feilds,
-                            grey_self,
-                            white_start,
-                            white_end,
-                        };
+                    if let Some(invariant) = inv {
+                        *slot = Msg::Gc { next, invariant };
                     } else {
                         *slot = Msg::Gc {
                             next,
-                            grey_feilds: 0b0000_0000,
-                            grey_self: false,
-                            white_start: 0,
-                            white_end: 1,
+                            invariant: Invariant::none(),
                         };
                     }
                 });
@@ -548,9 +542,22 @@ impl TypeState {
 
     /// Must be proceed by a call to `request_clear_stack`.
     fn is_stack_clear(&self) -> bool {
-        self.pending_known_transitive_grey == 0
+        log::trace!("\n\n\n {}", self.type_info.type_name);
+        log::trace!(
+            "pending_known_transitive_grey: {}",
+            self.pending_known_transitive_grey
+        );
+        log::trace!("pending_known_grey: {}", self.pending_known_grey);
+        log::trace!("pending: {:?}", self.pending);
+        log::trace!("worker: {:?}", self.arenas.worker);
+        log::trace!("condemned: {:?}", self.arenas.condemned);
+        log::trace!("partial: {:?}", self.arenas.partial);
+        log::trace!("full: {:?}\n\n\n", self.arenas.full);
+        let r = self.pending_known_transitive_grey == 0
             && self.pending_known_grey == 0
-            && self.transitive_epoch != 0
+            && self.transitive_epoch != 0;
+        log::trace!("is_stack_clear: {}", r);
+        r
     }
 
     fn set_invariant(
@@ -740,6 +747,10 @@ fn gc_loop() {
                 .map(|hm| hm.new_arenas(ti.align, &mut new_arenas));
 
             // TODO This is slower than it could be like everything
+            log::trace!(
+                "clear_stack_old.contains_key {}",
+                clear_stack_old.contains_key(ti)
+            );
             if ts.is_stack_clear() && clear_stack_old.contains_key(ti) {
                 stack_cleared.insert(*ti);
             };
@@ -751,6 +762,7 @@ fn gc_loop() {
             arena_count += ts.arenas.full.len();
         });
 
+        log::trace!("stack_cleared.len: {}", stack_cleared.len());
         stack_cleared.drain().for_each(|ti| {
             clear_stack_old.remove(&ti).unwrap().iter().for_each(|cti| {
                 let ts = active.get_mut(cti).unwrap();
@@ -843,7 +855,9 @@ fn gc_loop() {
             });
         });
 
-        if !gc_in_progress && (arena_count > pre_arena_count || TRIGGER_MAJOR_GC.load(Ordering::Relaxed)) {
+        if !gc_in_progress
+            && (arena_count > pre_arena_count || TRIGGER_MAJOR_GC.load(Ordering::Relaxed))
+        {
             info!("Starting major GC");
             pre_arena_count = arena_count;
 

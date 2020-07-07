@@ -2,14 +2,45 @@ use super::gc::*;
 use crate::{
     arena::{Arena, Header, HeaderUnTyped},
     auto_traits::{HasGc, Immutable},
-    gc_logic::Invariant,
 };
 use smallvec::SmallVec;
 use std::ops::Index;
 use std::{
+    any,
     collections::{HashMap, HashSet},
     iter, mem, ptr,
 };
+
+pub unsafe trait MarkGat<T: CoerceLifetime> {
+    fn mark_gat<'o, 'n>(&'n self, old: &'o T::Type<'o>) -> &'n T::Type<'n>;
+}
+
+unsafe impl<T: Condemned + CoerceLifetime> MarkGat<T> for Arena<T> {
+    fn mark_gat<'o, 'n>(&'n self, old: &'o T::Type<'o>) -> &'n T::Type<'n> {
+        unsafe { T::coerce_lifetime(old) }
+    }
+}
+
+pub unsafe trait CoerceLifetime {
+    type Type<'l>: 'l + Sized;
+    unsafe fn coerce_lifetime<'o, 'n>(old: &'o Self::Type<'o>) -> &'n Self::Type<'n>;
+}
+
+unsafe impl<'r, T: Condemned + CoerceLifetime> CoerceLifetime for Gc<'r, T> {
+    type Type<'l> = Gc<'l, T::Type<'l>>;
+    unsafe fn coerce_lifetime<'o, 'n>(old: &'o Self::Type<'o>) -> &'n Self::Type<'n> {
+        mem::transmute(old)
+    }
+}
+
+/// This maybe become a compiler error.
+/// The soundness of lifetime specialization is not worked out.
+unsafe impl<'r, T: Condemned + 'static> CoerceLifetime for Gc<'r, T> {
+    default type Type<'l> = Gc<'l, T>;
+    default unsafe fn coerce_lifetime<'o, 'n>(old: &'o Self::Type<'o>) -> &'n Self::Type<'n> {
+        mem::transmute(old)
+    }
+}
 
 /// This will be sound once GAT or const Eq &str lands.
 /// The former will allow transmuting only lifetimes.
@@ -150,6 +181,7 @@ pub struct GcTypeInfo {
     pub(crate) size: u16,
     pub(crate) align: u16,
     pub(crate) gc_count: u8,
+    pub(crate) type_name: &'static str,
 }
 
 impl GcTypeInfo {
@@ -164,6 +196,7 @@ impl GcTypeInfo {
             size: mem::size_of::<T>() as u16,
             align: mem::align_of::<T>() as u16,
             gc_count: T::GC_COUNT,
+            type_name: any::type_name::<T>(),
         }
     }
 
@@ -199,7 +232,7 @@ impl GcTypeInfo {
 unsafe impl Send for GcTypeInfo {}
 unsafe impl Sync for GcTypeInfo {}
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Invariant {
     pub(crate) white_start: usize,
     pub(crate) white_end: usize,
@@ -222,7 +255,6 @@ impl Invariant {
             && unsafe { &*HeaderUnTyped::from(ptr as *const _) }.condemned
     }
 }
-
 
 pub unsafe trait Condemned: Immutable {
     fn feilds(s: &Self, offset: u8, grey_feilds: u8, invariant: &Invariant) -> u8;
