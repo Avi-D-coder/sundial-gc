@@ -12,10 +12,15 @@
 #![feature(associated_type_bounds)]
 #![feature(const_panic)]
 
+use std::{
+    sync::atomic::{AtomicUsize, Ordering},
+    thread,
+    time::Duration,
+};
 use sundial_gc::arena::*;
 use sundial_gc::auto_traits::*;
 use sundial_gc::gc::Gc;
-use sundial_gc::mark::*;
+use sundial_gc::{TRIGGER_MAJOR_GC, mark::*};
 
 fn log_init() {
     let _ = env_logger::builder().is_test(true).try_init();
@@ -266,5 +271,38 @@ fn binary_tree_test() {
                 },
             }
         }
+    }
+}
+
+static COUNT: AtomicUsize = AtomicUsize::new(0);
+struct Count(usize);
+
+impl Count {
+    pub fn new() -> Self {
+        COUNT.fetch_add(1, Ordering::Relaxed);
+        Count(1)
+    }
+}
+
+impl Drop for Count {
+    fn drop(&mut self) {
+        COUNT.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+#[test]
+fn drop_test() {
+    log_init();
+    for _ in 0..1000 {
+        let a = Arena::new();
+        for _ in 0..100 {
+            a.gc_alloc(Count::new());
+        }
+    }
+
+    TRIGGER_MAJOR_GC.store(true, Ordering::Relaxed);
+    while COUNT.load(Ordering::Relaxed) != 0 {
+        eprintln!("Count {}", COUNT.load(Ordering::Relaxed));
+        thread::sleep(Duration::from_millis(1000));
     }
 }
