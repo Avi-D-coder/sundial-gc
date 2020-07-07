@@ -4,7 +4,7 @@ use log::info;
 use smallvec::SmallVec;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{
-    atomic::{AtomicPtr, Ordering},
+    atomic::{AtomicPtr, Ordering, AtomicBool},
     Mutex,
 };
 
@@ -15,6 +15,8 @@ use std::{
     cmp::max,
     mem, process, ptr,
 };
+
+pub static TRIGGER_MAJOR_GC: AtomicBool = AtomicBool::new(false);
 
 /// Used to register a thread's interest in a type.
 /// Before a worker thread can allocate or read a `Gc<T>`, it must register for `T`.
@@ -841,7 +843,7 @@ fn gc_loop() {
             });
         });
 
-        if !gc_in_progress && arena_count > pre_arena_count {
+        if !gc_in_progress && (arena_count > pre_arena_count || TRIGGER_MAJOR_GC.load(Ordering::Relaxed)) {
             info!("Starting major GC");
             pre_arena_count = arena_count;
 
@@ -944,6 +946,9 @@ fn gc_loop() {
             });
         }
 
+        if !gc_in_progress {
+            TRIGGER_MAJOR_GC.store(false, Ordering::Relaxed);
+        }
         // thread::sleep(Duration::from_millis(100))
     }
 }
