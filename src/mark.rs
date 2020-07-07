@@ -11,35 +11,38 @@ use std::{
     iter, mem, ptr,
 };
 
-pub unsafe trait MarkGat<T: CoerceLifetime> {
-    fn mark_gat<'o, 'n>(&'n self, old: &'o T::Type<'o>) -> &'n T::Type<'n>;
+pub unsafe trait MarkGat<'n, T: CoerceLifetime> {
+    fn mark_gat<'o>(&'n self, old: &'o T::Type<'o>) -> &'n T::Type<'n>;
 }
 
-unsafe impl<T: Condemned + CoerceLifetime> MarkGat<T> for Arena<T> {
-    fn mark_gat<'o, 'n>(&'n self, old: &'o T::Type<'o>) -> &'n T::Type<'n> {
+unsafe impl<'n, T: Condemned + CoerceLifetime> MarkGat<'n, T> for Arena<T::Type<'n>> {
+    fn mark_gat<'o>(&'n self, old: &'o T::Type<'o>) -> &'n T::Type<'n> {
         unsafe { T::coerce_lifetime(old) }
     }
 }
 
 pub unsafe trait CoerceLifetime {
-    type Type<'l>: 'l + Sized;
-    unsafe fn coerce_lifetime<'o, 'n>(old: &'o Self::Type<'o>) -> &'n Self::Type<'n>;
-}
-
-unsafe impl<'r, T: Condemned + CoerceLifetime> CoerceLifetime for Gc<'r, T> {
-    type Type<'l> = Gc<'l, T::Type<'l>>;
+    type Type<'l>: 'l + Sized + Condemned;
     unsafe fn coerce_lifetime<'o, 'n>(old: &'o Self::Type<'o>) -> &'n Self::Type<'n> {
         mem::transmute(old)
     }
 }
 
+unsafe impl<'r, T: Condemned + CoerceLifetime> CoerceLifetime for Gc<'r, T> {
+    type Type<'l> = Gc<'l, T::Type<'l>>;
+}
+
 /// This maybe become a compiler error.
 /// The soundness of lifetime specialization is not worked out.
-unsafe impl<'r, T: Condemned + 'static> CoerceLifetime for Gc<'r, T> {
-    default type Type<'l> = Gc<'l, T>;
-    default unsafe fn coerce_lifetime<'o, 'n>(old: &'o Self::Type<'o>) -> &'n Self::Type<'n> {
-        mem::transmute(old)
-    }
+// unsafe impl<'r, T: Condemned + 'static> CoerceLifetime for Gc<'r, T> {
+//     default type Type<'l> = Gc<'l, T>;
+//     default unsafe fn coerce_lifetime<'o, 'n>(old: &'o Self::Type<'o>) -> &'n Self::Type<'n> {
+//         mem::transmute(old)
+//     }
+// }
+
+unsafe impl<'r, T: Condemned + 'static> CoerceLifetime for T {
+    default type Type<'l> = T;
 }
 
 /// This will be sound once GAT or const Eq &str lands.

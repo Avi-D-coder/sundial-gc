@@ -747,10 +747,8 @@ fn gc_loop() {
                 .map(|hm| hm.new_arenas(ti.align, &mut new_arenas));
 
             // TODO This is slower than it could be like everything
-            log::trace!(
-                "clear_stack_old.contains_key {}",
-                clear_stack_old.contains_key(ti)
-            );
+            log::trace!("{}", ti.type_name);
+            log::trace!("clear_stack_old {:?}", clear_stack_old);
             if ts.is_stack_clear() && clear_stack_old.contains_key(ti) {
                 stack_cleared.insert(*ti);
             };
