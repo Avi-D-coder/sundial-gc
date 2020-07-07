@@ -112,3 +112,18 @@ pub(crate) struct RootIntern<T> {
     /// Pointer is only live while an Arena<T> exists.
     pub gc_ptr: AtomicPtr<T>,
 }
+
+#[test]
+fn root_gc_moved_test() {
+    let a = Arena::new();
+    let foo = a.gc_alloc(String::from("foo"));
+    let ptr = foo.0 as *const _;
+    let root = Root::from(foo);
+    drop(a);
+    crate::TRIGGER_MAJOR_GC.store(true, Ordering::Relaxed);
+    while ptr == unsafe { &*root.intern }.gc_ptr.load(Ordering::Relaxed) {}
+    assert_eq!(
+        unsafe { &*(&*root.intern).gc_ptr.load(Ordering::Relaxed) },
+        "foo"
+    )
+}
