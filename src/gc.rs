@@ -100,19 +100,19 @@ impl<T: Condemned> Root<T> {
 //     }
 // }
 
-impl<'r, O, N, T: Condemned + CoerceLifetime<Old = O, New = N>> From<Gc<'r, O>> for Root<T> {
-    fn from(gc: Gc<'r, O>) -> Self {
+impl<'r, T: Condemned + CoerceLifetime> From<Gc<'r, T>> for Root<T::Type<'static>> {
+    fn from(gc: Gc<'r, T>) -> Self {
         let header = unsafe { &*Header::from(gc.0) };
         let mut roots = header.intern.roots.lock().unwrap();
-        let root = roots.entry(Arena::<T>::index(gc.0 as *const _ as *const _)).or_insert_with(|| {
+        let root = roots.entry(Arena::<T>::index(gc.0)).or_insert_with(|| {
             boxed::Box::leak(boxed::Box::new(RootIntern {
                 ref_count: AtomicUsize::new(1),
-                gc_ptr: AtomicPtr::new(gc.0  as *const _ as *const T as *mut u8),
+                gc_ptr: AtomicPtr::new(gc.0 as *const T as *mut u8),
             }))
         });
 
         Root {
-            intern: *root as *const _ as *const RootIntern<T>,
+            intern: *root as *const RootIntern<T::Type<'static>>,
         }
     }
 }
