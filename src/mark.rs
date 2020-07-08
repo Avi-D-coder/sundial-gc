@@ -32,15 +32,6 @@ unsafe impl<'r, T: Condemned + CoerceLifetime> CoerceLifetime for Gc<'r, T> {
     type Type<'l> = Gc<'l, T::Type<'l>>;
 }
 
-/// This maybe become a compiler error.
-/// The soundness of lifetime specialization is not worked out.
-// unsafe impl<'r, T: Condemned + 'static> CoerceLifetime for Gc<'r, T> {
-//     default type Type<'l> = Gc<'l, T>;
-//     default unsafe fn coerce_lifetime<'o, 'n>(old: &'o Self::Type<'o>) -> &'n Self::Type<'n> {
-//         mem::transmute(old)
-//     }
-// }
-
 unsafe impl<'r, T: Condemned + 'static> CoerceLifetime for T {
     default type Type<'l> = T;
 }

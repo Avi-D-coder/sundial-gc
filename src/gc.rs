@@ -100,19 +100,24 @@ impl<T: Condemned> Root<T> {
 //     }
 // }
 
-impl<'r, T: Condemned + CoerceLifetime> From<Gc<'r, T>> for Root<T::Type<'static>> {
-    fn from(gc: Gc<'r, T>) -> Self {
+impl<'r, O: Condemned + CoerceLifetime, N: Condemned + CoerceLifetime> From<Gc<'r, O>> for Root<N>
+where
+    N: CoerceLifetime<Type = O::Type<'static>>,
+{
+    fn from(gc: Gc<'r, O>) -> Self {
         let header = unsafe { &*Header::from(gc.0) };
         let mut roots = header.intern.roots.lock().unwrap();
-        let root = roots.entry(Arena::<T>::index(gc.0)).or_insert_with(|| {
-            boxed::Box::leak(boxed::Box::new(RootIntern {
-                ref_count: AtomicUsize::new(1),
-                gc_ptr: AtomicPtr::new(gc.0 as *const T as *mut u8),
-            }))
-        });
+        let root = roots
+            .entry(Arena::<N>::index(gc.0 as *const _ as *const _))
+            .or_insert_with(|| {
+                boxed::Box::leak(boxed::Box::new(RootIntern {
+                    ref_count: AtomicUsize::new(1),
+                    gc_ptr: AtomicPtr::new(gc.0 as *const _ as *const N as *mut u8),
+                }))
+            });
 
         Root {
-            intern: *root as *const RootIntern<T::Type<'static>>,
+            intern: *root as *const RootIntern<N>,
         }
     }
 }
@@ -144,7 +149,7 @@ pub(crate) struct RootIntern<T> {
     pub gc_ptr: AtomicPtr<T>,
 }
 
-// #[test]
+#[test]
 fn root_gc_moved_test() {
     let a = Arena::new();
     let foo = a.gc_alloc(String::from("foo"));
