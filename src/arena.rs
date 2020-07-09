@@ -153,9 +153,7 @@ pub(crate) struct Mem {
     _mem: [u8; ARENA_SIZE],
 }
 
-unsafe impl<'o, 'n, 'r: 'n, O: Immutable + 'o, N: Immutable + 'r> Mark<'o, 'n, 'r, O, N>
-    for Arena<N>
-{
+unsafe impl<'o, 'n, 'r: 'n, O: Trace + 'o, N: Trace + 'r> Mark<'o, 'n, 'r, O, N> for Arena<N> {
     default fn mark(&self, old: Gc<'o, O>) -> Gc<'r, N> {
         if type_name::<O>() != type_name::<N>() {
             // TODO once Eq for &str is const make this const
