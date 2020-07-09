@@ -2,7 +2,7 @@ use crate::auto_traits::*;
 use crate::gc::{self, Gc};
 use crate::{
     gc_logic::GcThreadBus,
-    mark::{Condemned, GcTypeInfo, Invariant, Mark},
+    mark::{GcTypeInfo, Invariant, Mark, Trace},
 };
 use gc::RootIntern;
 use smallvec::SmallVec;
@@ -20,7 +20,7 @@ use std::{
 
 pub const ARENA_SIZE: usize = 16384;
 
-pub struct Arena<T: Condemned + Immutable> {
+pub struct Arena<T: Trace + Immutable> {
     // TODO compact representation of arenas
     // TODO make all these private by wrapping up needed functionality.
     // TODO derive header from next
@@ -36,7 +36,7 @@ pub struct Arena<T: Condemned + Immutable> {
     full: UnsafeCell<SmallVec<[(*mut T, bool, u8); 2]>>,
 }
 
-impl<T: Immutable + Condemned> Arena<T> {
+impl<T: Immutable + Trace> Arena<T> {
     pub fn header(&self) -> &Header<T> {
         unsafe { &*Header::from(*self.next.get() as *const _) }
     }
@@ -167,7 +167,7 @@ unsafe impl<'o, 'n, 'r: 'n, O: Immutable + 'o, N: Immutable + 'r> Mark<'o, 'n, '
             self.invariant.grey_self && self.invariant.condemned(old.0 as *const O as *const _);
 
         let grey_feilds = unsafe { &mut *self.marked_grey_fields.get() };
-        let cf = Condemned::feilds(old.0, 0, *grey_feilds, &self.invariant);
+        let cf = Trace::feilds(old.0, 0, *grey_feilds, &self.invariant);
 
         // Worker encountered fields marked in cf.
         unsafe { *self.marked_grey_fields.get() |= cf }
@@ -202,7 +202,7 @@ unsafe impl<'o, 'n, 'r: 'n, O: Immutable + 'o, N: Immutable + 'r> Mark<'o, 'n, '
     }
 }
 
-impl<T: Immutable + Condemned> Drop for Arena<T> {
+impl<T: Immutable + Trace> Drop for Arena<T> {
     fn drop(&mut self) {
         GC_BUS.with(|tm| {
             let next = unsafe { *self.next.get() } as *const u8;
@@ -320,7 +320,7 @@ unsafe impl<'o, 'n, 'r: 'n, O: NoGc + Immutable + 'o, N: NoGc + Immutable + 'r>
     }
 }
 
-impl<T: Immutable + Condemned> Arena<T> {
+impl<T: Immutable + Trace> Arena<T> {
     pub fn new() -> Arena<T> {
         if !T::PRE_CONDTION {
             panic!("You need to derive Condemned for T")
@@ -452,7 +452,7 @@ impl<T: Immutable + Condemned> Arena<T> {
     }
 }
 
-impl<T: Immutable + Condemned + Copy> Arena<T> {
+impl<T: Immutable + Trace + Copy> Arena<T> {
     /// Directly copies T instead of reading it onto the stack first.
     pub fn gc_copy<'a, 'r: 'a>(&'a self, t: &T) -> Gc<'r, T> {
         unsafe {
@@ -509,7 +509,7 @@ fn gc_copy_test() {
     assert!(n1 == n2 + 8)
 }
 
-impl<T: Immutable + Condemned + Clone> Arena<T> {
+impl<T: Immutable + Trace + Clone> Arena<T> {
     pub fn gc_clone<'a, 'r: 'a>(&'a self, t: &T) -> Gc<'r, T> {
         unsafe {
             if self.full() {
@@ -664,7 +664,7 @@ thread_local! {
     // FIXME upon drop/thread end send End for cached_next and Msg::Gc.next
 }
 
-fn key<T: Condemned>() -> (GcTypeInfo, usize) {
+fn key<T: Trace>() -> (GcTypeInfo, usize) {
     (
         GcTypeInfo::new::<T>(),
         ptr::drop_in_place::<T> as *const fn(*mut T) as usize,

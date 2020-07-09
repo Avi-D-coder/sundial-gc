@@ -1,11 +1,10 @@
-use crate::{
-    arena::Header,
-    mark::{CoerceLifetime, Condemned},
-    Arena, Mark,
-};
+use crate::{arena::Header, Arena, Mark, Trace};
 use std::boxed;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::{
+    any::type_name,
+    sync::atomic::{AtomicPtr, AtomicUsize, Ordering},
+};
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Gc<'r, T: 'r>(pub &'r T, pub P);
@@ -73,7 +72,7 @@ pub struct Root<T> {
     intern: *const RootIntern<T>,
 }
 
-impl<T: Condemned> Root<T> {
+impl<T: Trace> Root<T> {
     pub fn to_gc<'a>(&self, arena: &'a Arena<T>) -> Gc<'a, T> {
         let root = unsafe { &*self.intern };
         let t = unsafe { &*root.gc_ptr.load(Ordering::Acquire) };
@@ -100,11 +99,12 @@ impl<T: Condemned> Root<T> {
 //     }
 // }
 
-impl<'r, O: Condemned + CoerceLifetime, N: Condemned + CoerceLifetime> From<Gc<'r, O>> for Root<N>
-where
-    N: CoerceLifetime<Type = O::Type<'static>>,
-{
+impl<'r, O: Trace, N: Trace> From<Gc<'r, O>> for Root<N> {
     fn from(gc: Gc<'r, O>) -> Self {
+        if type_name::<O>() != type_name::<N>() {
+            // TODO once Eq for &str is const make this const
+            panic!("O is a different type then N, mark only changes lifetimes")
+        };
         let header = unsafe { &*Header::from(gc.0) };
         let mut roots = header.intern.roots.lock().unwrap();
         let root = roots
@@ -122,7 +122,7 @@ where
     }
 }
 
-impl<T: Condemned> Clone for Root<T> {
+impl<T: Trace> Clone for Root<T> {
     fn clone(&self) -> Root<T> {
         unsafe { &*self.intern }
             .ref_count

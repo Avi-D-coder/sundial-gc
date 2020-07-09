@@ -27,4 +27,4 @@ pub use gc::{Box, Gc, Root};
 mod gc_logic;
 pub use gc_logic::TRIGGER_MAJOR_GC;
 pub mod mark;
-pub use mark::Mark;
+pub use mark::{Mark, Trace};

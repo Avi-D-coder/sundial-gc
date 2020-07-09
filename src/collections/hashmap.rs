@@ -1,8 +1,4 @@
-use crate::{
-    arena::Arena,
-    gc::Gc,
-    mark::*,
-};
+use crate::{arena::Arena, gc::Gc, mark::*};
 use rustc_hash::FxHasher;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
@@ -48,7 +44,7 @@ impl<'r, K, V> Default for HashMap<'r, K, V> {
     }
 }
 
-impl<'r, K: Hash + Eq + Clone + Condemned, V: Clone + Condemned> HashMap<'r, K, V> {
+impl<'r, K: Hash + Eq + Clone + Trace, V: Clone + Trace> HashMap<'r, K, V> {
     pub fn get(&'r self, key: &K) -> Option<&'r V> {
         let mut hasher = FxHasher::default();
         key.hash(&mut hasher);
@@ -225,7 +221,7 @@ fn hamt_get_set_test() {
 }
 
 // There is no way to derive Condemed since HashMap uses unsafe casts
-unsafe impl<'r, K: Condemned + 'r, V: Condemned> Condemned for HashMap<'r, K, V> {
+unsafe impl<'r, K: Trace + 'r, V: Trace> Trace for HashMap<'r, K, V> {
     default fn feilds(x: &Self, offset: u8, grey_feilds: u8, invariant: &Invariant) -> u8 {
         assert!(Self::PRE_CONDTION);
         let mut bloom = 0b0000000;
@@ -237,10 +233,10 @@ unsafe impl<'r, K: Condemned + 'r, V: Condemned> Condemned for HashMap<'r, K, V>
 
             if has_val {
                 let kv: Gc<(K, V)> = unsafe { mem::transmute(x.arr[i]) };
-                bloom |= Condemned::feilds(&kv, offset, grey_feilds, invariant)
+                bloom |= Trace::feilds(&kv, offset, grey_feilds, invariant)
             } else if sub_map {
                 let hm: Gc<HashMap<K, V>> = unsafe { mem::transmute(x.arr[i]) };
-                bloom |= Condemned::feilds(&hm, offset + 1, grey_feilds, invariant)
+                bloom |= Trace::feilds(&hm, offset + 1, grey_feilds, invariant)
             };
         }
         bloom
@@ -260,10 +256,10 @@ unsafe impl<'r, K: Condemned + 'r, V: Condemned> Condemned for HashMap<'r, K, V>
 
             if has_val {
                 let kv: Gc<(K, V)> = mem::transmute(x.arr[i]);
-                Condemned::evacuate(&kv, offset, grey_feilds, invariant, handlers);
+                Trace::evacuate(&kv, offset, grey_feilds, invariant, handlers);
             } else if sub_map {
                 let hm: Gc<HashMap<K, V>> = mem::transmute(x.arr[i]);
-                Condemned::evacuate(&hm, offset + 1, grey_feilds, invariant, handlers);
+                Trace::evacuate(&hm, offset + 1, grey_feilds, invariant, handlers);
             };
         }
     }

@@ -15,24 +15,24 @@ pub unsafe trait MarkGat<'n, T: CoerceLifetime> {
     fn mark_gat<'o>(&'n self, old: &'o T::Type<'o>) -> &'n T::Type<'n>;
 }
 
-unsafe impl<'n, T: Condemned + CoerceLifetime> MarkGat<'n, T> for Arena<T::Type<'n>> {
+unsafe impl<'n, T: Trace + CoerceLifetime> MarkGat<'n, T> for Arena<T::Type<'n>> {
     fn mark_gat<'o>(&'n self, old: &'o T::Type<'o>) -> &'n T::Type<'n> {
         unsafe { T::coerce_lifetime(old) }
     }
 }
 
 pub unsafe trait CoerceLifetime {
-    type Type<'l>: 'l + Sized + Condemned;
+    type Type<'l>: 'l + Sized + Trace;
     unsafe fn coerce_lifetime<'o, 'n>(old: &'o Self::Type<'o>) -> &'n Self::Type<'n> {
         mem::transmute(old)
     }
 }
 
-unsafe impl<'r, T: Condemned + CoerceLifetime> CoerceLifetime for Gc<'r, T> {
+unsafe impl<'r, T: Trace + CoerceLifetime> CoerceLifetime for Gc<'r, T> {
     type Type<'l> = Gc<'l, T::Type<'l>>;
 }
 
-unsafe impl<'r, T: Condemned + 'static> CoerceLifetime for T {
+unsafe impl<'r, T: Trace + 'static> CoerceLifetime for T {
     default type Type<'l> = T;
 }
 
@@ -56,7 +56,7 @@ pub(crate) struct Translator {
 pub(crate) type EffTypes = SmallVec<[GcTypeInfo; 2]>;
 
 impl Translator {
-    pub(crate) fn from<T: Condemned>(effs: &EffTypes) -> (Translator, u8) {
+    pub(crate) fn from<T: Trace>(effs: &EffTypes) -> (Translator, u8) {
         let mut types: HashMap<GcTypeInfo, TypeRow> = HashMap::with_capacity(16);
         T::direct_gc_types(&mut types, 0);
 
@@ -141,11 +141,11 @@ impl Tti {
     }
 
     /// Gc is the only type that adds it's self.
-    pub unsafe fn add_gc<T: Condemned>(tti: *mut Tti) {
+    pub unsafe fn add_gc<T: Trace>(tti: *mut Tti) {
         (*tti).type_info.insert(GcTypeInfo::new::<T>());
     }
 
-    pub unsafe fn add_trans<T: Condemned>(tti: *mut Tti) {
+    pub unsafe fn add_trans<T: Trace>(tti: *mut Tti) {
         // Prevent cycles by only calling each function once
         let tgt = T::transitive_gc_types;
         if (*tti).parrents.insert(tgt as *const fn(*mut Tti) as usize) {
@@ -179,7 +179,7 @@ pub struct GcTypeInfo {
 }
 
 impl GcTypeInfo {
-    pub const fn new<T: Condemned>() -> Self {
+    pub const fn new<T: Trace>() -> Self {
         Self {
             evacuate_fn: T::evacuate as *const _,
             transitive_gc_types_fn: T::transitive_gc_types as *const _,
@@ -250,7 +250,7 @@ impl Invariant {
     }
 }
 
-pub unsafe trait Condemned: Immutable {
+pub unsafe trait Trace: Immutable {
     fn feilds(s: &Self, offset: u8, grey_feilds: u8, invariant: &Invariant) -> u8;
     unsafe fn evacuate<'e>(
         s: &Self,
@@ -267,7 +267,7 @@ pub unsafe trait Condemned: Immutable {
     const PRE_CONDTION: bool;
 }
 
-unsafe impl<T: Immutable> Condemned for T {
+unsafe impl<T: Immutable> Trace for T {
     default fn feilds(_: &Self, _: u8, _: u8, _: &Invariant) -> u8 {
         // This check is superfluous
         // TODO ensure if gets optimized out
@@ -293,7 +293,7 @@ unsafe impl<T: Immutable> Condemned for T {
     };
 }
 
-unsafe impl<'r, T: Immutable + Condemned> Condemned for Gc<'r, T> {
+unsafe impl<'r, T: Immutable + Trace> Trace for Gc<'r, T> {
     /// Returns the bit associated with a condemned ptr
     fn feilds(s: &Self, offset: u8, grey_feilds: u8, invariant: &Invariant) -> u8 {
         let bit = 1 << (offset % 8);
@@ -378,10 +378,10 @@ unsafe impl<'r, T: Immutable + Condemned> Condemned for Gc<'r, T> {
 
 // std impls
 
-unsafe impl<T: Immutable> Condemned for Option<T> {
+unsafe impl<T: Immutable> Trace for Option<T> {
     default fn feilds(s: &Self, offset: u8, grey_feilds: u8, invariant: &Invariant) -> u8 {
         match s {
-            Some(t) => Condemned::feilds(t, offset, grey_feilds, invariant),
+            Some(t) => Trace::feilds(t, offset, grey_feilds, invariant),
             None => 0b0000_0000,
         }
     }
@@ -394,7 +394,7 @@ unsafe impl<T: Immutable> Condemned for Option<T> {
         handlers: &mut Handlers,
     ) {
         match s {
-            Some(t) => Condemned::evacuate(t, offset, grey_feilds, invariant, handlers),
+            Some(t) => Trace::evacuate(t, offset, grey_feilds, invariant, handlers),
             None => (),
         }
     }
@@ -415,15 +415,15 @@ unsafe impl<T: Immutable> Condemned for Option<T> {
     };
 }
 
-unsafe impl<A: Immutable, B: Immutable> Condemned for (A, B) {
+unsafe impl<A: Immutable, B: Immutable> Trace for (A, B) {
     fn feilds((a, b): &Self, offset: u8, grey_feilds: u8, invariant: &Invariant) -> u8 {
         let mut r = 0b0000_0000;
         if (grey_feilds & 0b1000_0000) == 0b1000_0000 {
-            r |= Condemned::feilds(a, offset, grey_feilds, invariant);
+            r |= Trace::feilds(a, offset, grey_feilds, invariant);
         };
 
         if (grey_feilds & 0b0100_0000) == 0b0100_0000 {
-            r |= Condemned::feilds(b, offset + A::GC_COUNT, grey_feilds, invariant);
+            r |= Trace::feilds(b, offset + A::GC_COUNT, grey_feilds, invariant);
         };
 
         r
@@ -436,9 +436,9 @@ unsafe impl<A: Immutable, B: Immutable> Condemned for (A, B) {
         invariant: &Invariant,
         handlers: &mut Handlers,
     ) {
-        Condemned::evacuate(a, offset, grey_feilds, invariant, handlers);
+        Trace::evacuate(a, offset, grey_feilds, invariant, handlers);
 
-        Condemned::evacuate(b, offset + A::GC_COUNT, grey_feilds, invariant, handlers);
+        Trace::evacuate(b, offset + A::GC_COUNT, grey_feilds, invariant, handlers);
     }
 
     fn direct_gc_types(t: &mut HashMap<GcTypeInfo, TypeRow>, offset: u8) {

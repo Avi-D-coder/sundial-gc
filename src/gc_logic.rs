@@ -59,7 +59,7 @@ impl GcThreadBus {
         }
     }
 
-    pub(crate) fn register<T: Condemned>(&mut self, bus: *const Bus) {
+    pub(crate) fn register<T: Trace>(&mut self, bus: *const Bus) {
         self.bus.push(RegMsg::Reg(
             thread::current().id(),
             GcTypeInfo::new::<T>(),
