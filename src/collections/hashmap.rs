@@ -222,7 +222,7 @@ fn hamt_get_set_test() {
 
 // There is no way to derive Condemed since HashMap uses unsafe casts
 unsafe impl<'r, K: Trace + 'r, V: Trace> Trace for HashMap<'r, K, V> {
-    default fn feilds(x: &Self, offset: u8, grey_feilds: u8, invariant: &Invariant) -> u8 {
+    default fn fields(x: &Self, offset: u8, grey_fields: u8, invariant: &Invariant) -> u8 {
         assert!(Self::PRE_CONDTION);
         let mut bloom = 0b0000000;
 
@@ -233,10 +233,10 @@ unsafe impl<'r, K: Trace + 'r, V: Trace> Trace for HashMap<'r, K, V> {
 
             if has_val {
                 let kv: Gc<(K, V)> = unsafe { mem::transmute(x.arr[i]) };
-                bloom |= Trace::feilds(&kv, offset, grey_feilds, invariant)
+                bloom |= Trace::fields(&kv, offset, grey_fields, invariant)
             } else if sub_map {
                 let hm: Gc<HashMap<K, V>> = unsafe { mem::transmute(x.arr[i]) };
-                bloom |= Trace::feilds(&hm, offset + 1, grey_feilds, invariant)
+                bloom |= Trace::fields(&hm, offset + 1, grey_fields, invariant)
             };
         }
         bloom
@@ -245,7 +245,7 @@ unsafe impl<'r, K: Trace + 'r, V: Trace> Trace for HashMap<'r, K, V> {
     default unsafe fn evacuate<'e>(
         x: &Self,
         offset: u8,
-        grey_feilds: u8,
+        grey_fields: u8,
         invariant: &Invariant,
         handlers: &mut Handlers,
     ) {
@@ -256,10 +256,10 @@ unsafe impl<'r, K: Trace + 'r, V: Trace> Trace for HashMap<'r, K, V> {
 
             if has_val {
                 let kv: Gc<(K, V)> = mem::transmute(x.arr[i]);
-                Trace::evacuate(&kv, offset, grey_feilds, invariant, handlers);
+                Trace::evacuate(&kv, offset, grey_fields, invariant, handlers);
             } else if sub_map {
                 let hm: Gc<HashMap<K, V>> = mem::transmute(x.arr[i]);
-                Trace::evacuate(&hm, offset + 1, grey_feilds, invariant, handlers);
+                Trace::evacuate(&hm, offset + 1, grey_fields, invariant, handlers);
             };
         }
     }

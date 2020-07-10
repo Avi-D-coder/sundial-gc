@@ -1,6 +1,6 @@
 use crate::{Gc, Trace};
 
-pub enum BinaryTree<'r, K, V> {
+pub enum BinaryTree<'r, K: 'r, V: 'r> {
     Empty,
     Branch(Gc<'r, (K, Self, Self, V)>),
 }
@@ -18,26 +18,26 @@ impl<'r, K: Ord, V> BinaryTree<'r, K, V> {
     }
 }
 
-unsafe impl<'r, K: crate::Trace + 'r, V: crate::Trace + 'r> Trace for BinaryTree<'r, K, V> {
-    fn feilds(s: &Self, offset: u8, grey_feilds: u8, invariant: &crate::mark::Invariant) -> u8 {
+unsafe impl<'r, K: 'r, V: 'r> Trace for BinaryTree<'r, K, V> {
+    fn fields(s: &Self, offset: u8, grey_fields: u8, invariant: &crate::mark::Invariant) -> u8 {
         let mut bloom = 0b0000000;
         match s {
             BinaryTree::Empty => (),
-            BinaryTree::Branch(gc) => bloom |= Trace::feilds(gc, offset, grey_feilds, invariant),
+            BinaryTree::Branch(gc) => bloom |= Trace::fields(gc, offset, grey_fields, invariant),
         }
         bloom
     }
     unsafe fn evacuate<'e>(
         s: &Self,
         offset: crate::mark::Offset,
-        grey_feilds: u8,
+        grey_fields: u8,
         invariant: &crate::mark::Invariant,
         handlers: &mut crate::mark::Handlers,
     ) {
         match s {
             BinaryTree::Empty => (),
             BinaryTree::Branch(gc) => {
-                Gc::<'r, (K, Self, Self, V)>::evacuate(gc, offset, grey_feilds, invariant, handlers)
+                Gc::<'r, (K, Self, Self, V)>::evacuate(gc, offset, grey_fields, invariant, handlers)
             }
         }
     }

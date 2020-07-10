@@ -130,7 +130,7 @@ impl HandlerManager {
         while ptr >= last {
             let t = unsafe { &*(ptr as *const u8) };
             // TODO(mark_evac) There's redundancy in the signature of evacuate.
-            evacuate_fn(t, 0, invariant.grey_feilds, invariant, handlers);
+            evacuate_fn(t, 0, invariant.grey_fields, invariant, handlers);
             ptr -= size as usize;
         }
     }
@@ -319,7 +319,7 @@ impl TypeState {
                     release_to_gc,
                     new_allocation,
                     next,
-                    grey_feilds,
+                    grey_fields,
                     white_start,
                     white_end,
                 } => {
@@ -331,7 +331,7 @@ impl TypeState {
                             next: *next,
                             release_to_gc: *release_to_gc,
                             new_allocation: *new_allocation,
-                            grey_feilds: *grey_feilds,
+                            grey_fields: *grey_fields,
                         }
                     );
 
@@ -350,11 +350,11 @@ impl TypeState {
 
                             // Nothing was marked.
                             // Allocated objects contain no condemned pointers into the white set.
-                            if *grey_feilds == 0b0000_0000 {
+                            if *grey_fields == 0b0000_0000 {
                                 None
                             } else {
                                 *latest_grey = *epoch;
-                                Some((next, *grey_feilds))
+                                Some((next, *grey_fields))
                             }
                         } else {
                             *latest_grey = *epoch;
@@ -470,7 +470,7 @@ impl TypeState {
                         evacuate_fn,
                         ..
                     } = handler;
-                    evacuate_fn(gc, 1, invariant.grey_feilds, invariant, handlers);
+                    evacuate_fn(gc, 1, invariant.grey_fields, invariant, handlers);
 
                     let root = unsafe { &mut *(root_ptr as *mut RootIntern<u8>) };
                     if root.ref_count.load(Ordering::Relaxed) == 0 {
@@ -865,7 +865,7 @@ fn gc_loop() {
                 let inv = Invariant {
                     white_start: 0,
                     white_end: usize::MAX,
-                    grey_feilds: 0b1111_1111,
+                    grey_fields: 0b1111_1111,
                     grey_self: true,
                 };
 

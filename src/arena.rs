@@ -164,8 +164,8 @@ unsafe impl<'o, 'n, 'r: 'n, O: Trace + 'o, N: Trace + 'r> Mark<'o, 'n, 'r, O, N>
         let condemned_self =
             self.invariant.grey_self && self.invariant.condemned(old.0 as *const O as *const _);
 
-        let grey_feilds = unsafe { &mut *self.marked_grey_fields.get() };
-        let cf = Trace::feilds(old.0, 0, *grey_feilds, &self.invariant);
+        let grey_fields = unsafe { &mut *self.marked_grey_fields.get() };
+        let cf = Trace::fields(old.0, 0, *grey_fields, &self.invariant);
 
         // Worker encountered fields marked in cf.
         unsafe { *self.marked_grey_fields.get() |= cf }
@@ -205,7 +205,7 @@ impl<T: Immutable + Trace> Drop for Arena<T> {
         GC_BUS.with(|tm| {
             let next = unsafe { *self.next.get() } as *const u8;
             let full = unsafe { &*self.full.get() };
-            let grey_feilds = unsafe { *self.marked_grey_fields.get() };
+            let grey_fields = unsafe { *self.marked_grey_fields.get() };
             let tm = unsafe { &mut *tm.get() };
             tm.entry(key::<T>()).and_modify(|bus| {
                 let capacity = self.capacity();
@@ -222,7 +222,7 @@ impl<T: Immutable + Trace> Drop for Arena<T> {
                                     next: cached_next,
                                     release_to_gc: true,
                                     new_allocation: false,
-                                    grey_feilds,
+                                    grey_fields,
                                     white_start: self.invariant.white_start,
                                     white_end: self.invariant.white_end,
                                 },
@@ -245,7 +245,7 @@ impl<T: Immutable + Trace> Drop for Arena<T> {
                     release_to_gc,
                     new_allocation: self.new_allocation,
                     next,
-                    grey_feilds: unsafe { *self.marked_grey_fields.get() },
+                    grey_fields: unsafe { *self.marked_grey_fields.get() },
                     white_start: self.invariant.white_start,
                     white_end: self.invariant.white_end,
                 };
@@ -269,14 +269,14 @@ impl<T: Immutable + Trace> Drop for Arena<T> {
 
                 full.into_iter()
                     .cloned()
-                    .for_each(|(next, new_allocation, grey_feilds)| {
+                    .for_each(|(next, new_allocation, grey_fields)| {
                         send(
                             &bus.bus,
                             Msg::End {
                                 release_to_gc: true,
                                 new_allocation,
                                 next: next as *mut u8,
-                                grey_feilds,
+                                grey_fields,
                                 white_start: self.invariant.white_start,
                                 white_end: self.invariant.white_end,
                             },
@@ -688,7 +688,7 @@ pub(crate) enum Msg {
         new_allocation: bool,
         /// Address of the 16 kB arena
         next: *const u8,
-        grey_feilds: u8,
+        grey_fields: u8,
         /// The condemned ptr range
         /// Will be replaced with epoch
         white_start: usize,

@@ -199,7 +199,7 @@ impl GcTypeInfo {
     ) -> fn(
         *const u8,
         offset: Offset,
-        grey_feilds: u8,
+        grey_fields: u8,
         invariant: *const Invariant,
         handlers: *mut Handlers,
     ) {
@@ -230,7 +230,7 @@ unsafe impl Sync for GcTypeInfo {}
 pub struct Invariant {
     pub(crate) white_start: usize,
     pub(crate) white_end: usize,
-    pub(crate) grey_feilds: u8,
+    pub(crate) grey_fields: u8,
     pub(crate) grey_self: bool,
 }
 
@@ -238,7 +238,7 @@ impl Invariant {
     pub(crate) const fn none() -> Self {
         Self {
             grey_self: false,
-            grey_feilds: 0b0000_0000,
+            grey_fields: 0b0000_0000,
             white_start: 0,
             white_end: 0,
         }
@@ -251,11 +251,11 @@ impl Invariant {
 }
 
 pub unsafe trait Trace: Immutable {
-    fn feilds(s: &Self, offset: u8, grey_feilds: u8, invariant: &Invariant) -> u8;
+    fn fields(s: &Self, offset: u8, grey_fields: u8, invariant: &Invariant) -> u8;
     unsafe fn evacuate<'e>(
         s: &Self,
         offset: Offset,
-        grey_feilds: u8,
+        grey_fields: u8,
         invariant: &Invariant,
         handlers: &mut Handlers,
     );
@@ -268,7 +268,7 @@ pub unsafe trait Trace: Immutable {
 }
 
 unsafe impl<T: Immutable> Trace for T {
-    default fn feilds(_: &Self, _: u8, _: u8, _: &Invariant) -> u8 {
+    default fn fields(_: &Self, _: u8, _: u8, _: &Invariant) -> u8 {
         // This check is superfluous
         // TODO ensure if gets optimized out
         if !T::HAS_GC {
@@ -295,10 +295,10 @@ unsafe impl<T: Immutable> Trace for T {
 
 unsafe impl<'r, T: Immutable + Trace> Trace for Gc<'r, T> {
     /// Returns the bit associated with a condemned ptr
-    fn feilds(s: &Self, offset: u8, grey_feilds: u8, invariant: &Invariant) -> u8 {
+    fn fields(s: &Self, offset: u8, grey_fields: u8, invariant: &Invariant) -> u8 {
         let bit = 1 << (offset % 8);
         let ptr = s.0 as *const T;
-        if grey_feilds & bit == bit && invariant.condemned(s.0 as *const T as *const _) {
+        if grey_fields & bit == bit && invariant.condemned(s.0 as *const T as *const _) {
             bit
         } else {
             0b0000_0000
@@ -379,9 +379,9 @@ unsafe impl<'r, T: Immutable + Trace> Trace for Gc<'r, T> {
 // std impls
 
 unsafe impl<T: Immutable> Trace for Option<T> {
-    default fn feilds(s: &Self, offset: u8, grey_feilds: u8, invariant: &Invariant) -> u8 {
+    default fn fields(s: &Self, offset: u8, grey_fields: u8, invariant: &Invariant) -> u8 {
         match s {
-            Some(t) => Trace::feilds(t, offset, grey_feilds, invariant),
+            Some(t) => Trace::fields(t, offset, grey_fields, invariant),
             None => 0b0000_0000,
         }
     }
@@ -389,12 +389,12 @@ unsafe impl<T: Immutable> Trace for Option<T> {
     unsafe fn evacuate<'e>(
         s: &Self,
         offset: u8,
-        grey_feilds: u8,
+        grey_fields: u8,
         invariant: &Invariant,
         handlers: &mut Handlers,
     ) {
         match s {
-            Some(t) => Trace::evacuate(t, offset, grey_feilds, invariant, handlers),
+            Some(t) => Trace::evacuate(t, offset, grey_fields, invariant, handlers),
             None => (),
         }
     }
@@ -416,29 +416,22 @@ unsafe impl<T: Immutable> Trace for Option<T> {
 }
 
 unsafe impl<A: Immutable, B: Immutable> Trace for (A, B) {
-    fn feilds((a, b): &Self, offset: u8, grey_feilds: u8, invariant: &Invariant) -> u8 {
+    fn fields((a, b): &Self, offset: u8, grey_fields: u8, invariant: &Invariant) -> u8 {
         let mut r = 0b0000_0000;
-        if (grey_feilds & 0b1000_0000) == 0b1000_0000 {
-            r |= Trace::feilds(a, offset, grey_feilds, invariant);
-        };
-
-        if (grey_feilds & 0b0100_0000) == 0b0100_0000 {
-            r |= Trace::feilds(b, offset + A::GC_COUNT, grey_feilds, invariant);
-        };
-
+        r |= Trace::fields(a, offset, grey_fields, invariant);
+        r |= Trace::fields(b, offset + A::GC_COUNT, grey_fields, invariant);
         r
     }
 
     unsafe fn evacuate<'e>(
         (a, b): &Self,
         offset: u8,
-        grey_feilds: u8,
+        grey_fields: u8,
         invariant: &Invariant,
         handlers: &mut Handlers,
     ) {
-        Trace::evacuate(a, offset, grey_feilds, invariant, handlers);
-
-        Trace::evacuate(b, offset + A::GC_COUNT, grey_feilds, invariant, handlers);
+        Trace::evacuate(a, offset, grey_fields, invariant, handlers);
+        Trace::evacuate(b, offset + A::GC_COUNT, grey_fields, invariant, handlers);
     }
 
     fn direct_gc_types(t: &mut HashMap<GcTypeInfo, TypeRow>, offset: u8) {
