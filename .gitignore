@@ -1,4 +1,3 @@
 /target
 Cargo.lock
 .vscode
-sundial-gc-derive/target
