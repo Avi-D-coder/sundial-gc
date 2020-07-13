@@ -321,7 +321,7 @@ unsafe impl<'o, 'n, 'r: 'n, O: NoGc + Immutable + 'o, N: NoGc + Immutable + 'r>
 impl<T: Immutable + Trace> Arena<T> {
     pub fn new() -> Arena<T> {
         if !T::PRE_CONDTION {
-            panic!("You need to derive Condemned for T")
+            panic!("You need to derive Trace for T")
         };
 
         // Register a bus for this thread type combo.

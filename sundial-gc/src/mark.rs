@@ -274,7 +274,7 @@ unsafe impl<T: Immutable> Trace for T {
         if !T::HAS_GC {
             0b0000_0000
         } else {
-            panic!("You need to derive Condemned for your type. Required due to a direct Gc<T>")
+            panic!("You need to derive Trace for your type. Required due to a direct Gc<T>")
         }
     }
 
@@ -287,17 +287,16 @@ unsafe impl<T: Immutable> Trace for T {
     default const GC_COUNT: u8 = 0;
     default const PRE_CONDTION: bool = if T::HAS_GC {
         // TODO When fmt is allowed in const s/your type/type_name::<T>()
-        panic!("You need to derive Condemned for your type. Required due to a direct Gc<T>");
+        panic!("You need to derive Trace for your type. Required due to a direct Gc<T>");
     } else {
         true
     };
 }
 
-unsafe impl<'r, T: Immutable + Trace> Trace for Gc<'r, T> {
+unsafe impl<'r, T: Trace> Trace for Gc<'r, T> {
     /// Returns the bit associated with a condemned ptr
     fn fields(s: &Self, offset: u8, grey_fields: u8, invariant: &Invariant) -> u8 {
         let bit = 1 << (offset % 8);
-        let ptr = s.0 as *const T;
         if grey_fields & bit == bit && invariant.condemned(s.0 as *const T as *const _) {
             bit
         } else {
@@ -378,7 +377,7 @@ unsafe impl<'r, T: Immutable + Trace> Trace for Gc<'r, T> {
 
 // std impls
 
-unsafe impl<T: Immutable> Trace for Option<T> {
+unsafe impl<T: Trace> Trace for Option<T> {
     default fn fields(s: &Self, offset: u8, grey_fields: u8, invariant: &Invariant) -> u8 {
         match s {
             Some(t) => Trace::fields(t, offset, grey_fields, invariant),
@@ -411,7 +410,7 @@ unsafe impl<T: Immutable> Trace for Option<T> {
     default const PRE_CONDTION: bool = if T::PRE_CONDTION {
         true
     } else {
-        panic!("You need to derive Condemned for T. Required due to a direct Gc<A> in Option<T>");
+        panic!("You need to derive Trace for T. Required due to a direct Gc<A> in Option<T>");
     };
 }
 
@@ -450,6 +449,6 @@ unsafe impl<A: Immutable, B: Immutable> Trace for (A, B) {
     const PRE_CONDTION: bool = if A::PRE_CONDTION && B::PRE_CONDTION {
         true
     } else {
-        panic!("You need to derive Condemned for A & B. Required due to a direct Gc<T> in (A, B)");
+        panic!("You need to derive Trace for A & B. Required due to a direct Gc<T> in (A, B)");
     };
 }
