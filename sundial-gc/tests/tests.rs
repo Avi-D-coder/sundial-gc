@@ -18,83 +18,21 @@ use std::{
     time::Duration,
 };
 use sundial_gc::arena::*;
-use sundial_gc::auto_traits::*;
 use sundial_gc::gc::Gc;
 use sundial_gc::{mark::*, TRIGGER_MAJOR_GC};
+use sundial_gc_derive::*;
 
 fn log_init() {
     let _ = env_logger::builder().is_test(true).try_init();
 }
 
-// #[derive(Trace, Mark)
-struct List<'r, T: 'r> {
+#[derive(Trace)]
+struct List<'r, T>
+where
+    T: 'r,
+{
     t: T,
-    next: Option<Gc<'r, List<'r, T>>>,
-}
-
-unsafe impl<'r, T: Immutable + Trace + 'r> Trace for List<'r, T> {
-    default fn fields(x: &Self, offset: u8, grey_fields: u8, invariant: &Invariant) -> u8 {
-        assert!(Self::PRE_CONDTION);
-        let mut bloom = 0b0000000;
-        bloom |= Trace::fields(&x.t, offset, grey_fields, invariant);
-
-        bloom |= Trace::fields(&x.next, offset + T::GC_COUNT, grey_fields, invariant);
-        bloom
-    }
-
-    default unsafe fn evacuate<'e>(
-        s: &Self,
-        offset: u8,
-        grey_fields: u8,
-        invariant: &Invariant,
-        handlers: &mut Handlers,
-    ) {
-        Trace::evacuate(&s.t, offset, grey_fields, invariant, handlers);
-        Trace::evacuate(&s.next, offset, grey_fields, invariant, handlers);
-    }
-
-    default fn direct_gc_types(t: &mut std::collections::HashMap<GcTypeInfo, TypeRow>, offset: u8) {
-        T::direct_gc_types(t, offset);
-        Option::<Gc<'r, List<'r, T>>>::direct_gc_types(t, offset);
-    }
-
-    default fn transitive_gc_types(tti: *mut Tti) {
-        T::transitive_gc_types(tti);
-        Option::<Gc<'r, List<'r, T>>>::transitive_gc_types(tti);
-    }
-
-    default const GC_COUNT: u8 = T::GC_COUNT + Option::<Gc<'r, List<'r, T>>>::GC_COUNT;
-    default const PRE_CONDTION: bool =
-        if T::PRE_CONDTION && Option::<Gc<'r, List<'r, T>>>::PRE_CONDTION {
-            true
-        } else {
-            panic!("You need to derive Condemned for your type. Required due to a direct Gc<T>");
-        };
-}
-
-unsafe impl<'r, T: Immutable + NoGc + 'r> Trace for List<'r, T> {
-    fn fields(x: &Self, offset: u8, grey_fields: u8, invariant: &Invariant) -> u8 {
-        assert!(Self::PRE_CONDTION);
-        let mut bloom = 0b0000000;
-        bloom |= Trace::fields(&x.next, offset, grey_fields, invariant);
-        bloom
-    }
-
-    fn direct_gc_types(t: &mut std::collections::HashMap<GcTypeInfo, TypeRow>, offset: u8) {
-        T::direct_gc_types(t, offset);
-        Option::<Gc<'r, List<'r, T>>>::direct_gc_types(t, offset);
-    }
-
-    fn transitive_gc_types(tti: *mut Tti) {
-        Option::<Gc<'r, List<'r, T>>>::transitive_gc_types(tti);
-    }
-
-    const GC_COUNT: u8 = Option::<Gc<'r, List<'r, T>>>::GC_COUNT;
-    const PRE_CONDTION: bool = if Option::<Gc<'r, List<'r, T>>>::PRE_CONDTION {
-        true
-    } else {
-        panic!("You need to derive Condemned for your type. Required due to a direct Gc<T>");
-    };
+    _next: Option<Gc<'r, List<'r, T>>>,
 }
 
 #[test]
@@ -106,9 +44,9 @@ fn churn_list() {
     let lists: Arena<List<Gc<usize>>> = Arena::new();
     let one_two = lists.gc_alloc(List {
         t: gc_one,
-        next: Some(lists.gc_alloc(List {
+        _next: Some(lists.gc_alloc(List {
             t: usizes.gc_alloc(2),
-            next: None,
+            _next: None,
         })),
     });
 
@@ -119,30 +57,7 @@ fn churn_list() {
     let _ = one_two.t;
 }
 
-unsafe impl<'r> Trace for Foo<'r> {
-    fn fields(s: &Self, offset: u8, grey_fields: u8, invariant: &Invariant) -> u8 {
-        assert!(Self::PRE_CONDTION);
-        let mut bloom = 0b0000000;
-        bloom |= Trace::fields(&s._bar, offset, grey_fields, invariant);
-        bloom
-    }
-
-    fn direct_gc_types(t: &mut std::collections::HashMap<GcTypeInfo, TypeRow>, offset: u8) {
-        Gc::<'r, usize>::direct_gc_types(t, offset);
-    }
-
-    fn transitive_gc_types(tti: *mut Tti) {
-        Gc::<'r, usize>::transitive_gc_types(tti);
-    }
-
-    const GC_COUNT: u8 = Gc::<'r, usize>::GC_COUNT;
-    const PRE_CONDTION: bool = if Gc::<'r, usize>::PRE_CONDTION {
-        true
-    } else {
-        panic!("You need to derive Condemned for your type. Required due to a direct Gc<T>");
-    };
-}
-
+#[derive(Trace)]
 struct Foo<'r> {
     _bar: Gc<'r, usize>,
 }
@@ -249,27 +164,4 @@ fn immutable_test() {
     // let mutexes: Arena<Mutex<usize>> = Arena::new();
 
     let _mutexes: Arena<Box<std::sync::Arc<usize>>> = Arena::new();
-}
-
-#[test]
-fn binary_tree_test() {
-    #[allow(dead_code)]
-    enum BinaryTree<'r, K, V> {
-        Empty,
-        Branch(Gc<'r, (K, Self, Self, V)>),
-    }
-
-    impl<'r, K: Ord, V> BinaryTree<'r, K, V> {
-        #[allow(dead_code)]
-        fn get(&self, key: &K) -> Option<&V> {
-            match self {
-                BinaryTree::Empty => None,
-                BinaryTree::Branch(Gc((k, l, r, v), _)) => match key.cmp(k) {
-                    std::cmp::Ordering::Equal => Some(v),
-                    std::cmp::Ordering::Less => l.get(key),
-                    std::cmp::Ordering::Greater => r.get(key),
-                },
-            }
-        }
-    }
 }

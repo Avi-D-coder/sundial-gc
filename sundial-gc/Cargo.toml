@@ -10,6 +10,7 @@ log = "0.4.8"
 lazy_static = "1.4.0"
 smallvec = "1"
 rustc-hash = "1.1.0"
+sundial-gc-derive = { path = "../sundial-gc-derive" }
 
 [dev-dependencies]
 env_logger = "0.7.1"
