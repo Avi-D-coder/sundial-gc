@@ -19,41 +19,22 @@ use std::{
 /// `RelatedTypeStates` will implement `Send`
 pub(crate) struct TypeState {
     pub(crate) type_info: GcTypeInfo,
-    handler: UnsafeCell<Option<HandlerManager>>,
     /// Map Type to Bit
     buses: HashMap<ThreadId, BusPtr>,
     arenas: UnsafeCell<Arenas>,
-    state: UnsafeCell<State>,
+    // TODO support multiple simultaneous states
+    state: UnsafeCell<Option<State>>,
     relations: UnsafeCell<ActiveRelations>,
 }
 
 impl TypeState {
-    /// `condemned` is the range the worker knew about.
-    fn start(&self, next: *const u8, white: Range<usize>) {
-        let state = unsafe { &mut *self.state.get() };
-        if let Some(true) = self.invariant().map(|i| i.contains(white)) {
-            state
-                .pending
-                .arenas
-                .insert(HeaderUnTyped::from(next), state.epoch);
-        } else if self.invariant().is_some() {
-            state.latest_grey = state.epoch;
-            state.pending.known_grey += 1;
-        }
-    }
-
-    fn invariant(&self) -> Option<Invariant> {
-        unsafe { &*self.handler.get() }
-            .as_ref()
-            .map(|h| h.invariant)
-    }
-
     fn step(&self, free: &mut FreeList) {
         let state = unsafe { &mut *self.state.get() };
         let arenas = unsafe { &mut *self.arenas.get() };
-        let handler = unsafe { &mut *self.handler.get() };
 
-        state.epoch += 1;
+        if let Some(s) = state {
+            s.epoch += 1;
+        };
 
         let mut grey: SmallVec<[(*const u8, u8); 16]> = SmallVec::new();
 
@@ -75,7 +56,9 @@ impl TypeState {
                             next: *next
                         }
                     );
-                    self.start(*next, *white_start..*white_end);
+                    if let Some(state) = state {
+                        state.start(*next, *white_start..*white_end);
+                    };
                     *msg = Msg::Slot;
                     None
                 }
@@ -90,8 +73,8 @@ impl TypeState {
                 } => {
                     let next = *next;
 
-                    let ret = if let Some(inv) = self.invariant() {
-                        if inv.contains(*white_start..*white_end) {
+                    let ret = if let Some(state) = state {
+                        if state.handler.invariant.contains(*white_start..*white_end) {
                             if !*new_allocation {
                                 state.resolve(next)
                             };
@@ -139,9 +122,9 @@ impl TypeState {
                         log::trace!("GC sent Arena {:?}", *next);
                     };
 
-                    if let Some(i) = self.invariant() {
-                        if i != *invariant {
-                            *invariant = i
+                    if let Some(state) = state {
+                        if state.handler.invariant != *invariant {
+                            *invariant = state.handler.invariant
                         }
                     };
 
@@ -155,7 +138,11 @@ impl TypeState {
                 log::trace!("Adding Msg::GC to bus");
                 bus.iter_mut().filter(|m| m.is_slot()).next().map(|slot| {
                     let next = Some(arenas.partial.get_arena(&self.type_info, free));
-                    if let Some(invariant) = self.invariant() {
+                    if let Some(State {
+                        handler: HandlerManager { invariant, .. },
+                        ..
+                    }) = *state
+                    {
                         *slot = Msg::Gc { next, invariant };
                     } else {
                         *slot = Msg::Gc {
@@ -171,7 +158,10 @@ impl TypeState {
         });
 
         // trace grey, updating refs
-        if let Some(ref mut handler) = handler {
+        if let Some(State {
+            ref mut handler, ..
+        }) = state
+        {
             grey.iter().for_each(|(next, bits)| {
                 handler.root(*next as *mut u8, self.type_info.align, self.type_info.size)
             });
@@ -197,6 +187,7 @@ struct Pending {
 }
 
 struct State {
+    handler: HandlerManager,
     /// The last epoch we saw a grey in.
     latest_grey: usize,
     /// `epoch` is not synchronized across threads.
@@ -216,6 +207,18 @@ struct State {
 }
 
 impl State {
+    /// `condemned` is the range the worker knew about.
+    fn start(&mut self, next: *const u8, white: Range<usize>) {
+        if self.handler.invariant.contains(white) {
+            self.pending
+                .arenas
+                .insert(HeaderUnTyped::from(next), self.epoch);
+        } else {
+            self.latest_grey = self.epoch;
+            self.pending.known_grey += 1;
+        }
+    }
+
     /// resolve must be called on every Arena.
     /// It's the dual of `TypeState.start`.
     fn resolve(&mut self, next: *const u8) {
@@ -226,6 +229,10 @@ impl State {
         } else {
             self.pending.known_grey -= 1;
         };
+    }
+
+    fn try_free(&self) -> bool {
+        self.waiting_trans.is_empty()
     }
 }
 
@@ -367,7 +374,7 @@ impl HandlerManager {
         }
     }
 
-    /// Return true when new values were evacuated.
+    /// Returns `true` when new values were evacuated.
     fn root_grey_children(&mut self) -> bool {
         let HandlerManager {
             handlers,
@@ -392,33 +399,39 @@ impl HandlerManager {
             .filter_map(|(n, o)| if n.1 == o { None } else { Some(n) })
             .for_each(|(i, next)| {
                 let child_ts = eff_types[i];
-                unsafe {
-                    (&mut *child_ts.handler.get()).as_mut().unwrap().root(
-                        *next,
-                        child_ts.type_info.align,
-                        child_ts.type_info.size,
-                    );
-                }
+
+                // Root partial Arenas if child is undergoing a GC.
+                if let Some(state) = unsafe { &mut *child_ts.state.get() } {
+                    state
+                        .handler
+                        .root(*next, child_ts.type_info.align, child_ts.type_info.size);
+                };
             });
 
         handlers
             .filled
             .iter_mut()
             .enumerate()
-            .for_each(|(i, nexts)| {
+            .for_each(|(i, headers)| {
                 let child_ts = eff_types[i];
-                let child_handler = unsafe {
-                    (&mut *child_ts.handler.get().as_mut().unwrap())
-                        .as_mut()
-                        .unwrap()
-                };
-                nexts.into_iter().for_each(|next| {
-                    child_handler.root(
-                        *next as *mut u8,
-                        child_ts.type_info.align,
-                        child_ts.type_info.size,
-                    )
+                let child_arenas = unsafe { &mut *child_ts.arenas.get() };
+
+                headers.iter().for_each(|header| {
+                    let b = child_arenas.full.insert(*header);
+                    // Assert full will never have `header`.
+                    debug_assert!(b);
                 });
+
+                // Root filled Arenas if child is undergoing a GC.
+                if let Some(child_state) = unsafe { &mut *child_ts.state.get() } {
+                    headers.iter().for_each(|header| {
+                        child_state.handler.root(
+                            *header as *mut u8,
+                            child_ts.type_info.align,
+                            child_ts.type_info.size,
+                        );
+                    });
+                };
             });
 
         *last_nexts = handlers.nexts.clone();
@@ -458,21 +471,9 @@ impl TotalRelations {
         let ts = active.get(&type_info).cloned().unwrap_or_else(|| {
             let ts = Box::leak(Box::new(TypeState {
                 type_info,
-                handler: UnsafeCell::new(None),
                 buses: Default::default(),
                 arenas: UnsafeCell::new(Arenas::default()),
-                state: UnsafeCell::new(State {
-                    latest_grey: 0,
-                    epoch: 0,
-                    transitive_epoch: 0,
-                    pending: Pending {
-                        known_transitive_grey: 0,
-                        known_grey: 0,
-                        arenas: Default::default(),
-                    },
-                    waiting_direct: Default::default(),
-                    waiting_trans: Default::default(),
-                }),
+                state: UnsafeCell::new(None),
                 relations: UnsafeCell::new(self.new_active(&type_info, active)),
             }));
             let ts = &*ts;
