@@ -19,6 +19,10 @@ use std::{
 };
 
 pub const ARENA_SIZE: usize = 16384;
+#[repr(align(16384))]
+pub(crate) struct Mem {
+    _mem: [u8; ARENA_SIZE],
+}
 
 pub struct Arena<T: Trace + Immutable> {
     // TODO compact representation of arenas
@@ -146,11 +150,6 @@ pub(crate) fn index(ptr: *const u8, size: u16, align: u16) -> u16 {
     let header = HeaderUnTyped::from(ptr);
     let low = header as usize + HeaderUnTyped::low_offset(align) as usize;
     ((ptr as usize - low) / size as usize) as u16
-}
-
-#[repr(align(16384))]
-pub(crate) struct Mem {
-    _mem: [u8; ARENA_SIZE],
 }
 
 unsafe impl<'o, 'n, 'r: 'n, O: Trace + 'o, N: Trace + 'r> Mark<'o, 'n, 'r, O, N> for Arena<N> {

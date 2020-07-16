@@ -2,9 +2,10 @@ use super::gc::*;
 use crate::{
     arena::{Arena, Header, HeaderUnTyped},
     auto_traits::{HasGc, Immutable},
+    gc_logic::type_state::TypeState,
 };
 use smallvec::SmallVec;
-use std::ops::Index;
+use std::ops::{Index, Range};
 use std::{
     any,
     collections::{HashMap, HashSet},
@@ -53,7 +54,7 @@ pub(crate) struct Translator {
     offsets: SmallVec<[Offset; 16]>,
 }
 
-pub(crate) type EffTypes = SmallVec<[GcTypeInfo; 2]>;
+pub(crate) type EffTypes = SmallVec<[&'static TypeState; 5]>;
 
 impl Translator {
     pub(crate) fn from<T: Trace>(effs: &EffTypes) -> (Translator, u8) {
@@ -68,7 +69,12 @@ impl Translator {
             .into_iter()
             .for_each(|(ti, (type_offs, bits))| {
                 bloom |= bits;
-                if let Some((i, _)) = effs.iter().enumerate().find(|(_, eff)| *eff == &ti) {
+                if let Some((i, _)) = effs
+                    .iter()
+                    .cloned()
+                    .enumerate()
+                    .find(|(_, eff)| eff.type_info == ti)
+                {
                     type_offs.iter().for_each(|off| {
                         if offsets.len() < *off as usize {
                             offsets
@@ -247,6 +253,10 @@ impl Invariant {
     pub(crate) fn condemned<T>(&self, ptr: *const T) -> bool {
         (self.white_start..self.white_end).contains(&(ptr as usize))
             && unsafe { &*HeaderUnTyped::from(ptr as *const _) }.condemned
+    }
+
+    pub(crate) fn contains(&self, r: Range<usize>) -> bool {
+        self.white_start <= r.start && self.white_end >= r.end
     }
 }
 

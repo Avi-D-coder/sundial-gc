@@ -1,3 +1,6 @@
+mod free_list;
+pub(crate) mod type_state;
+
 use crate::arena::*;
 use crate::{gc::RootIntern, mark::*};
 use log::info;
@@ -101,7 +104,6 @@ impl Default for Parents {
     }
 }
 
-#[derive(Debug)]
 struct HandlerManager {
     handlers: Handlers,
     eff_types: EffTypes,
@@ -151,8 +153,8 @@ impl HandlerManager {
             log::trace!("this_nexts: {:?}", handlers.nexts);
         };
 
-        let mut unclean: SmallVec<[(&GcTypeInfo, SmallVec<[*mut u8; 4]>); 4]> =
-            eff_types.iter().map(|ti| (ti, SmallVec::new())).collect();
+        let mut unclean: SmallVec<[(&GcTypeInfo, SmallVec<[*mut u8; 4]>); 4]> = todo!();
+        // eff_types.iter().map(|ti| (ti, SmallVec::new())).collect();
 
         handlers
             .filled
@@ -830,7 +832,7 @@ fn gc_loop() {
                                 .into_iter()
                                 .zip(eff_types.into_iter())
                                 .for_each(|(next, ti)| {
-                                    let ts = active.get_mut(&ti).unwrap();
+                                    let ts = active.get_mut(todo!()).unwrap();
                                     // Add arenas left in Handler to the pool;
                                     if next as usize % ARENA_SIZE == 0 {
                                         ts.arenas.full.insert(next as *mut HeaderUnTyped);
@@ -869,7 +871,7 @@ fn gc_loop() {
                     grey_self: true,
                 };
 
-                ts.set_invariant(inv, &mut free, &ts.direct_children.clone());
+                ts.set_invariant(inv, &mut free, todo!()); // &ts.direct_children.clone());
 
                 // FIXME setting header.condemned causes a race with Root::from.
                 // The solution is to move switch away from Mutex<HashMap>

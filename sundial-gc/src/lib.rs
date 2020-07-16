@@ -23,7 +23,7 @@ pub mod auto_traits;
 pub use auto_traits::{Immutable, NoGc};
 pub mod collections;
 pub mod gc;
-pub use gc::{Box, Gc, Root};
+pub use gc::{Gc, Root};
 mod gc_logic;
 pub use gc_logic::TRIGGER_MAJOR_GC;
 pub mod mark;
