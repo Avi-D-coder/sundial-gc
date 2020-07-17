@@ -22,8 +22,8 @@ pub(crate) struct TypeState {
     /// Map Type to Bit
     buses: HashMap<ThreadId, BusPtr>,
     arenas: UnsafeCell<Arenas>,
-    // TODO support multiple simultaneous states
-    state: UnsafeCell<Option<State>>,
+    // TODO support multiple simultaneous cycles.
+    state: UnsafeCell<Option<Cycle>>,
     relations: UnsafeCell<ActiveRelations>,
 }
 
@@ -138,7 +138,7 @@ impl TypeState {
                 log::trace!("Adding Msg::GC to bus");
                 bus.iter_mut().filter(|m| m.is_slot()).next().map(|slot| {
                     let next = Some(arenas.partial.get_arena(&self.type_info, free));
-                    if let Some(State {
+                    if let Some(Cycle {
                         handler: HandlerManager { invariant, .. },
                         ..
                     }) = *state
@@ -158,7 +158,7 @@ impl TypeState {
         });
 
         // trace grey, updating refs
-        if let Some(State {
+        if let Some(Cycle {
             ref mut handler, ..
         }) = state
         {
@@ -186,7 +186,7 @@ struct Pending {
     arenas: HashMap<*const HeaderUnTyped, usize>,
 }
 
-struct State {
+struct Cycle {
     handler: HandlerManager,
     /// The last epoch we saw a grey in.
     latest_grey: usize,
@@ -206,7 +206,7 @@ struct State {
     waiting_trans: Vec<(&'static TypeState, usize)>,
 }
 
-impl State {
+impl Cycle {
     /// `condemned` is the range the worker knew about.
     fn start(&mut self, next: *const u8, white: Range<usize>) {
         if self.handler.invariant.contains(white) {
