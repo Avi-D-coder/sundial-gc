@@ -20,7 +20,7 @@ use std::{
 pub(crate) struct TypeState {
     pub(crate) type_info: GcTypeInfo,
     /// Map Type to Bit
-    buses: HashMap<ThreadId, BusPtr>,
+    buses: UnsafeCell<HashMap<ThreadId, BusPtr>>,
     arenas: UnsafeCell<Arenas>,
     pending: UnsafeCell<Pending>,
     // TODO support multiple simultaneous cycles.
@@ -58,12 +58,13 @@ impl TypeState {
         let cycle = &mut *self.state.get();
         let arenas = &mut *self.arenas.get();
         let pending = &mut *self.pending.get();
+        let buses = &mut *self.buses.get();
 
         pending.epoch += 1;
 
         let mut grey: SmallVec<[(*const u8, u8); 16]> = SmallVec::new();
 
-        self.buses.iter().for_each(|(_, bus)| {
+        buses.iter().for_each(|(_, bus)| {
             let mut has_gc_msg = false;
             let mut bus = bus.0.lock().expect("Could not unlock bus");
             log::trace!("GC Locked bus");
@@ -466,8 +467,8 @@ impl TotalRelations {
         &mut self,
         active: &mut HashMap<&'static GcTypeInfo, &'static TypeState>,
         type_info: GcTypeInfo,
-        t_id: ThreadId,
-        bus: BusPtr,
+        thread_id: ThreadId,
+        bus_ptr: BusPtr,
     ) {
         let ts = active.get(&type_info).cloned().unwrap_or_else(|| {
             let ts = Box::leak(Box::new(TypeState {
@@ -540,6 +541,9 @@ impl TotalRelations {
                 });
             ts
         });
+
+        let buses = unsafe { &mut *ts.buses.get() };
+        buses.insert(thread_id, bus_ptr);
     }
 }
 
