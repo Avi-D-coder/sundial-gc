@@ -482,13 +482,25 @@ impl TotalRelations {
                     arenas: Default::default(),
                 }),
                 state: UnsafeCell::new(None),
-                relations: UnsafeCell::new(self.new_active(&type_info, active)),
+                relations: UnsafeCell::new(ActiveRelations {
+                    direct_parents: Default::default(),
+                    transitive_parents: Default::default(),
+                    direct_children: Default::default(),
+                    transitive_children: Default::default(),
+                }),
             }));
+
             let ts = &*ts;
-            active.entry(&ts.type_info).or_insert(ts);
+            let b = active.insert(&ts.type_info, ts);
+            debug_assert!(b.is_none());
+
+            let relations = unsafe { &mut *ts.relations.get() };
+
+            // The new `TypeState` is added to active before we generate active relations,
+            // so self referential types contain &TypeState and TypeRow back to them selfs.
+            *relations = self.new_active(&type_info, active);
 
             // Add references to the new `TypeState` to related `TypeState`s
-            let relations = unsafe { &*ts.relations.get() };
             relations
                 .direct_parents
                 .iter()
