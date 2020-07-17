@@ -41,7 +41,7 @@ impl TypeState {
         }
     }
 
-    /// resolve must be called on every Arena.
+    /// `resolve` must be called on every Arena.
     /// It's the dual of `TypeState.start`.
     fn resolve(pending: &mut Pending, next: *const u8) {
         if let Some(e) = pending.arenas.remove(&HeaderUnTyped::from(next)) {
@@ -53,10 +53,11 @@ impl TypeState {
         };
     }
 
-    fn step(&self, free: &mut FreeList) {
-        let state = unsafe { &mut *self.state.get() };
-        let arenas = unsafe { &mut *self.arenas.get() };
-        let pending = unsafe { &mut *self.pending.get() };
+    /// For safe usage See `TypeState` docs.
+    unsafe fn step(&self, free: &mut FreeList) {
+        let cycle = &mut *self.state.get();
+        let arenas = &mut *self.arenas.get();
+        let pending = &mut *self.pending.get();
 
         pending.epoch += 1;
 
@@ -80,8 +81,8 @@ impl TypeState {
                             next: *next
                         }
                     );
-                    if let Some(state) = state {
-                        TypeState::start(pending, state, *next, *white_start..*white_end);
+                    if let Some(cycle) = cycle {
+                        TypeState::start(pending, cycle, *next, *white_start..*white_end);
                     };
                     *msg = Msg::Slot;
                     None
@@ -97,8 +98,8 @@ impl TypeState {
                 } => {
                     let next = *next;
 
-                    let ret = if let Some(state) = state {
-                        if state.handler.invariant.contains(*white_start..*white_end) {
+                    let ret = if let Some(cycle) = cycle {
+                        if cycle.handler.invariant.contains(*white_start..*white_end) {
                             if !*new_allocation {
                                 TypeState::resolve(pending, next);
                             };
@@ -108,11 +109,11 @@ impl TypeState {
                             if *grey_fields == 0b0000_0000 {
                                 None
                             } else {
-                                state.latest_grey = pending.epoch;
+                                cycle.latest_grey = pending.epoch;
                                 Some((next, *grey_fields))
                             }
                         } else {
-                            state.latest_grey = pending.epoch;
+                            cycle.latest_grey = pending.epoch;
                             Some((next, 0b1111_1111))
                         }
                     } else {
@@ -146,9 +147,9 @@ impl TypeState {
                         log::trace!("GC sent Arena {:?}", *next);
                     };
 
-                    if let Some(state) = state {
-                        if state.handler.invariant != *invariant {
-                            *invariant = state.handler.invariant
+                    if let Some(cycle) = cycle {
+                        if cycle.handler.invariant != *invariant {
+                            *invariant = cycle.handler.invariant
                         }
                     };
 
@@ -165,7 +166,7 @@ impl TypeState {
                     if let Some(Cycle {
                         handler: HandlerManager { invariant, .. },
                         ..
-                    }) = *state
+                    }) = *cycle
                     {
                         *slot = Msg::Gc { next, invariant };
                     } else {
@@ -184,7 +185,7 @@ impl TypeState {
         // trace grey, updating refs
         if let Some(Cycle {
             ref mut handler, ..
-        }) = state
+        }) = cycle
         {
             grey.iter().for_each(|(next, bits)| {
                 handler.root(*next as *mut u8, self.type_info.align, self.type_info.size)
@@ -230,13 +231,14 @@ struct Cycle {
 }
 
 impl Cycle {
-    fn try_free(&self) -> bool {
+    /// Ensures no ptrs exist in to the `TypeState`'s condemned arenas.
+    fn safe_to_free(&self) -> bool {
         self.waiting_trans.is_empty()
     }
 }
 
 struct Arenas {
-    /// The last seen `next`. ptr + size..high_offset is owned by gc
+    /// The last seen `next`, ptr + size..high_offset is owned by gc
     /// Will not include all Arenas owned by workers.
     /// Only contains Arenas that the gc owns some of.
     worker: HashMap<*const HeaderUnTyped, *const u8>,
