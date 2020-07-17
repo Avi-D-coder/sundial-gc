@@ -22,19 +22,43 @@ pub(crate) struct TypeState {
     /// Map Type to Bit
     buses: HashMap<ThreadId, BusPtr>,
     arenas: UnsafeCell<Arenas>,
+    pending: UnsafeCell<Pending>,
     // TODO support multiple simultaneous cycles.
     state: UnsafeCell<Option<Cycle>>,
     relations: UnsafeCell<ActiveRelations>,
 }
 
 impl TypeState {
+    /// `condemned` is the range the worker knew about.
+    fn start(pending: &mut Pending, cycle: &mut Cycle, next: *const u8, white: Range<usize>) {
+        if cycle.handler.invariant.contains(white) {
+            pending
+                .arenas
+                .insert(HeaderUnTyped::from(next), pending.epoch);
+        } else {
+            cycle.latest_grey = pending.epoch;
+            pending.known_grey += 1;
+        }
+    }
+
+    /// resolve must be called on every Arena.
+    /// It's the dual of `TypeState.start`.
+    fn resolve(pending: &mut Pending, next: *const u8) {
+        if let Some(e) = pending.arenas.remove(&HeaderUnTyped::from(next)) {
+            if e < pending.transitive_epoch {
+                pending.known_transitive_grey -= 1;
+            }
+        } else {
+            pending.known_grey -= 1;
+        };
+    }
+
     fn step(&self, free: &mut FreeList) {
         let state = unsafe { &mut *self.state.get() };
         let arenas = unsafe { &mut *self.arenas.get() };
+        let pending = unsafe { &mut *self.pending.get() };
 
-        if let Some(s) = state {
-            s.epoch += 1;
-        };
+        pending.epoch += 1;
 
         let mut grey: SmallVec<[(*const u8, u8); 16]> = SmallVec::new();
 
@@ -57,7 +81,7 @@ impl TypeState {
                         }
                     );
                     if let Some(state) = state {
-                        state.start(*next, *white_start..*white_end);
+                        TypeState::start(pending, state, *next, *white_start..*white_end);
                     };
                     *msg = Msg::Slot;
                     None
@@ -76,7 +100,7 @@ impl TypeState {
                     let ret = if let Some(state) = state {
                         if state.handler.invariant.contains(*white_start..*white_end) {
                             if !*new_allocation {
-                                state.resolve(next)
+                                TypeState::resolve(pending, next);
                             };
 
                             // Nothing was marked.
@@ -84,11 +108,11 @@ impl TypeState {
                             if *grey_fields == 0b0000_0000 {
                                 None
                             } else {
-                                state.latest_grey = state.epoch;
+                                state.latest_grey = pending.epoch;
                                 Some((next, *grey_fields))
                             }
                         } else {
-                            state.latest_grey = state.epoch;
+                            state.latest_grey = pending.epoch;
                             Some((next, 0b1111_1111))
                         }
                     } else {
@@ -176,6 +200,14 @@ impl TypeState {
 }
 
 struct Pending {
+    /// `epoch` is not synchronized across threads.
+    /// 2 epochs delineate Arena age.
+    /// 2 epoch are needed, since thread A may receive a GCed object from thread B in between the
+    ///   GC reading A & B's messages.
+    /// A's `Msg::Start` may be received in the next epoch after B's `Msg::End`.
+    /// `epoch` counts from 1, and resets when free is accomplished.
+    epoch: usize,
+    transitive_epoch: usize,
     /// Count of Arenas started before transitive_epoch.
     known_transitive_grey: usize,
     /// Count of Arenas started before `invariant`.
@@ -190,15 +222,6 @@ struct Cycle {
     handler: HandlerManager,
     /// The last epoch we saw a grey in.
     latest_grey: usize,
-    /// `epoch` is not synchronized across threads.
-    /// 2 epochs delineate Arena age.
-    /// 2 epoch are needed, since thread A may receive a GCed object from thread B in between the
-    ///   GC reading A & B's messages.
-    /// A's `Msg::Start` may be received in the next epoch after B's `Msg::End`.
-    /// `epoch` counts from 1, and resets when free is accomplished.
-    epoch: usize,
-    transitive_epoch: usize,
-    pending: Pending,
     /// Direct parents that may contain a condemned ptr.
     waiting_direct: Vec<&'static TypeState>,
     /// Transitive parents that may contain a condemned ptr on a workers stack.
@@ -207,30 +230,6 @@ struct Cycle {
 }
 
 impl Cycle {
-    /// `condemned` is the range the worker knew about.
-    fn start(&mut self, next: *const u8, white: Range<usize>) {
-        if self.handler.invariant.contains(white) {
-            self.pending
-                .arenas
-                .insert(HeaderUnTyped::from(next), self.epoch);
-        } else {
-            self.latest_grey = self.epoch;
-            self.pending.known_grey += 1;
-        }
-    }
-
-    /// resolve must be called on every Arena.
-    /// It's the dual of `TypeState.start`.
-    fn resolve(&mut self, next: *const u8) {
-        if let Some(e) = self.pending.arenas.remove(&HeaderUnTyped::from(next)) {
-            if e < self.transitive_epoch {
-                self.pending.known_transitive_grey -= 1;
-            }
-        } else {
-            self.pending.known_grey -= 1;
-        };
-    }
-
     fn try_free(&self) -> bool {
         self.waiting_trans.is_empty()
     }
@@ -473,6 +472,13 @@ impl TotalRelations {
                 type_info,
                 buses: Default::default(),
                 arenas: UnsafeCell::new(Arenas::default()),
+                pending: UnsafeCell::new(Pending {
+                    epoch: 0,
+                    transitive_epoch: 0,
+                    known_transitive_grey: 0,
+                    known_grey: 0,
+                    arenas: Default::default(),
+                }),
                 state: UnsafeCell::new(None),
                 relations: UnsafeCell::new(self.new_active(&type_info, active)),
             }));
