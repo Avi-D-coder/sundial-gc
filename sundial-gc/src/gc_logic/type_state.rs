@@ -28,6 +28,13 @@ pub(crate) struct TypeState {
     relations: UnsafeCell<ActiveRelations>,
 }
 
+impl PartialEq for TypeState {
+    /// Ptr equality for `TypeState`.
+    fn eq(&self, other: &Self) -> bool {
+        self as *const _ == other as *const _
+    }
+}
+
 impl TypeState {
     /// `condemned` is the range the worker knew about.
     fn start(pending: &mut Pending, cycle: &mut Cycle, next: *const u8, white: Range<usize>) {
@@ -225,15 +232,60 @@ struct Cycle {
     /// The last epoch we saw a grey in.
     latest_grey: usize,
     /// Direct parents that may contain a condemned ptr.
-    waiting_direct: Vec<&'static TypeState>,
+    waiting_direct: SmallVec<[&'static TypeState; 5]>,
     /// Transitive parents that may contain a condemned ptr on a workers stack.
     /// A map of `TypeState` -> `epoch: usize`
-    waiting_trans: Vec<(&'static TypeState, usize)>,
+    waiting_trans: SmallVec<[(&'static TypeState, usize); 5]>,
 }
 
 impl Cycle {
+    // TODO add granular cycles.
+    fn new(
+        type_state: &'static TypeState,
+        relations: &ActiveRelations,
+        free: &mut FreeList,
+    ) -> Cycle {
+        let direct_children: EffTypes = relations
+            .direct_children
+            .iter()
+            .map(|(ts, _)| *ts)
+            .collect();
+
+        let last_nexts: SmallVec<_> = direct_children
+            .iter()
+            .map(|ts| {
+                (free.alloc() as *mut _ as usize
+                    + HeaderUnTyped::high_offset(ts.type_info.align, ts.type_info.size) as usize)
+                    as *mut u8
+            })
+            .collect();
+
+        Cycle {
+            handler: HandlerManager {
+                handlers: Handlers {
+                    translator: type_state.type_info.translator_from_fn()(&direct_children).0,
+                    nexts: last_nexts.clone(),
+                    filled: last_nexts.iter().map(|_| SmallVec::new()).collect(),
+                    free,
+                },
+                eff_types: direct_children,
+                invariant: Invariant::all(),
+                evacuate_fn: unsafe { type_state.type_info.evacuate_fn() },
+                last_nexts,
+            },
+            latest_grey: 0,
+            waiting_direct: relations
+                .direct_parents
+                .iter()
+                .filter(|(ts, _)| *ts != type_state)
+                .map(|(ts, _)| *ts)
+                .collect(),
+            waiting_trans: SmallVec::new(),
+        }
+    }
+
     /// Ensures no ptrs exist in to the `TypeState`'s condemned arenas.
-    fn safe_to_free(&self) -> bool {
+    fn safe_to_free(&mut self, pending: &Pending) -> bool {
         self.waiting_trans.is_empty()
     }
 }
@@ -552,9 +604,9 @@ impl TotalRelations {
 struct ActiveRelations {
     // TODO revisit sizes
     direct_parents: SmallVec<[(&'static TypeState, TypeRow); 3]>,
-    transitive_parents: SmallVec<[&'static TypeState; 7]>,
+    transitive_parents: SmallVec<[&'static TypeState; 5]>,
     direct_children: SmallVec<[(&'static TypeState, TypeRow); 3]>,
-    transitive_children: SmallVec<[&'static TypeState; 7]>,
+    transitive_children: SmallVec<[&'static TypeState; 5]>,
 }
 
 impl TotalRelations {

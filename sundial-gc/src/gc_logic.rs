@@ -1,4 +1,4 @@
-mod free_list;
+pub(crate) mod free_list;
 pub(crate) mod type_state;
 
 use crate::arena::*;
@@ -595,7 +595,7 @@ impl TypeState {
             translator: self.type_info.translator_from_fn()(condemned_children).0,
             nexts,
             filled,
-            free,
+            free: todo!(),
         };
 
         self.handler = Some(HandlerManager {

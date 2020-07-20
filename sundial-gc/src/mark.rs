@@ -2,7 +2,7 @@ use super::gc::*;
 use crate::{
     arena::{Arena, Header, HeaderUnTyped},
     auto_traits::{HasGc, Immutable},
-    gc_logic::type_state::TypeState,
+    gc_logic::{free_list::FreeList, type_state::TypeState},
 };
 use smallvec::SmallVec;
 use std::ops::{Index, Range};
@@ -112,7 +112,7 @@ pub struct Handlers {
     pub(crate) filled: SmallVec<[SmallVec<[*mut HeaderUnTyped; 1]>; 4]>,
     // TODO not safe once we trace in parallel
     /// Header must be uninitialized!
-    pub(crate) free: *mut Vec<*mut HeaderUnTyped>,
+    pub(crate) free: *mut FreeList,
 }
 
 impl Handlers {
@@ -250,6 +250,15 @@ impl Invariant {
         }
     }
 
+    pub(crate) const fn all() -> Self {
+        Invariant {
+            white_start: 0,
+            white_end: usize::MAX,
+            grey_fields: 0b1111_1111,
+            grey_self: true,
+        }
+    }
+
     pub(crate) fn condemned<T>(&self, ptr: *const T) -> bool {
         (self.white_start..self.white_end).contains(&(ptr as usize))
             && unsafe { &*HeaderUnTyped::from(ptr as *const _) }.condemned
@@ -336,14 +345,9 @@ unsafe impl<'r, T: Trace> Trace for Gc<'r, T> {
                         .filled
                         .get_mut(i as usize)
                         .map(|v| v.push(header_addr as *mut HeaderUnTyped));
-                    let empty = &mut *handlers.free;
-                    next = empty
-                        .pop()
-                        .map(|header| {
-                            HeaderUnTyped::init(header);
-                            header as *mut T
-                        })
-                        .unwrap_or(Arena::alloc());
+                    let free = &mut *handlers.free;
+                    next = (free.alloc() as *mut _ as usize + Header::<T>::high_offset() as usize)
+                        as *mut T;
                     new_arena = true;
                 };
 
@@ -358,7 +362,7 @@ unsafe impl<'r, T: Trace> Trace for Gc<'r, T> {
                     ptr::drop_in_place(header);
 
                     let empty = &mut *handlers.free;
-                    empty.push(header)
+                    empty.dealloc(header as *mut _)
                 }
                 let old_ptr = sellf as *const Gc<T> as *mut *const T;
                 *old_ptr = next;
