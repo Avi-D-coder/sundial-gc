@@ -52,9 +52,9 @@ impl TypeState {
     /// It's the dual of `TypeState.start`.
     fn resolve(pending: &mut Pending, next: *const u8) {
         if let Some(e) = pending.arenas.remove(&HeaderUnTyped::from(next)) {
-            if e < pending.transitive_epoch {
-                pending.known_transitive_grey -= 1;
-            }
+            // if e < pending.transitive_epoch {
+            //     pending.known_transitive_grey -= 1;
+            // }
         } else {
             pending.known_grey -= 1;
         };
@@ -216,9 +216,9 @@ struct Pending {
     /// A's `Msg::Start` may be received in the next epoch after B's `Msg::End`.
     /// `epoch` counts from 1, and resets when free is accomplished.
     epoch: usize,
-    transitive_epoch: usize,
+    // transitive_epoch: usize,
     /// Count of Arenas started before transitive_epoch.
-    known_transitive_grey: usize,
+    // known_transitive_grey: usize,
     /// Count of Arenas started before `invariant`.
     known_grey: usize,
     /// `Arena.Header` started after `epoch`.
@@ -232,10 +232,10 @@ struct Cycle {
     /// The last epoch we saw a grey in.
     latest_grey: usize,
     /// Direct parents that may contain a condemned ptr.
-    waiting_direct: SmallVec<[&'static TypeState; 5]>,
+    waiting_direct_parents: SmallVec<[&'static TypeState; 5]>,
     /// Transitive parents that may contain a condemned ptr on a workers stack.
     /// A map of `TypeState` -> `epoch: usize`
-    waiting_trans: SmallVec<[(&'static TypeState, usize); 5]>,
+    waiting_transitive_parents: SmallVec<[(&'static TypeState, usize); 5]>,
 }
 
 impl Cycle {
@@ -274,19 +274,53 @@ impl Cycle {
                 last_nexts,
             },
             latest_grey: 0,
-            waiting_direct: relations
+            waiting_direct_parents: relations
                 .direct_parents
                 .iter()
                 .filter(|(ts, _)| *ts != type_state)
                 .map(|(ts, _)| *ts)
                 .collect(),
-            waiting_trans: SmallVec::new(),
+            waiting_transitive_parents: SmallVec::new(),
         }
     }
 
     /// Ensures no ptrs exist in to the `TypeState`'s condemned arenas.
-    fn safe_to_free(&mut self, pending: &Pending) -> bool {
-        self.waiting_trans.is_empty()
+    fn safe_to_free(&mut self, pending: &Pending, relations: &ActiveRelations) -> bool {
+        // TODO push don't pull from parent `TypeState`s.
+        let clean_direct_parents = || {
+            self.waiting_direct_parents.iter().all(|direct_parent| {
+                let dp_latest_grey = unsafe { &*direct_parent.state.get() }
+                    .as_ref()
+                    .unwrap()
+                    .latest_grey;
+                let dp_epoch = unsafe { &*direct_parent.pending.get() }.epoch;
+                dp_latest_grey < dp_epoch + 1
+            })
+        };
+
+        let clean_transitive_parents = || {
+            if self.waiting_transitive_parents.is_empty() {
+            } else {
+            }
+        };
+
+        if self.latest_grey < pending.epoch + 1 && clean_direct_parents() {
+            if self.waiting_transitive_parents.is_empty() {
+                self.waiting_transitive_parents = relations
+                    .transitive_parents
+                    .iter()
+                    .map(|ts| (*ts, unsafe { &*ts.pending.get() }.epoch + 1))
+                    .collect();
+
+                false
+            } else {
+                self.waiting_transitive_parents
+                    .iter()
+                    .all(|(ts, e)| *e < unsafe { &*ts.pending.get() }.epoch)
+            }
+        } else {
+            false
+        }
     }
 }
 
@@ -529,8 +563,8 @@ impl TotalRelations {
                 arenas: UnsafeCell::new(Arenas::default()),
                 pending: UnsafeCell::new(Pending {
                     epoch: 0,
-                    transitive_epoch: 0,
-                    known_transitive_grey: 0,
+                    // transitive_epoch: 0,
+                    // known_transitive_grey: 0,
                     known_grey: 0,
                     arenas: Default::default(),
                 }),
