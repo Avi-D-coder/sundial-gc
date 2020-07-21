@@ -195,17 +195,16 @@ impl TypeState {
         });
 
         // trace grey, updating refs
-        if let Some(Round {
-            ref mut handler, ..
-        }) = cycle
-        {
+        if let Some(cycle) = cycle {
             grey.iter().for_each(|(next, bits)| {
-                handler.root(*next as *mut u8, self.type_info.align, self.type_info.size)
+                cycle
+                    .handler
+                    .root(*next as *mut u8, self.type_info.align, self.type_info.size)
             });
 
-            arenas.evac_roots(&self.type_info, handler, free);
+            cycle.evac_roots(&self.type_info, arenas, free);
 
-            while handler.root_grey_children() {}
+            while cycle.handler.root_grey_children() {}
         }
 
         // TODO manage state and free memory
@@ -231,10 +230,13 @@ struct Pending {
     arenas: HashMap<*const HeaderUnTyped, usize>,
 }
 
+/// A single collection cycle.
 struct Round {
     handler: HandlerManager,
     /// The last epoch we saw a grey in.
     latest_grey: usize,
+    /// Arenas being freed.
+    condemned: HashSet<*mut u8>,
     /// Direct parents that may contain a condemned ptr.
     waiting_direct_parents: SmallVec<[&'static TypeState; 5]>,
     /// Transitive parents that may contain a condemned ptr on a workers stack.
@@ -278,6 +280,7 @@ impl Round {
                 last_nexts,
             },
             latest_grey: 0,
+            condemned: Default::default(),
             waiting_direct_parents: relations
                 .direct_parents
                 .iter()
@@ -302,12 +305,6 @@ impl Round {
             })
         };
 
-        let clean_transitive_parents = || {
-            if self.waiting_transitive_parents.is_empty() {
-            } else {
-            }
-        };
-
         if self.latest_grey < pending.epoch + 1 && clean_direct_parents() {
             if self.waiting_transitive_parents.is_empty() {
                 self.waiting_transitive_parents = relations
@@ -326,61 +323,11 @@ impl Round {
             false
         }
     }
-}
 
-struct Arenas {
-    /// The last seen `next`, ptr + size..high_offset is owned by gc
-    /// Will not include all Arenas owned by workers.
-    /// Only contains Arenas that the gc owns some of.
-    worker: HashMap<*const HeaderUnTyped, *const u8>,
-    /// Arena owned by GC, that have not been completely filled.
-    partial: Partial,
-    full: HashSet<*mut HeaderUnTyped>,
-    condemned: HashSet<*mut u8>,
-}
-
-struct Partial(HashSet<*mut u8>);
-
-impl Default for Partial {
-    fn default() -> Self {
-        Partial(HashSet::new())
-    }
-}
-
-impl Default for Arenas {
-    fn default() -> Self {
-        Arenas {
-            worker: HashMap::new(),
-            partial: Partial::default(),
-            full: HashSet::new(),
-            condemned: HashSet::new(),
-        }
-    }
-}
-
-impl Partial {
-    /// Reuse or allocate a new Arena
-    fn get_arena(&mut self, type_info: &GcTypeInfo, free: &mut FreeList) -> *mut u8 {
-        self.0.iter().cloned().next().unwrap_or(
-            (free.alloc() as *mut _ as usize
-                + HeaderUnTyped::high_offset(type_info.align, type_info.size) as usize)
-                as *mut u8,
-        )
-    }
-}
-
-impl Arenas {
-    fn evac_roots(
-        &mut self,
-        type_info: &GcTypeInfo,
-        handler: &mut HandlerManager,
-        free: &mut FreeList,
-    ) {
-        let Arenas {
-            full,
-            partial,
-            condemned,
-            ..
+    fn evac_roots(&mut self, type_info: &GcTypeInfo, arenas: &mut Arenas, free: &mut FreeList) {
+        let Arenas { full, partial, .. } = arenas;
+        let Round {
+            handler, condemned, ..
         } = self;
         condemned.iter().cloned().for_each(|next| {
             let header = unsafe { &*HeaderUnTyped::from(next) };
@@ -432,6 +379,47 @@ impl Arenas {
         });
     }
 }
+
+struct Arenas {
+    /// The last seen `next`, ptr + size..high_offset is owned by gc
+    /// Will not include all Arenas owned by workers.
+    /// Only contains Arenas that the gc owns some of.
+    worker: HashMap<*const HeaderUnTyped, *const u8>,
+    /// Arena owned by GC, that have not been completely filled.
+    partial: Partial,
+    full: HashSet<*mut HeaderUnTyped>,
+}
+
+struct Partial(HashSet<*mut u8>);
+
+impl Default for Partial {
+    fn default() -> Self {
+        Partial(HashSet::new())
+    }
+}
+
+impl Default for Arenas {
+    fn default() -> Self {
+        Arenas {
+            worker: HashMap::new(),
+            partial: Partial::default(),
+            full: HashSet::new(),
+        }
+    }
+}
+
+impl Partial {
+    /// Reuse or allocate a new Arena
+    fn get_arena(&mut self, type_info: &GcTypeInfo, free: &mut FreeList) -> *mut u8 {
+        self.0.iter().cloned().next().unwrap_or(
+            (free.alloc() as *mut _ as usize
+                + HeaderUnTyped::high_offset(type_info.align, type_info.size) as usize)
+                as *mut u8,
+        )
+    }
+}
+
+impl Arenas {}
 
 struct HandlerManager {
     handlers: Handlers,
