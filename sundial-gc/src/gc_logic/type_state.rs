@@ -10,6 +10,10 @@ use std::{
     thread::ThreadId,
 };
 
+// struct RelatedTypeState {
+//     related: Vec<>
+// }
+
 /// Each `Gc<T>` has a `TypeState` object.
 /// Related `TypeState`s must be owned by the same thread.
 ///
@@ -24,7 +28,7 @@ pub(crate) struct TypeState {
     arenas: UnsafeCell<Arenas>,
     pending: UnsafeCell<Pending>,
     // TODO support multiple simultaneous cycles.
-    state: UnsafeCell<Option<Cycle>>,
+    state: UnsafeCell<Option<Round>>,
     relations: UnsafeCell<ActiveRelations>,
 }
 
@@ -37,7 +41,7 @@ impl PartialEq for TypeState {
 
 impl TypeState {
     /// `condemned` is the range the worker knew about.
-    fn start(pending: &mut Pending, cycle: &mut Cycle, next: *const u8, white: Range<usize>) {
+    fn start(pending: &mut Pending, cycle: &mut Round, next: *const u8, white: Range<usize>) {
         if cycle.handler.invariant.contains(white) {
             pending
                 .arenas
@@ -171,7 +175,7 @@ impl TypeState {
                 log::trace!("Adding Msg::GC to bus");
                 bus.iter_mut().filter(|m| m.is_slot()).next().map(|slot| {
                     let next = Some(arenas.partial.get_arena(&self.type_info, free));
-                    if let Some(Cycle {
+                    if let Some(Round {
                         handler: HandlerManager { invariant, .. },
                         ..
                     }) = *cycle
@@ -191,7 +195,7 @@ impl TypeState {
         });
 
         // trace grey, updating refs
-        if let Some(Cycle {
+        if let Some(Round {
             ref mut handler, ..
         }) = cycle
         {
@@ -227,7 +231,7 @@ struct Pending {
     arenas: HashMap<*const HeaderUnTyped, usize>,
 }
 
-struct Cycle {
+struct Round {
     handler: HandlerManager,
     /// The last epoch we saw a grey in.
     latest_grey: usize,
@@ -238,13 +242,13 @@ struct Cycle {
     waiting_transitive_parents: SmallVec<[(&'static TypeState, usize); 5]>,
 }
 
-impl Cycle {
+impl Round {
     // TODO add granular cycles.
     fn new(
         type_state: &'static TypeState,
         relations: &ActiveRelations,
         free: &mut FreeList,
-    ) -> Cycle {
+    ) -> Round {
         let direct_children: EffTypes = relations
             .direct_children
             .iter()
@@ -260,7 +264,7 @@ impl Cycle {
             })
             .collect();
 
-        Cycle {
+        Round {
             handler: HandlerManager {
                 handlers: Handlers {
                     translator: type_state.type_info.translator_from_fn()(&direct_children).0,
