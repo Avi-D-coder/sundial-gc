@@ -28,7 +28,7 @@ pub(crate) struct TypeState {
     arenas: UnsafeCell<Arenas>,
     pending: UnsafeCell<Pending>,
     // TODO support multiple simultaneous cycles.
-    state: UnsafeCell<Option<Round>>,
+    state: UnsafeCell<Option<Collection>>,
     relations: UnsafeCell<ActiveRelations>,
 }
 
@@ -41,7 +41,7 @@ impl PartialEq for TypeState {
 
 impl TypeState {
     /// `condemned` is the range the worker knew about.
-    fn start(pending: &mut Pending, cycle: &mut Round, next: *const u8, white: Range<usize>) {
+    fn start(pending: &mut Pending, cycle: &mut Collection, next: *const u8, white: Range<usize>) {
         if cycle.handler.invariant.contains(white) {
             pending
                 .arenas
@@ -175,7 +175,7 @@ impl TypeState {
                 log::trace!("Adding Msg::GC to bus");
                 bus.iter_mut().filter(|m| m.is_slot()).next().map(|slot| {
                     let next = Some(arenas.partial.get_arena(&self.type_info, free));
-                    if let Some(Round {
+                    if let Some(Collection {
                         handler: HandlerManager { invariant, .. },
                         ..
                     }) = *cycle
@@ -231,7 +231,7 @@ struct Pending {
 }
 
 /// A single collection cycle.
-struct Round {
+struct Collection {
     handler: HandlerManager,
     /// The last epoch we saw a grey in.
     latest_grey: usize,
@@ -244,13 +244,13 @@ struct Round {
     waiting_transitive_parents: SmallVec<[(&'static TypeState, usize); 5]>,
 }
 
-impl Round {
+impl Collection {
     // TODO add granular cycles.
     fn new(
         type_state: &'static TypeState,
         relations: &ActiveRelations,
         free: &mut FreeList,
-    ) -> Round {
+    ) -> Collection {
         let direct_children: EffTypes = relations
             .direct_children
             .iter()
@@ -266,7 +266,7 @@ impl Round {
             })
             .collect();
 
-        Round {
+        Collection {
             handler: HandlerManager {
                 handlers: Handlers {
                     translator: type_state.type_info.translator_from_fn()(&direct_children).0,
@@ -326,7 +326,7 @@ impl Round {
 
     fn evac_roots(&mut self, type_info: &GcTypeInfo, arenas: &mut Arenas, free: &mut FreeList) {
         let Arenas { full, partial, .. } = arenas;
-        let Round {
+        let Collection {
             handler, condemned, ..
         } = self;
         condemned.iter().cloned().for_each(|next| {
