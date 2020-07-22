@@ -66,7 +66,7 @@ impl TypeState {
 
     /// For safe usage See `TypeState` docs.
     unsafe fn step(&self, free: &mut FreeList) {
-        let cycle = &mut *self.state.get();
+        let state = &mut *self.state.get();
         let arenas = &mut *self.arenas.get();
         let pending = &mut *self.pending.get();
         let buses = &mut *self.buses.get();
@@ -93,7 +93,7 @@ impl TypeState {
                             next: *next
                         }
                     );
-                    if let Some(cycle) = cycle {
+                    if let Some(cycle) = state {
                         TypeState::start(pending, cycle, *next, *white_start..*white_end);
                     };
                     *msg = Msg::Slot;
@@ -110,7 +110,7 @@ impl TypeState {
                 } => {
                     let next = *next;
 
-                    let ret = if let Some(cycle) = cycle {
+                    let ret = if let Some(cycle) = state {
                         if cycle.handler.invariant.contains(*white_start..*white_end) {
                             if !*new_allocation {
                                 TypeState::resolve(pending, next);
@@ -157,7 +157,7 @@ impl TypeState {
                         log::trace!("GC sent Arena {:?}", *next);
                     };
 
-                    if let Some(cycle) = cycle {
+                    if let Some(cycle) = state {
                         if cycle.handler.invariant != *invariant {
                             *invariant = cycle.handler.invariant
                         }
@@ -176,7 +176,7 @@ impl TypeState {
                     if let Some(Collection {
                         handler: HandlerManager { invariant, .. },
                         ..
-                    }) = *cycle
+                    }) = *state
                     {
                         *slot = Msg::Gc { next, invariant };
                     } else {
@@ -193,7 +193,7 @@ impl TypeState {
         });
 
         // trace grey, updating refs
-        if let Some(cycle) = cycle {
+        if let Some(cycle) = state {
             let relations = &mut *self.relations.get();
 
             grey.iter().for_each(|(next, bits)| {
@@ -266,7 +266,18 @@ impl TypeState {
 
                     ptr::drop_in_place(header);
                     free.dealloc(header as *mut _)
-                })
+                });
+
+                let children_complete = relations.direct_children.iter().all(|(cts, _)| {
+                    { &*cts.state.get() }
+                        .as_ref()
+                        .map(|cycle| cycle.condemned.is_empty())
+                        .unwrap_or(true)
+                });
+
+                if children_complete {
+                    *state = None;
+                };
             };
         }
     }
