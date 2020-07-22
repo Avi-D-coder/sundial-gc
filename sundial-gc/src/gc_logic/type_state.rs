@@ -121,11 +121,9 @@ impl TypeState {
                             if *grey_fields == 0b0000_0000 {
                                 None
                             } else {
-                                cycle.latest_grey = pending.epoch;
                                 Some((next, *grey_fields))
                             }
                         } else {
-                            cycle.latest_grey = pending.epoch;
                             Some((next, 0b1111_1111))
                         }
                     } else {
@@ -196,7 +194,24 @@ impl TypeState {
 
         // trace grey, updating refs
         if let Some(cycle) = cycle {
+            let relations = &mut *self.relations.get();
+
             grey.iter().for_each(|(next, bits)| {
+                // Grey worker marked types.
+                relations
+                    .direct_children
+                    .iter()
+                    .for_each(|(cts, (_, offsets))| {
+                        let epoch = (&mut *cts.pending.get()).epoch;
+                        let state = &mut *cts.state.get();
+
+                        state.iter_mut().for_each(|cycle| {
+                            if *offsets & *bits == 0b0 {
+                                cycle.latest_grey = epoch;
+                            };
+                        });
+                    });
+
                 cycle
                     .handler
                     .root(*next as *mut u8, self.type_info.align, self.type_info.size)
@@ -205,9 +220,55 @@ impl TypeState {
             cycle.evac_roots(&self.type_info, arenas, free);
 
             while cycle.handler.root_grey_children() {}
-        }
 
-        // TODO manage state and free memory
+            if cycle.safe_to_free(pending, relations) {
+                cycle.condemned.drain().into_iter().for_each(|next| {
+                    let header = HeaderUnTyped::from(next) as *mut HeaderUnTyped;
+
+                    let roots = { &*header }
+                        .roots
+                        .lock()
+                        .expect("Could not unlock roots while freeing Arena");
+                    if roots.len() != 0 {
+                        // FIXME shoud reset latest_grey and try again latter.
+                        panic!("Old Arena Rooted");
+                    }
+
+                    let GcTypeInfo {
+                        align,
+                        size,
+                        needs_drop,
+                        ..
+                    } = self.type_info;
+                    if needs_drop {
+                        let low = max(
+                            next as usize,
+                            header as usize + HeaderUnTyped::low_offset(align) as usize,
+                        );
+                        let mut ptr =
+                            header as usize + HeaderUnTyped::high_offset(align, size) as usize;
+
+                        let drop_in_place = self.type_info.drop_in_place_fn();
+
+                        while ptr >= low {
+                            let header = &mut *header;
+                            // TODO sort and iterate between evacuated
+                            if header.evacuated.get_mut().unwrap().contains_key(&index(
+                                ptr as *const u8,
+                                size,
+                                align,
+                            )) {
+                                drop_in_place(ptr as *mut u8)
+                            };
+                            ptr -= size as usize;
+                        }
+                    };
+
+                    ptr::drop_in_place(header);
+                    free.dealloc(header as *mut _)
+                })
+            };
+        }
     }
 }
 
@@ -222,7 +283,8 @@ struct Pending {
     // transitive_epoch: usize,
     /// Count of Arenas started before transitive_epoch.
     // known_transitive_grey: usize,
-    /// Count of Arenas started before `invariant`.
+    /// Count of Arenas that are not a part of a `Collection` cycle.
+    /// Known grey do not uphold any `Collection` variant.
     known_grey: usize,
     /// `Arena.Header` started after `epoch`.
     /// `pending` is mutually exclusive with `pending_known_grey`.
@@ -233,12 +295,10 @@ struct Pending {
 /// A single collection cycle.
 struct Collection {
     handler: HandlerManager,
-    /// The last epoch we saw a grey in.
+    /// The last epoch a condemned ptr of this type was seen in.
     latest_grey: usize,
     /// Arenas being freed.
     condemned: HashSet<*mut u8>,
-    /// Direct parents that may contain a condemned ptr.
-    waiting_direct_parents: SmallVec<[&'static TypeState; 5]>,
     /// Transitive parents that may contain a condemned ptr on a workers stack.
     /// A map of `TypeState` -> `epoch: usize`
     waiting_transitive_parents: SmallVec<[(&'static TypeState, usize); 5]>,
@@ -281,31 +341,14 @@ impl Collection {
             },
             latest_grey: 0,
             condemned: Default::default(),
-            waiting_direct_parents: relations
-                .direct_parents
-                .iter()
-                .filter(|(ts, _)| *ts != type_state)
-                .map(|(ts, _)| *ts)
-                .collect(),
             waiting_transitive_parents: SmallVec::new(),
         }
     }
 
     /// Ensures no ptrs exist in to the `TypeState`'s condemned arenas.
     fn safe_to_free(&mut self, pending: &Pending, relations: &ActiveRelations) -> bool {
-        // TODO push don't pull from parent `TypeState`s.
-        let clean_direct_parents = || {
-            self.waiting_direct_parents.iter().all(|direct_parent| {
-                let dp_latest_grey = unsafe { &*direct_parent.state.get() }
-                    .as_ref()
-                    .unwrap()
-                    .latest_grey;
-                let dp_epoch = unsafe { &*direct_parent.pending.get() }.epoch;
-                dp_latest_grey < dp_epoch + 1
-            })
-        };
-
-        if self.latest_grey < pending.epoch + 1 && clean_direct_parents() {
+        // TODO ensure transitive_parents drop order.
+        if self.no_grey_arenas(pending) {
             if self.waiting_transitive_parents.is_empty() {
                 self.waiting_transitive_parents = relations
                     .transitive_parents
@@ -322,6 +365,10 @@ impl Collection {
         } else {
             false
         }
+    }
+
+    fn no_grey_arenas(&self, pending: &Pending) -> bool {
+        pending.known_grey == 0 && self.latest_grey < pending.epoch + 2
     }
 
     fn evac_roots(&mut self, type_info: &GcTypeInfo, arenas: &mut Arenas, free: &mut FreeList) {
