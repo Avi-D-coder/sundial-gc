@@ -592,6 +592,18 @@ fn low_offset_test() {
     assert_eq!(Header::<usize>::low_offset(), 160)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quickcheck::*;
+
+    #[quickcheck]
+    fn header_from_stable_test(next: *const u8) {
+        let h = HeaderUnTyped::from(next);
+        assert_eq!(h, HeaderUnTyped::from(h as _))
+    }
+}
+
 impl<T> Header<T> {
     #[inline(always)]
     pub fn from(ptr: *const T) -> *const Header<T> {

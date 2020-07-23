@@ -10,10 +10,6 @@ use std::{
     thread::ThreadId,
 };
 
-// struct RelatedTypeState {
-//     related: Vec<>
-// }
-
 /// Each `Gc<T>` has a `TypeState` object.
 /// Related `TypeState`s must be owned by the same thread.
 ///
@@ -25,11 +21,11 @@ pub(crate) struct TypeState {
     pub(crate) type_info: GcTypeInfo,
     /// Map Type to Bit
     buses: UnsafeCell<HashMap<ThreadId, BusPtr>>,
-    arenas: UnsafeCell<Arenas>,
+    pub arenas: UnsafeCell<Arenas>,
     pending: UnsafeCell<Pending>,
     // TODO support multiple simultaneous cycles.
-    state: UnsafeCell<Option<Collection>>,
-    relations: UnsafeCell<ActiveRelations>,
+    pub state: UnsafeCell<Option<Collection>>,
+    pub relations: UnsafeCell<ActiveRelations>,
 }
 
 impl PartialEq for TypeState {
@@ -304,12 +300,12 @@ struct Pending {
 }
 
 /// A single collection cycle.
-struct Collection {
+pub(crate) struct Collection {
     handler: HandlerManager,
     /// The last epoch a condemned ptr of this type was seen in.
     latest_grey: usize,
     /// Arenas being freed.
-    condemned: HashSet<*mut u8>,
+    pub condemned: HashSet<*mut u8>,
     /// Transitive parents that may contain a condemned ptr on a workers stack.
     /// A map of `TypeState` -> `epoch: usize`
     waiting_transitive_parents: SmallVec<[(&'static TypeState, usize); 5]>,
@@ -317,11 +313,7 @@ struct Collection {
 
 impl Collection {
     // TODO add granular cycles.
-    fn new(
-        type_state: &'static TypeState,
-        relations: &ActiveRelations,
-        free: &mut FreeList,
-    ) -> Collection {
+    pub fn new(type_info: &GcTypeInfo, relations: &ActiveRelations, free: &mut FreeList) -> Collection {
         let direct_children: EffTypes = relations
             .direct_children
             .iter()
@@ -340,14 +332,14 @@ impl Collection {
         Collection {
             handler: HandlerManager {
                 handlers: Handlers {
-                    translator: type_state.type_info.translator_from_fn()(&direct_children).0,
+                    translator: type_info.translator_from_fn()(&direct_children).0,
                     nexts: last_nexts.clone(),
                     filled: last_nexts.iter().map(|_| SmallVec::new()).collect(),
                     free,
                 },
                 eff_types: direct_children,
                 invariant: Invariant::all(),
-                evacuate_fn: unsafe { type_state.type_info.evacuate_fn() },
+                evacuate_fn: unsafe { type_info.evacuate_fn() },
                 last_nexts,
             },
             latest_grey: 0,
@@ -382,6 +374,7 @@ impl Collection {
         pending.known_grey == 0 && self.latest_grey < pending.epoch + 2
     }
 
+    /// Evacuate rooted objects from condemned `Arenas`.
     fn evac_roots(&mut self, type_info: &GcTypeInfo, arenas: &mut Arenas, free: &mut FreeList) {
         let Arenas { full, partial, .. } = arenas;
         let Collection {
@@ -438,22 +431,14 @@ impl Collection {
     }
 }
 
-struct Arenas {
+pub(crate) struct Arenas {
     /// The last seen `next`, ptr + size..high_offset is owned by gc
     /// Will not include all Arenas owned by workers.
     /// Only contains Arenas that the gc owns some of.
-    worker: HashMap<*const HeaderUnTyped, *const u8>,
+    pub worker: HashMap<*const HeaderUnTyped, *const u8>,
     /// Arena owned by GC, that have not been completely filled.
-    partial: Partial,
-    full: HashSet<*mut HeaderUnTyped>,
-}
-
-struct Partial(HashSet<*mut u8>);
-
-impl Default for Partial {
-    fn default() -> Self {
-        Partial(HashSet::new())
-    }
+    pub partial: Partial,
+    pub full: HashSet<*mut HeaderUnTyped>,
 }
 
 impl Default for Arenas {
@@ -463,6 +448,14 @@ impl Default for Arenas {
             partial: Partial::default(),
             full: HashSet::new(),
         }
+    }
+}
+
+pub(crate) struct Partial(pub HashSet<*mut u8>);
+
+impl Default for Partial {
+    fn default() -> Self {
+        Partial(HashSet::new())
     }
 }
 
@@ -477,8 +470,6 @@ impl Partial {
     }
 }
 
-impl Arenas {}
-
 struct HandlerManager {
     handlers: Handlers,
     eff_types: EffTypes,
@@ -490,7 +481,8 @@ struct HandlerManager {
 }
 
 impl HandlerManager {
-    /// `next` may point to the next free slot or if the arena is full the Header.
+    /// Marks an `Arena` as black.
+    /// `next` may point to the next free slot or the `Header` if the arena is full.
     fn root(&mut self, next: *mut u8, align: u16, size: u16) {
         let HandlerManager {
             handlers,
@@ -580,7 +572,7 @@ impl HandlerManager {
 /// All known relations between GCed types.
 /// New relationships are first known upon `TotalRelations::register`.
 /// `TotalRelations::register` is triggered by a worker thread's first `Arena::<T>::new()`
-struct TotalRelations {
+pub(crate) struct TotalRelations {
     direct_parents: HashMap<GcTypeInfo, Vec<(GcTypeInfo, TypeRow)>>,
     transitive_parents: HashMap<GcTypeInfo, Vec<GcTypeInfo>>,
     direct_children: HashMap<GcTypeInfo, Vec<(GcTypeInfo, TypeRow)>>,
@@ -599,13 +591,13 @@ impl Default for TotalRelations {
 }
 
 impl TotalRelations {
-    fn register(
+    pub(crate) fn register(
         &mut self,
         active: &mut HashMap<&'static GcTypeInfo, &'static TypeState>,
         type_info: GcTypeInfo,
         thread_id: ThreadId,
         bus_ptr: BusPtr,
-    ) {
+    ) -> &'static TypeState {
         let ts = active.get(&type_info).cloned().unwrap_or_else(|| {
             let ts = Box::leak(Box::new(TypeState {
                 type_info,
@@ -680,12 +672,13 @@ impl TotalRelations {
 
         let buses = unsafe { &mut *ts.buses.get() };
         buses.insert(thread_id, bus_ptr);
+        ts
     }
 }
 
 /// Relations between GCed types with a live `TypeState` object.
 /// In the future `TypeState` may be deallocated, if an Arena<T> has not existed for a time.
-struct ActiveRelations {
+pub(crate) struct ActiveRelations {
     // TODO revisit sizes
     direct_parents: SmallVec<[(&'static TypeState, TypeRow); 3]>,
     transitive_parents: SmallVec<[&'static TypeState; 5]>,
@@ -694,7 +687,7 @@ struct ActiveRelations {
 }
 
 impl TotalRelations {
-    pub fn new_active(
+    fn new_active(
         &mut self,
         type_info: &GcTypeInfo,
         active: &HashMap<&'static GcTypeInfo, &'static TypeState>,

@@ -5,7 +5,6 @@
 #![allow(incomplete_features)]
 #![feature(const_generics)]
 #![feature(const_fn)]
-#![feature(const_transmute)]
 #![feature(const_raw_ptr_to_usize_cast)]
 #![feature(const_mut_refs)]
 #![feature(const_panic)]

@@ -5,6 +5,12 @@ pub(crate) struct FreeList {
     free: Vec<*mut Mem>,
 }
 
+impl Default for FreeList {
+    fn default() -> Self {
+        FreeList { free: Vec::new() }
+    }
+}
+
 impl FreeList {
     pub fn alloc(&mut self) -> &mut HeaderUnTyped {
         if let Some(header) = self.free.pop() {
