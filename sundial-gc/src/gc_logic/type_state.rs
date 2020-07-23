@@ -61,7 +61,7 @@ impl TypeState {
     }
 
     /// For safe usage See `TypeState` docs.
-    unsafe fn step(&self, free: &mut FreeList) {
+    pub(crate) unsafe fn step(&self, free: &mut FreeList) {
         let state = &mut *self.state.get();
         let arenas = &mut *self.arenas.get();
         let pending = &mut *self.pending.get();
@@ -313,7 +313,11 @@ pub(crate) struct Collection {
 
 impl Collection {
     // TODO add granular cycles.
-    pub fn new(type_info: &GcTypeInfo, relations: &ActiveRelations, free: &mut FreeList) -> Collection {
+    pub fn new(
+        type_info: &GcTypeInfo,
+        relations: &ActiveRelations,
+        free: &mut FreeList,
+    ) -> Collection {
         let direct_children: EffTypes = relations
             .direct_children
             .iter()
@@ -684,6 +688,16 @@ pub(crate) struct ActiveRelations {
     transitive_parents: SmallVec<[&'static TypeState; 5]>,
     direct_children: SmallVec<[(&'static TypeState, TypeRow); 3]>,
     transitive_children: SmallVec<[&'static TypeState; 5]>,
+}
+
+impl ActiveRelations {
+    pub fn active_relations(&self) -> HashSet<&'static GcTypeInfo> {
+        let mut r: HashSet<&'static GcTypeInfo> =
+            HashSet::with_capacity(self.transitive_parents.len() + self.transitive_children.len());
+        r.extend(self.transitive_parents.iter().map(|ts| &ts.type_info));
+        r.extend(self.transitive_children.iter().map(|ts| &ts.type_info));
+        r
+    }
 }
 
 impl TotalRelations {

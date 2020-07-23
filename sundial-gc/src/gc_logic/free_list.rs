@@ -2,7 +2,7 @@ use crate::arena::{HeaderUnTyped, Mem};
 use std::alloc::{GlobalAlloc, Layout, System};
 
 pub(crate) struct FreeList {
-    free: Vec<*mut Mem>,
+    pub free: Vec<*mut Mem>,
 }
 
 impl Default for FreeList {
