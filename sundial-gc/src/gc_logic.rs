@@ -1,6 +1,6 @@
 pub(crate) mod free_list;
-pub(crate) mod type_state;
 pub(crate) mod type_group;
+pub(crate) mod type_state;
 
 use crate::arena::*;
 use crate::{gc::RootIntern, mark::*};

@@ -29,15 +29,22 @@ impl TypeGroups {
                 group.related.extend(tg.related.iter());
             });
 
-        group.related.iter().for_each(|ts| {
-            self.groups.insert(&ts.type_info, group);
-        });
-
         // Free the old groups
         groups
             .iter()
             .copied()
             .for_each(|tg| unsafe { drop(Box::from_raw(tg as *mut TypeGroup)) });
+
+        // Registering a new type resets gc state.
+        // If a collection was in progress it is restarted.
+        let gc_in_progress = group.related.iter().any(|ts| {
+            self.groups.insert(&ts.type_info, group);
+            unsafe { &*ts.state.get() }.is_some()
+        });
+
+        if gc_in_progress {
+            group.major_gc();
+        };
     }
 }
 

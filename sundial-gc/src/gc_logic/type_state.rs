@@ -484,6 +484,26 @@ struct HandlerManager {
     last_nexts: SmallVec<[*mut u8; 4]>,
 }
 
+impl Drop for HandlerManager {
+    fn drop(&mut self) {
+        self.handlers
+            .nexts
+            .iter()
+            .enumerate()
+            .for_each(|(i, next)| {
+                let child_ts = self.eff_types[i];
+                let child_arenas = unsafe { &mut *child_ts.arenas.get() };
+                if *next as usize % ARENA_SIZE == 0 {
+                    child_arenas.full.insert(*next as *mut HeaderUnTyped);
+                } else {
+                    child_arenas.partial.0.insert(*next);
+                }
+            });
+
+        assert_eq!(self.handlers.filled.iter().flatten().count(), 0);
+    }
+}
+
 impl HandlerManager {
     /// Marks an `Arena` as black.
     /// `next` may point to the next free slot or the `Header` if the arena is full.
@@ -534,8 +554,11 @@ impl HandlerManager {
             .for_each(|(i, next)| {
                 let child_ts = eff_types[i];
 
+                let child_pending = unsafe { &mut *child_ts.pending.get() };
                 // Root partial Arenas if child is undergoing a GC.
                 if let Some(state) = unsafe { &mut *child_ts.state.get() } {
+                    state.latest_grey = child_pending.epoch;
+
                     state
                         .handler
                         .root(*next, child_ts.type_info.align, child_ts.type_info.size);
