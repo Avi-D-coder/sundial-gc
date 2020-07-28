@@ -3,7 +3,6 @@
 #![feature(const_generics)]
 #![feature(untagged_unions)]
 #![feature(const_fn)]
-#![feature(const_transmute)]
 #![feature(specialization)]
 #![feature(negative_impls)]
 #![feature(const_raw_ptr_to_usize_cast)]

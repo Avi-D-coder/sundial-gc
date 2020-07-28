@@ -2,10 +2,21 @@ use crate::*;
 use arena::HeaderUnTyped;
 use gc_logic::{free_list::FreeList, type_state::*};
 use mark::GcTypeInfo;
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    time::{Duration, Instant},
+};
 
 pub(crate) struct TypeGroups {
-    groups: HashMap<&'static GcTypeInfo, *const TypeGroup>,
+    pub groups: HashMap<&'static GcTypeInfo, *const TypeGroup>,
+}
+
+impl Default for TypeGroups {
+    fn default() -> Self {
+        TypeGroups {
+            groups: Default::default(),
+        }
+    }
 }
 
 impl TypeGroups {
@@ -51,6 +62,8 @@ impl TypeGroups {
 pub(crate) struct TypeGroup {
     related: Vec<&'static TypeState>,
     free: FreeList,
+    gc_in_progress: Option<Instant>,
+    pre_allocated: usize,
 }
 
 impl Default for TypeGroup {
@@ -58,6 +71,8 @@ impl Default for TypeGroup {
         TypeGroup {
             related: Vec::new(),
             free: FreeList::default(),
+            gc_in_progress: None,
+            pre_allocated: 1,
         }
     }
 }
@@ -68,7 +83,10 @@ impl TypeGroup {
         let TypeGroup {
             related,
             ref mut free,
+            ref mut gc_in_progress,
+            ..
         } = self;
+
         related.iter().for_each(|ts| {
             let state = unsafe { &mut *ts.state.get() };
             let arenas = unsafe { &mut *ts.arenas.get() };
@@ -95,16 +113,35 @@ impl TypeGroup {
                     next
                 }));
         });
+
+        *gc_in_progress = Some(Instant::now());
+        log::info!("Major GC started");
     }
 
     pub(crate) fn step(&mut self) {
         let TypeGroup {
             related,
             ref mut free,
+            gc_in_progress,
+            pre_allocated,
         } = self;
 
-        related.iter().for_each(|ts| unsafe {
-            ts.step(free);
-        });
+        if related
+            .iter()
+            .fold(true, |done, ts| unsafe { done && ts.step(free) })
+        {
+            *gc_in_progress = None;
+            *pre_allocated = free.allocated;
+            log::info!("Major GC complete");
+        } else if let Some(start) = gc_in_progress {
+            let elapsed = start.elapsed();
+            if elapsed > Duration::from_secs(2) {
+                log::warn!("Major Gc running for {}s", elapsed.as_secs());
+            };
+        };
+
+        if self.free.allocated >= 2 * *pre_allocated {
+            self.major_gc()
+        };
     }
 }

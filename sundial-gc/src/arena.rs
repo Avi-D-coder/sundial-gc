@@ -595,11 +595,11 @@ fn low_offset_test() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use quickcheck::*;
+    use quickcheck_macros::*;
 
     #[quickcheck]
-    fn header_from_stable_test(next: *const u8) {
-        let h = HeaderUnTyped::from(next);
+    fn header_from_stable_test(next: usize) {
+        let h = HeaderUnTyped::from(next as *const u8);
         assert_eq!(h, HeaderUnTyped::from(h as _))
     }
 }

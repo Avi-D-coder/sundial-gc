@@ -61,7 +61,8 @@ impl TypeState {
     }
 
     /// For safe usage See `TypeState` docs.
-    pub(crate) unsafe fn step(&self, free: &mut FreeList) {
+    pub(crate) unsafe fn step(&self, free: &mut FreeList) -> bool {
+        let mut done = false;
         let state = &mut *self.state.get();
         let arenas = &mut *self.arenas.get();
         let pending = &mut *self.pending.get();
@@ -273,9 +274,12 @@ impl TypeState {
 
                 if children_complete {
                     *state = None;
+                    done = true;
                 };
             };
         }
+
+        done
     }
 }
 
@@ -662,11 +666,6 @@ impl TotalRelations {
                 .iter()
                 .for_each(|(parent_ts, type_row)| {
                     let parent_relations = unsafe { &mut *parent_ts.relations.get() };
-                    debug_assert!(parent_relations
-                        .direct_children
-                        .iter()
-                        .find(|cts| cts.0.type_info == ts.type_info)
-                        .is_none());
                     parent_relations
                         .direct_children
                         .push((ts, type_row.clone()))
@@ -674,11 +673,6 @@ impl TotalRelations {
 
             relations.transitive_parents.iter().for_each(|parent_ts| {
                 let parent_relations = unsafe { &mut *parent_ts.relations.get() };
-                debug_assert!(parent_relations
-                    .transitive_children
-                    .iter()
-                    .find(|cts| cts.type_info == ts.type_info)
-                    .is_none());
                 parent_relations.transitive_children.push(ts)
             });
 
@@ -687,11 +681,6 @@ impl TotalRelations {
                 .iter()
                 .for_each(|(child_ts, type_row)| {
                     let parent_relations = unsafe { &mut *child_ts.relations.get() };
-                    debug_assert!(parent_relations
-                        .direct_parents
-                        .iter()
-                        .find(|cts| cts.0.type_info == ts.type_info)
-                        .is_none());
                     parent_relations.direct_parents.push((ts, type_row.clone()));
                 });
             ts
