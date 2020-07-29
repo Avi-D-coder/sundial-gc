@@ -1,9 +1,21 @@
 use crate::arena::{HeaderUnTyped, Mem};
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::{
+    alloc::{GlobalAlloc, Layout, System},
+    fmt::Debug,
+};
 
 pub(crate) struct FreeList {
     pub free: Vec<*mut Mem>,
     pub allocated: usize,
+}
+
+impl Debug for FreeList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FreeList")
+            .field("count", &self.free.len())
+            .field("allocated", &self.allocated)
+            .finish()
+    }
 }
 
 impl Default for FreeList {

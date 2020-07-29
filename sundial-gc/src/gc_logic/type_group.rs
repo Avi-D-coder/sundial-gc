@@ -4,11 +4,23 @@ use gc_logic::{free_list::FreeList, type_state::*};
 use mark::GcTypeInfo;
 use std::{
     collections::{HashMap, HashSet},
+    fmt::Debug,
     time::{Duration, Instant},
 };
 
 pub(crate) struct TypeGroups {
     pub groups: HashMap<&'static GcTypeInfo, *const TypeGroup>,
+}
+
+impl Debug for TypeGroups {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let set: HashSet<_> = self.groups.values().cloned().collect();
+
+        let _ = f.write_str("TypeGroups: ");
+        f.debug_set()
+            .entries(set.iter().map(|tg| unsafe { &**tg }))
+            .finish()
+    }
 }
 
 impl Default for TypeGroups {
@@ -65,7 +77,27 @@ pub(crate) struct TypeGroup {
     related: Vec<&'static TypeState>,
     free: FreeList,
     gc_in_progress: Option<Instant>,
+    last_gc_completed: Instant,
     pre_allocated: usize,
+    log_duration: Duration,
+}
+
+impl Debug for TypeGroup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TypeGroup")
+            .field(
+                "related",
+                &self
+                    .related
+                    .iter()
+                    .map(|ts| ts.type_info.type_name)
+                    .collect::<Vec<_>>(),
+            )
+            .field("gc_in_progress", &self.gc_in_progress)
+            .field("last_gc_completed", &self.last_gc_completed)
+            .field("pre_allocated", &self.pre_allocated)
+            .finish()
+    }
 }
 
 impl Default for TypeGroup {
@@ -74,7 +106,9 @@ impl Default for TypeGroup {
             related: Vec::new(),
             free: FreeList::default(),
             gc_in_progress: None,
+            last_gc_completed: Instant::now(),
             pre_allocated: 1,
+            log_duration: Duration::from_secs(1),
         }
     }
 }
@@ -121,11 +155,21 @@ impl TypeGroup {
     }
 
     pub(crate) fn step(&mut self) {
+        log::trace!(
+            "TypeGroup {:?}",
+            self.related
+                .iter()
+                .map(|ts| ts.type_info.type_name)
+                .collect::<Vec<_>>()
+        );
+
         let TypeGroup {
             related,
             ref mut free,
             gc_in_progress,
+            last_gc_completed,
             pre_allocated,
+            log_duration,
         } = self;
 
         if related
@@ -133,16 +177,18 @@ impl TypeGroup {
             .fold(true, |done, ts| unsafe { done && ts.step(free) })
         {
             *gc_in_progress = None;
+            *last_gc_completed = Instant::now();
             *pre_allocated = free.allocated;
-            log::info!("Major GC complete");
+            log::warn!("Major GC complete");
         } else if let Some(start) = gc_in_progress {
             let elapsed = start.elapsed();
-            if elapsed > Duration::from_secs(2) {
+            if elapsed > *log_duration * 2 {
+                *log_duration = elapsed;
                 log::warn!("Major Gc running for {}s", elapsed.as_secs());
             };
-        };
-
-        if self.free.allocated >= 2 * *pre_allocated {
+        } else if self.free.allocated >= 2 * *pre_allocated
+            || last_gc_completed.elapsed() > Duration::from_secs(2)
+        {
             self.major_gc()
         };
     }

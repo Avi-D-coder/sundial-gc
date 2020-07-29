@@ -4,7 +4,6 @@ pub(crate) mod type_state;
 
 use crate::arena::*;
 use crate::{gc::RootIntern, mark::*};
-use log::info;
 use smallvec::SmallVec;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{
@@ -54,9 +53,9 @@ impl GcThreadBus {
                     Ordering::AcqRel,
                 )
             {
-                info!("Starting GC thread");
+                log::info!("Starting GC thread");
                 thread::spawn(|| gc_loop());
-                info!("Spawned GC thread");
+                log::info!("Spawned GC thread");
 
                 Box::leak(bus)
             } else {
@@ -131,12 +130,14 @@ fn gc_loop() {
         for msg in reg_msgs.into_iter() {
             match msg {
                 RegMsg::Reg(thread_id, ti, bus) => {
-                    info!(
+                    log::info!(
                         "Thread: {:?} registered for GcTypeInfo: {:?}",
-                        thread_id, ti
+                        thread_id,
+                        ti
                     );
                     let type_state = total_relations.register(&mut active, ti, thread_id, bus);
                     type_groups.register(type_state);
+                    log::info!("{:?}", type_groups);
                 }
                 RegMsg::Un(_thread_id, _ti) => {
                     // The thread was dropped
