@@ -30,27 +30,29 @@ impl TypeGroups {
             .collect();
 
         let group = Box::leak(Box::new(TypeGroup::default()));
+        group.related.push(type_state);
 
-        groups
-            .iter()
-            .cloned()
-            .map(|tg| unsafe { &*tg })
-            .for_each(|tg| {
-                group.free.free.extend(tg.free.free.iter());
-                group.related.extend(tg.related.iter());
-            });
+        let gc_in_progress =
+            groups
+                .iter()
+                .cloned()
+                .map(|tg| unsafe { &*tg })
+                .fold(false, |gc_in_progress, tg| {
+                    group.free.free.extend(tg.free.free.iter());
+                    group.related.extend(tg.related.iter());
 
-        // Free the old groups
-        groups
-            .iter()
-            .copied()
-            .for_each(|tg| unsafe { drop(Box::from_raw(tg as *mut TypeGroup)) });
+                    // Registering a new type resets gc state.
+                    // If a collection was in progress it is restarted.
+                    let r = gc_in_progress || tg.gc_in_progress.is_some();
 
-        // Registering a new type resets gc state.
-        // If a collection was in progress it is restarted.
-        let gc_in_progress = group.related.iter().any(|ts| {
+                    // Free the old group
+                    unsafe { drop(Box::from_raw(tg as *const _ as *mut TypeGroup)) }
+                    r
+                });
+
+        // Add new type_state and update old type_state => TypeGroup mappings.
+        group.related.iter().for_each(|ts| {
             self.groups.insert(&ts.type_info, group);
-            unsafe { &*ts.state.get() }.is_some()
         });
 
         if gc_in_progress {
