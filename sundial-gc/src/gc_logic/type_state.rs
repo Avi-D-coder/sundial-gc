@@ -62,6 +62,7 @@ impl TypeState {
 
     /// For safe usage See `TypeState` docs.
     pub(crate) unsafe fn step(&self, free: &mut FreeList) -> bool {
+        log::trace!("TypeState::step {:?}", self.type_info.type_name);
         let mut done = false;
         let state = &mut *self.state.get();
         let arenas = &mut *self.arenas.get();
@@ -72,18 +73,18 @@ impl TypeState {
 
         let mut grey: SmallVec<[(*const u8, u8); 16]> = SmallVec::new();
 
-        buses.iter().for_each(|(_, bus)| {
+        buses.iter().for_each(|(thread_id, bus)| {
             let mut has_gc_msg = false;
             let mut bus = bus.0.lock().expect("Could not unlock bus");
-            log::trace!("GC Locked bus");
             grey.extend(bus.iter_mut().filter_map(|msg| match msg {
                 Msg::Start {
                     white_start,
                     white_end,
                     next,
                 } => {
-                    log::trace!(
-                        "GC received: {:?}",
+                    log::info!(
+                        "GC received from thread: {:?}: {:?}",
+                        thread_id,
                         Msg::Start {
                             white_start: *white_start,
                             white_end: *white_end,
@@ -105,6 +106,18 @@ impl TypeState {
                     white_start,
                     white_end,
                 } => {
+                    log::info!(
+                        "GC received from thread: {:?}: {:?}",
+                        thread_id,
+                        Msg::End {
+                            white_start: *white_start,
+                            white_end: *white_end,
+                            next: *next,
+                            new_allocation: *new_allocation,
+                            release_to_gc: *release_to_gc,
+                            grey_fields: *grey_fields,
+                        }
+                    );
                     let next = *next;
 
                     let ret = if let Some(cycle) = state {
@@ -167,7 +180,7 @@ impl TypeState {
 
             // Add a GC message to the bus if it does not yet have one.
             if !has_gc_msg {
-                log::trace!("Adding Msg::GC to bus");
+                log::trace!("Adding Msg::GC to thread {:?}'s bus", thread_id);
                 bus.iter_mut().filter(|m| m.is_slot()).next().map(|slot| {
                     let next = Some(arenas.partial.get_arena(&self.type_info, free));
                     if let Some(Collection {
@@ -185,7 +198,7 @@ impl TypeState {
                 });
             };
 
-            log::trace!("\n\n GC sent:\n {:?}\n\n", bus);
+            // log::trace!("\n\n GC sent:\n {:?}\n\n", bus);
             drop(bus);
         });
 
@@ -219,51 +232,25 @@ impl TypeState {
             while cycle.handler.root_grey_children() {}
 
             if cycle.safe_to_free(pending, relations) {
-                cycle.condemned.drain().into_iter().for_each(|next| {
-                    let header = HeaderUnTyped::from(next) as *mut HeaderUnTyped;
-
-                    let roots = { &*header }
-                        .roots
-                        .lock()
-                        .expect("Could not unlock roots while freeing Arena");
-                    if roots.len() != 0 {
-                        // FIXME shoud reset latest_grey and try again latter.
-                        panic!("Old Arena Rooted");
-                    }
-
-                    let GcTypeInfo {
-                        align,
-                        size,
-                        needs_drop,
-                        ..
-                    } = self.type_info;
-                    if needs_drop {
-                        let low = max(
-                            next as usize,
-                            header as usize + HeaderUnTyped::low_offset(align) as usize,
-                        );
-                        let mut ptr =
-                            header as usize + HeaderUnTyped::high_offset(align, size) as usize;
-
-                        let drop_in_place = self.type_info.drop_in_place_fn();
-
-                        while ptr >= low {
-                            let header = &mut *header;
-                            // TODO sort and iterate between evacuated
-                            if header.evacuated.get_mut().unwrap().contains_key(&index(
-                                ptr as *const u8,
-                                size,
-                                align,
-                            )) {
-                                drop_in_place(ptr as *mut u8)
-                            };
-                            ptr -= size as usize;
-                        }
-                    };
-
-                    ptr::drop_in_place(header);
-                    free.dealloc(header as *mut _)
-                });
+                cycle
+                    .condemned
+                    .full
+                    .drain()
+                    .into_iter()
+                    .for_each(|header| self.drop_arena(header as *mut u8, free));
+                cycle
+                    .condemned
+                    .partial
+                    .0
+                    .drain()
+                    .into_iter()
+                    .for_each(|next| self.drop_arena(next, free));
+                cycle
+                    .condemned
+                    .worker
+                    .drain()
+                    .into_iter()
+                    .for_each(|(_, next)| self.drop_objects_above(next as *mut _));
 
                 let children_complete = relations.direct_children.iter().all(|(cts, _)| {
                     { &*cts.state.get() }
@@ -280,6 +267,60 @@ impl TypeState {
         }
 
         done
+    }
+
+    unsafe fn drop_arena(&self, next: *mut u8, free: &mut FreeList) {
+        let header = HeaderUnTyped::from(next) as *mut HeaderUnTyped;
+
+        let roots = { &*header }
+            .roots
+            .lock()
+            .expect("Could not unlock roots while freeing Arena");
+        if roots.len() != 0 {
+            // FIXME should reset latest_grey and try again latter.
+            panic!("Old Arena Rooted");
+        }
+
+        if self.type_info.needs_drop {
+            self.drop_objects_above(next);
+        };
+
+        ptr::drop_in_place(header);
+        free.dealloc(header as *mut _)
+    }
+
+    /// Runs destructor on objects from the top of the `Arena` to next;
+    unsafe fn drop_objects_above(&self, next: *mut u8) {
+        debug_assert!(self.type_info.needs_drop);
+
+        let header = HeaderUnTyped::from(next) as *mut HeaderUnTyped;
+
+        let GcTypeInfo {
+            align,
+            size,
+            needs_drop,
+            ..
+        } = self.type_info;
+        let low = max(
+            next as usize + size as usize,
+            header as usize + HeaderUnTyped::low_offset(align) as usize,
+        );
+        let mut ptr = header as usize + HeaderUnTyped::high_offset(align, size) as usize;
+
+        let drop_in_place = self.type_info.drop_in_place_fn();
+
+        while ptr >= low {
+            let header = &mut *header;
+            // TODO sort and iterate between evacuated
+            if header.evacuated.get_mut().unwrap().contains_key(&index(
+                ptr as *const u8,
+                size,
+                align,
+            )) {
+                drop_in_place(ptr as *mut u8)
+            };
+            ptr -= size as usize;
+        }
     }
 }
 
@@ -309,7 +350,7 @@ pub(crate) struct Collection {
     /// The last epoch a condemned ptr of this type was seen in.
     latest_grey: usize,
     /// Arenas being freed.
-    pub condemned: HashSet<*mut u8>,
+    pub condemned: Arenas,
     /// Transitive parents that may contain a condemned ptr on a workers stack.
     /// A map of `TypeState` -> `epoch: usize`
     waiting_transitive_parents: SmallVec<[(&'static TypeState, usize); 5]>,
@@ -384,13 +425,19 @@ impl Collection {
 
     /// Evacuate rooted objects from condemned `Arenas`.
     fn evac_roots(&mut self, type_info: &GcTypeInfo, arenas: &mut Arenas, free: &mut FreeList) {
-        let Arenas { full, partial, .. } = arenas;
         let Collection {
             handler, condemned, ..
         } = self;
-        condemned.iter().cloned().for_each(|next| {
-            let header = unsafe { &*HeaderUnTyped::from(next) };
-            let mut roots = header
+
+        fn er(
+            header: *const HeaderUnTyped,
+            type_info: &GcTypeInfo,
+            handler: &mut HandlerManager,
+            arenas: &mut Arenas,
+            free: &mut FreeList,
+        ) {
+            let Arenas { full, partial, .. } = arenas;
+            let mut roots = unsafe { &*header }
                 .roots
                 .lock()
                 .expect("Could not unlock roots, in TypeState::step");
@@ -435,7 +482,26 @@ impl Collection {
                 };
             });
             assert_eq!(0, roots.len());
-        });
+        };
+
+        condemned
+            .partial
+            .0
+            .iter()
+            .cloned()
+            .map(|next| HeaderUnTyped::from(next))
+            .for_each(|header| er(header, type_info, handler, arenas, free));
+        condemned
+            .full
+            .iter()
+            .cloned()
+            .map(|h| h as *const _)
+            .for_each(|header| er(header, type_info, handler, arenas, free));
+        condemned
+            .worker
+            .keys()
+            .cloned()
+            .for_each(|header| er(header, type_info, handler, arenas, free));
     }
 }
 
@@ -456,6 +522,12 @@ impl Default for Arenas {
             partial: Partial::default(),
             full: HashSet::new(),
         }
+    }
+}
+
+impl Arenas {
+    fn is_empty(&self) -> bool {
+        self.worker.is_empty() && self.full.is_empty() && self.partial.0.is_empty()
     }
 }
 
@@ -628,8 +700,9 @@ impl TotalRelations {
         type_info: GcTypeInfo,
         thread_id: ThreadId,
         bus_ptr: BusPtr,
-    ) -> &'static TypeState {
-        let ts = active.get(&type_info).cloned().unwrap_or_else(|| {
+    ) -> Option<&'static TypeState> {
+        let active_ts = active.get(&type_info).cloned();
+        let ts = active_ts.unwrap_or_else(|| {
             let ts = Box::leak(Box::new(TypeState {
                 type_info,
                 buses: Default::default(),
@@ -688,7 +761,11 @@ impl TotalRelations {
 
         let buses = unsafe { &mut *ts.buses.get() };
         buses.insert(thread_id, bus_ptr);
-        ts
+        if active_ts.is_none() {
+            Some(ts)
+        } else {
+            None
+        }
     }
 }
 

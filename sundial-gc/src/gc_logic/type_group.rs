@@ -5,6 +5,7 @@ use mark::GcTypeInfo;
 use std::{
     collections::{HashMap, HashSet},
     fmt::Debug,
+    mem,
     time::{Duration, Instant},
 };
 
@@ -34,6 +35,8 @@ impl Default for TypeGroups {
 impl TypeGroups {
     /// Register a new type, merging newly related `TypeGroup`s.
     pub(crate) fn register(&mut self, type_state: &'static TypeState) {
+        debug_assert!(!self.groups.contains_key(&type_state.type_info));
+
         let relations = unsafe { &*type_state.relations.get() }.active_relations();
 
         let groups: HashSet<*const TypeGroup> = relations
@@ -130,28 +133,50 @@ impl TypeGroup {
 
             let mut collection = Collection::new(&ts.type_info, relations, free);
 
-            collection.condemned = state
-                .as_ref()
-                .map(|c| c.condemned.clone())
-                .unwrap_or_default();
+            if let Some(Collection {
+                condemned:
+                    Arenas {
+                        full,
+                        partial,
+                        worker,
+                    },
+                ..
+            }) = state
+            {
+                mem::swap(full, &mut collection.condemned.full);
+                mem::swap(partial, &mut collection.condemned.partial);
+                mem::swap(worker, &mut collection.condemned.worker);
+            };
 
             collection
                 .condemned
+                .full
                 .extend(arenas.full.drain().map(|header| {
                     unsafe { &mut *header }.condemned = true;
-                    header as *mut u8
+                    header
                 }));
             collection
                 .condemned
+                .partial
+                .0
                 .extend(arenas.partial.0.drain().map(|next| {
                     let header = unsafe { &mut *(HeaderUnTyped::from(next) as *mut HeaderUnTyped) };
                     header.condemned = true;
                     next
                 }));
+            collection
+                .condemned
+                .worker
+                .extend(arenas.worker.iter().map(|(h, next)| {
+                    let header =
+                        unsafe { &mut *(HeaderUnTyped::from(*next) as *mut HeaderUnTyped) };
+                    header.condemned = true;
+                    (*h, *next)
+                }))
         });
 
         *gc_in_progress = Some(Instant::now());
-        log::info!("Major GC started");
+        log::info!("Major GC started {:?}", self);
     }
 
     pub(crate) fn step(&mut self) {
@@ -179,12 +204,12 @@ impl TypeGroup {
             *gc_in_progress = None;
             *last_gc_completed = Instant::now();
             *pre_allocated = free.allocated;
-            log::warn!("Major GC complete");
+            log::warn!("Major GC complete {:?}", self);
         } else if let Some(start) = gc_in_progress {
             let elapsed = start.elapsed();
             if elapsed > *log_duration * 2 {
                 *log_duration = elapsed;
-                log::warn!("Major Gc running for {}s", elapsed.as_secs());
+                log::warn!("Major Gc running for {}s, {:?}", elapsed.as_secs(), self);
             };
         } else if self.free.allocated >= 2 * *pre_allocated
             || last_gc_completed.elapsed() > Duration::from_secs(2)

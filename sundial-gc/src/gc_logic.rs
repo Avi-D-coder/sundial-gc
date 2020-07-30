@@ -17,6 +17,7 @@ use std::{
     alloc::{GlobalAlloc, Layout, System},
     cmp::max,
     mem, process, ptr,
+    time::Duration,
 };
 use type_group::{TypeGroup, TypeGroups};
 use type_state::{TotalRelations, TypeState};
@@ -135,9 +136,13 @@ fn gc_loop() {
                         thread_id,
                         ti
                     );
-                    let type_state = total_relations.register(&mut active, ti, thread_id, bus);
-                    type_groups.register(type_state);
-                    log::info!("{:?}", type_groups);
+
+                    if let Some(new_type_state) =
+                        total_relations.register(&mut active, ti, thread_id, bus)
+                    {
+                        type_groups.register(new_type_state);
+                        log::info!("{:?}", type_groups);
+                    };
                 }
                 RegMsg::Un(_thread_id, _ti) => {
                     // The thread was dropped
@@ -151,6 +156,6 @@ fn gc_loop() {
             tg.step();
         });
 
-        // thread::sleep(Duration::from_millis(100))
+        thread::sleep(Duration::from_millis(500))
     }
 }
