@@ -164,19 +164,26 @@ impl TypeGroup {
                     header.condemned = true;
                     next
                 }));
-            collection
-                .condemned
-                .worker
-                .extend(arenas.worker.iter().map(|(h, next)| {
-                    let header =
-                        unsafe { &mut *(HeaderUnTyped::from(*next) as *mut HeaderUnTyped) };
-                    header.condemned = true;
-                    (*h, *next)
-                }))
+
+            arenas.worker.iter_mut().for_each(|(h, (next, end))| {
+                let header = unsafe { &mut *(*h as *mut HeaderUnTyped) };
+                header.condemned = true;
+
+                collection
+                    .condemned
+                    .worker
+                    .entry(*h)
+                    .and_modify(|(n, e)| {
+                        *n = *next;
+                    })
+                    .or_insert((*next, *end));
+            });
+
+            *state = Some(collection);
         });
 
         *gc_in_progress = Some(Instant::now());
-        log::info!("Major GC started {:?}", self);
+        log::warn!("Major GC started {:?}", self);
     }
 
     pub(crate) fn step(&mut self) {

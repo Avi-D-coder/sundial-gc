@@ -6,8 +6,8 @@ use mark::{EffTypes, GcTypeInfo, Handlers, Invariant, Tti, TypeRow};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::{
-    cell::UnsafeCell, cmp::max, collections::HashSet, ops::Range, ptr, sync::atomic::Ordering,
-    thread::ThreadId,
+    cell::UnsafeCell, cmp::max, collections::HashSet, fmt::Debug, ops::Range, ptr,
+    sync::atomic::Ordering, thread::ThreadId,
 };
 
 /// Each `Gc<T>` has a `TypeState` object.
@@ -26,6 +26,16 @@ pub(crate) struct TypeState {
     // TODO support multiple simultaneous cycles.
     pub state: UnsafeCell<Option<Collection>>,
     pub relations: UnsafeCell<ActiveRelations>,
+}
+
+impl Debug for TypeState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct(&format!("TypeState::{}", self.type_info.type_name))
+            .field("arenas", unsafe { &*self.arenas.get() })
+            .field("pending", unsafe { &*self.pending.get() })
+            .field("collection", unsafe { &*self.state.get() })
+            .finish()
+    }
 }
 
 impl PartialEq for TypeState {
@@ -62,7 +72,7 @@ impl TypeState {
 
     /// For safe usage See `TypeState` docs.
     pub(crate) unsafe fn step(&self, free: &mut FreeList) -> bool {
-        log::trace!("TypeState::step {:?}", self.type_info.type_name);
+        log::info!("{:?}", self);
         let mut done = false;
         let state = &mut *self.state.get();
         let arenas = &mut *self.arenas.get();
@@ -154,7 +164,18 @@ impl TypeState {
                     } else {
                         debug_assert!(!full(next, self.type_info.align));
                         // store active worker arenas
-                        arenas.worker.insert(HeaderUnTyped::from(next), next);
+                        arenas
+                            .worker
+                            .entry(HeaderUnTyped::from(next))
+                            .and_modify(|(n, e)| *n = next)
+                            .or_insert((
+                                next,
+                                HeaderUnTyped::from(next) as usize
+                                    + HeaderUnTyped::high_offset(
+                                        self.type_info.align,
+                                        self.type_info.size,
+                                    ) as usize,
+                            ));
                     };
 
                     *msg = Msg::Slot;
@@ -250,7 +271,9 @@ impl TypeState {
                     .worker
                     .drain()
                     .into_iter()
-                    .for_each(|(_, next)| self.drop_objects_above(next as *mut _));
+                    .for_each(|(_, range)| {
+                        self.drop_objects(HeaderUnTyped::from(range.0) as *mut _, range)
+                    });
 
                 let children_complete = relations.direct_children.iter().all(|(cts, _)| {
                     { &*cts.state.get() }
@@ -281,8 +304,11 @@ impl TypeState {
             panic!("Old Arena Rooted");
         }
 
+        let high = header as usize
+            + HeaderUnTyped::high_offset(self.type_info.align, self.type_info.size) as usize;
+
         if self.type_info.needs_drop {
-            self.drop_objects_above(next);
+            self.drop_objects(header, (next, high));
         };
 
         ptr::drop_in_place(header);
@@ -290,33 +316,23 @@ impl TypeState {
     }
 
     /// Runs destructor on objects from the top of the `Arena` to next;
-    unsafe fn drop_objects_above(&self, next: *mut u8) {
+    unsafe fn drop_objects(&self, header: *mut HeaderUnTyped, range: (*const u8, usize)) {
         debug_assert!(self.type_info.needs_drop);
 
-        let header = HeaderUnTyped::from(next) as *mut HeaderUnTyped;
-
-        let GcTypeInfo {
-            align,
-            size,
-            needs_drop,
-            ..
-        } = self.type_info;
+        let GcTypeInfo { align, size, .. } = self.type_info;
         let low = max(
-            next as usize + size as usize,
+            range.0 as usize + size as usize,
             header as usize + HeaderUnTyped::low_offset(align) as usize,
         );
-        let mut ptr = header as usize + HeaderUnTyped::high_offset(align, size) as usize;
+        let mut ptr = range.1 as usize;
 
         let drop_in_place = self.type_info.drop_in_place_fn();
+        let evacuated = { &mut *header }.evacuated.lock().unwrap();
 
         while ptr >= low {
             let header = &mut *header;
             // TODO sort and iterate between evacuated
-            if header.evacuated.get_mut().unwrap().contains_key(&index(
-                ptr as *const u8,
-                size,
-                align,
-            )) {
+            if evacuated.contains_key(&index(ptr as *const u8, size, align)) {
                 drop_in_place(ptr as *mut u8)
             };
             ptr -= size as usize;
@@ -324,6 +340,7 @@ impl TypeState {
     }
 }
 
+#[derive(Debug)]
 struct Pending {
     /// `epoch` is not synchronized across threads.
     /// 2 epochs delineate Arena age.
@@ -354,6 +371,15 @@ pub(crate) struct Collection {
     /// Transitive parents that may contain a condemned ptr on a workers stack.
     /// A map of `TypeState` -> `epoch: usize`
     waiting_transitive_parents: SmallVec<[(&'static TypeState, usize); 5]>,
+}
+
+impl Debug for Collection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Collection")
+            .field("latest_grey", &self.latest_grey)
+            .field("condemned", &self.condemned)
+            .finish()
+    }
 }
 
 impl Collection {
@@ -399,7 +425,8 @@ impl Collection {
 
     /// Ensures no ptrs exist in to the `TypeState`'s condemned arenas.
     fn safe_to_free(&mut self, pending: &Pending, relations: &ActiveRelations) -> bool {
-        // TODO ensure transitive_parents drop order.
+        // TODO(drop) ensure transitive_parents drop order.
+        // Or panic on Arena::new in a destructor.
         if self.no_grey_arenas(pending) {
             if self.waiting_transitive_parents.is_empty() {
                 self.waiting_transitive_parents = relations
@@ -505,11 +532,14 @@ impl Collection {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct Arenas {
-    /// The last seen `next`, ptr + size..high_offset is owned by gc
+    /// The last seen `next`..end.
+    /// `end+size..=high_offset` is already freed.
+    ///
     /// Will not include all Arenas owned by workers.
     /// Only contains Arenas that the gc owns some of.
-    pub worker: HashMap<*const HeaderUnTyped, *const u8>,
+    pub worker: HashMap<*const HeaderUnTyped, (*const u8, usize)>,
     /// Arena owned by GC, that have not been completely filled.
     pub partial: Partial,
     pub full: HashSet<*mut HeaderUnTyped>,
@@ -531,6 +561,7 @@ impl Arenas {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct Partial(pub HashSet<*mut u8>);
 
 impl Default for Partial {
