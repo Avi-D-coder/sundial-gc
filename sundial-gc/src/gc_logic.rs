@@ -22,8 +22,6 @@ use std::{
 use type_group::{TypeGroup, TypeGroups};
 use type_state::{TotalRelations, TypeState};
 
-pub static TRIGGER_MAJOR_GC: AtomicBool = AtomicBool::new(false);
-
 /// Used to register a thread's interest in a type.
 /// Before a worker thread can allocate or read a `Gc<T>`, it must register for `T`.
 pub(crate) static THREAD_TYPE_REG_BUS: AtomicPtr<Mutex<GcThreadBus>> =

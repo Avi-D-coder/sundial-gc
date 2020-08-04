@@ -61,11 +61,18 @@ impl TypeState {
     /// `resolve` must be called on every Arena.
     /// It's the dual of `TypeState.start`.
     fn resolve(pending: &mut Pending, next: *const u8) {
+        log::trace!(
+            "TypeState::resolve: next: {:?}, header: {:?}",
+            next,
+            HeaderUnTyped::from(next)
+        );
+        log::trace!("{:?}", pending);
         if let Some(e) = pending.arenas.remove(&HeaderUnTyped::from(next)) {
             // if e < pending.transitive_epoch {
             //     pending.known_transitive_grey -= 1;
             // }
         } else {
+            // FIXME
             pending.known_grey -= 1;
         };
     }
@@ -153,21 +160,24 @@ impl TypeState {
                     if *release_to_gc {
                         let header = HeaderUnTyped::from(next) as *mut _;
                         if full(next, self.type_info.align) {
-                            log::trace!("Full Arena released");
+                            log::trace!("Full Arena released: header: {:?}", header);
                             arenas.full.insert(header);
                         } else {
-                            log::trace!("Non full Arena released");
+                            log::trace!(
+                                "Non full Arena released: header {:?}, next: {:?}",
+                                header,
+                                next
+                            );
                             arenas.partial.0.insert(next as *mut _);
                         };
 
                         arenas.worker.remove(&(header as *const _));
                     } else {
-                        debug_assert!(!full(next, self.type_info.align));
                         // store active worker arenas
                         arenas
                             .worker
                             .entry(HeaderUnTyped::from(next))
-                            .and_modify(|(n, e)| *n = next)
+                            .and_modify(|(n, _)| *n = next)
                             .or_insert((
                                 next,
                                 HeaderUnTyped::from(next) as usize
@@ -253,11 +263,11 @@ impl TypeState {
             while cycle.handler.root_grey_children() {}
 
             if cycle.safe_to_free(pending, relations) {
+                log::trace!("safe_to_free: {}", self.type_info.type_name);
                 cycle
                     .condemned
                     .full
                     .drain()
-                    .into_iter()
                     .for_each(|header| self.drop_arena(header as *mut u8, free));
                 cycle
                     .condemned
@@ -266,14 +276,12 @@ impl TypeState {
                     .drain()
                     .into_iter()
                     .for_each(|next| self.drop_arena(next, free));
-                cycle
-                    .condemned
-                    .worker
-                    .drain()
-                    .into_iter()
-                    .for_each(|(_, range)| {
+
+                if self.type_info.needs_drop {
+                    cycle.condemned.worker.drain().for_each(|(_, range)| {
                         self.drop_objects(HeaderUnTyped::from(range.0) as *mut _, range)
                     });
+                };
 
                 let children_complete = relations.direct_children.iter().all(|(cts, _)| {
                     { &*cts.state.get() }
@@ -287,13 +295,14 @@ impl TypeState {
                     done = true;
                 };
             };
-        }
+        };
 
         done
     }
 
     unsafe fn drop_arena(&self, next: *mut u8, free: &mut FreeList) {
         let header = HeaderUnTyped::from(next) as *mut HeaderUnTyped;
+        log::trace!("drop_arena(header: {:?}, next: {:?})", header, next);
 
         let roots = { &*header }
             .roots
@@ -311,8 +320,7 @@ impl TypeState {
             self.drop_objects(header, (next, high));
         };
 
-        ptr::drop_in_place(header);
-        free.dealloc(header as *mut _)
+        free.dealloc(header)
     }
 
     /// Runs destructor on objects from the top of the `Arena` to next;
@@ -330,9 +338,9 @@ impl TypeState {
         let evacuated = { &mut *header }.evacuated.lock().unwrap();
 
         while ptr >= low {
-            let header = &mut *header;
             // TODO sort and iterate between evacuated
-            if evacuated.contains_key(&index(ptr as *const u8, size, align)) {
+            if !evacuated.contains_key(&index(ptr as *const u8, size, align)) {
+                log::trace!("drop_arena: {:?}", ptr as *mut u8);
                 drop_in_place(ptr as *mut u8)
             };
             ptr -= size as usize;
@@ -371,6 +379,7 @@ pub(crate) struct Collection {
     /// Transitive parents that may contain a condemned ptr on a workers stack.
     /// A map of `TypeState` -> `epoch: usize`
     waiting_transitive_parents: SmallVec<[(&'static TypeState, usize); 5]>,
+    waiting_transitive: bool,
 }
 
 impl Debug for Collection {
@@ -420,6 +429,7 @@ impl Collection {
             latest_grey: 0,
             condemned: Default::default(),
             waiting_transitive_parents: SmallVec::new(),
+            waiting_transitive: false,
         }
     }
 
@@ -428,12 +438,14 @@ impl Collection {
         // TODO(drop) ensure transitive_parents drop order.
         // Or panic on Arena::new in a destructor.
         if self.no_grey_arenas(pending) {
-            if self.waiting_transitive_parents.is_empty() {
+            log::trace!("no_grey_arenas: true");
+            if !self.waiting_transitive {
                 self.waiting_transitive_parents = relations
                     .transitive_parents
                     .iter()
                     .map(|ts| (*ts, unsafe { &*ts.pending.get() }.epoch + 1))
                     .collect();
+                self.waiting_transitive = true;
 
                 false
             } else {
@@ -447,11 +459,18 @@ impl Collection {
     }
 
     fn no_grey_arenas(&self, pending: &Pending) -> bool {
+        log::trace!(
+            "pending.known_grey: {}, latest_grey: {}, pending.epoch: {}",
+            pending.known_grey,
+            self.latest_grey,
+            pending.epoch
+        );
         pending.known_grey == 0 && self.latest_grey < pending.epoch + 2
     }
 
     /// Evacuate rooted objects from condemned `Arenas`.
     fn evac_roots(&mut self, type_info: &GcTypeInfo, arenas: &mut Arenas, free: &mut FreeList) {
+        log::trace!("evac_roots: {}", type_info.type_name);
         let Collection {
             handler, condemned, ..
         } = self;
@@ -464,11 +483,13 @@ impl Collection {
             free: &mut FreeList,
         ) {
             let Arenas { full, partial, .. } = arenas;
+            log::trace!("header: {:?}", header);
             let mut roots = unsafe { &*header }
                 .roots
                 .lock()
                 .expect("Could not unlock roots, in TypeState::step");
-            roots.drain().into_iter().for_each(|(idx, root_ptr)| {
+
+            roots.drain().for_each(|(idx, root_ptr)| {
                 let GcTypeInfo { align, size, .. } = *type_info;
                 let high =
                     header as *const _ as usize + HeaderUnTyped::high_offset(align, size) as usize;
@@ -489,11 +510,9 @@ impl Collection {
 
                     unsafe { ptr::copy(gc, next, 1) }
 
-                    let mut roots =
-                        unsafe { &mut *(HeaderUnTyped::from(next) as *mut HeaderUnTyped) }
-                            .roots
-                            .lock()
-                            .unwrap();
+                    let to_header =
+                        unsafe { &mut *(HeaderUnTyped::from(next) as *mut HeaderUnTyped) };
+                    let mut roots = to_header.roots.lock().unwrap();
 
                     if !roots.insert(index(next, size, align), root_ptr).is_none() {
                         panic!("Not possible");
@@ -501,9 +520,14 @@ impl Collection {
 
                     let ptr = bump_down(next, size, align);
 
-                    if ptr as usize % ARENA_SIZE == 0 {
+                    if arena::full(ptr, align) {
                         full.insert(ptr as *mut _);
                     } else {
+                        log::trace!(
+                            "Evacuated root to Arena {{header: {:?}, next: {:?}}}",
+                            to_header as *const _,
+                            next
+                        );
                         partial.0.insert(ptr as *mut _);
                     }
                 };
@@ -518,17 +542,24 @@ impl Collection {
             .cloned()
             .map(|next| HeaderUnTyped::from(next))
             .for_each(|header| er(header, type_info, handler, arenas, free));
+
+        log::trace!("evaced root's in partial: {:?}", condemned.partial.0);
+
         condemned
             .full
             .iter()
             .cloned()
             .map(|h| h as *const _)
             .for_each(|header| er(header, type_info, handler, arenas, free));
+
+        log::trace!("evaced root's in full: {:?}", condemned.full);
+
         condemned
             .worker
             .keys()
             .cloned()
             .for_each(|header| er(header, type_info, handler, arenas, free));
+        log::trace!("evaced root's in worker: {:?}", condemned.worker);
     }
 }
 
@@ -573,11 +604,14 @@ impl Default for Partial {
 impl Partial {
     /// Reuse or allocate a new Arena
     fn get_arena(&mut self, type_info: &GcTypeInfo, free: &mut FreeList) -> *mut u8 {
-        self.0.iter().cloned().next().unwrap_or(
+        if let Some(arena) = self.0.iter().cloned().next() {
+            self.0.remove(&arena);
+            arena
+        } else {
             (free.alloc() as *mut _ as usize
                 + HeaderUnTyped::high_offset(type_info.align, type_info.size) as usize)
-                as *mut u8,
-        )
+                as *mut u8
+        }
     }
 }
 

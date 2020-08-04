@@ -47,23 +47,19 @@ impl TypeGroups {
         let group = Box::leak(Box::new(TypeGroup::default()));
         group.related.push(type_state);
 
-        let gc_in_progress =
-            groups
-                .iter()
-                .cloned()
-                .map(|tg| unsafe { &*tg })
-                .fold(false, |gc_in_progress, tg| {
-                    group.free.free.extend(tg.free.free.iter());
-                    group.related.extend(tg.related.iter());
+        let gc_in_progress = groups.iter().cloned().fold(false, |gc_in_progress, tg| {
+            let tg = unsafe { &mut *(tg as *mut TypeGroup) };
+            group.free.merge(&mut tg.free);
+            group.related.extend(tg.related.iter());
 
-                    // Registering a new type resets gc state.
-                    // If a collection was in progress it is restarted.
-                    let r = gc_in_progress || tg.gc_in_progress.is_some();
+            // Registering a new type resets gc state.
+            // If a collection was in progress it is restarted.
+            let r = gc_in_progress || tg.gc_in_progress.is_some();
 
-                    // Free the old group
-                    unsafe { drop(Box::from_raw(tg as *const _ as *mut TypeGroup)) }
-                    r
-                });
+            // Free the old group
+            unsafe { drop(Box::from_raw(tg as *const _ as *mut TypeGroup)) }
+            r
+        });
 
         // Add new type_state and update old type_state => TypeGroup mappings.
         group.related.iter().for_each(|ts| {
@@ -173,10 +169,12 @@ impl TypeGroup {
                     .condemned
                     .worker
                     .entry(*h)
-                    .and_modify(|(n, e)| {
+                    .and_modify(|(n, _)| {
                         *n = *next;
                     })
                     .or_insert((*next, *end));
+
+                *end = *next as usize;
             });
 
             *state = Some(collection);

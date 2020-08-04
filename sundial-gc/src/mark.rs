@@ -64,27 +64,23 @@ impl Translator {
         let mut offsets = SmallVec::from([255; 16]);
         let mut bloom = 0b0000_0000;
 
-        types
-            .drain()
-            .into_iter()
-            .for_each(|(ti, (type_offs, bits))| {
-                bloom |= bits;
-                if let Some((i, _)) = effs
-                    .iter()
-                    .cloned()
-                    .enumerate()
-                    .find(|(_, eff)| eff.type_info == ti)
-                {
-                    type_offs.iter().for_each(|off| {
-                        if offsets.len() < *off as usize {
-                            offsets
-                                .extend(iter::repeat(255).take(1 + *off as usize - offsets.len()));
-                        };
+        types.drain().for_each(|(ti, (type_offs, bits))| {
+            bloom |= bits;
+            if let Some((i, _)) = effs
+                .iter()
+                .cloned()
+                .enumerate()
+                .find(|(_, eff)| eff.type_info == ti)
+            {
+                type_offs.iter().for_each(|off| {
+                    if offsets.len() < *off as usize {
+                        offsets.extend(iter::repeat(255).take(1 + *off as usize - offsets.len()));
+                    };
 
-                        offsets[*off as usize] = i as u8;
-                    });
-                };
-            });
+                    offsets[*off as usize] = i as u8;
+                });
+            };
+        });
 
         (Self { offsets }, bloom)
     }
@@ -117,13 +113,10 @@ pub struct Handlers {
 
 impl Handlers {
     /// Returns a ptr if the condemned ptr has already been evacuated.
-    unsafe fn forward_single_threaded<T: Immutable>(
-        condemned: *const T,
-        new: *const T,
-    ) -> *const T {
+    unsafe fn forward<T: Immutable>(condemned: *const T, new: *const T) -> *const T {
         let header = &mut *(Header::from(condemned) as *mut Header<T>);
         // This will race if multiple threads are tracing!
-        let evacuated = header.intern.evacuated.get_mut().unwrap();
+        let mut evacuated = header.intern.evacuated.lock().unwrap();
 
         // Add a forwarding ptr to the condemned Arena
         *evacuated
@@ -346,23 +339,22 @@ unsafe impl<'r, T: Trace> Trace for Gc<'r, T> {
                         .get_mut(i as usize)
                         .map(|v| v.push(header_addr as *mut HeaderUnTyped));
                     let free = &mut *handlers.free;
+                    log::trace!("Needs new next");
                     next = (free.alloc() as *mut _ as usize + Header::<T>::high_offset() as usize)
                         as *mut T;
                     new_arena = true;
                 };
 
                 ptr::copy_nonoverlapping(ptr, next, 1);
-                let evacuated_ptr = Handlers::forward_single_threaded(ptr, next);
+                let evacuated_ptr = Handlers::forward(ptr, next);
 
                 // If we installed a forwarding ptr, bump next.
                 if next == evacuated_ptr as *mut T {
                     *next_slot = Arena::bump_down_ptr(next_slot) as *mut u8;
                 } else if new_arena {
                     let header = HeaderUnTyped::from(next as *const u8) as *mut HeaderUnTyped;
-                    ptr::drop_in_place(header);
-
                     let empty = &mut *handlers.free;
-                    empty.dealloc(header as *mut _)
+                    empty.dealloc(header)
                 }
                 let old_ptr = sellf as *const Gc<T> as *mut *const T;
                 *old_ptr = next;

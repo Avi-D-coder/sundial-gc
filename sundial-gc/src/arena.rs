@@ -213,14 +213,14 @@ impl<T: Immutable + Trace> Drop for Arena<T> {
                 let release_to_gc = if capacity == 0 {
                     true
                 } else {
-                    if let Some(cached_next) = bus.cached_next {
+                    if let Some((cached_next, new_allocation)) = bus.cached_next {
                         if capacity > Self::capacity_ptr(cached_next as *const T) {
                             send(
                                 &bus.bus,
                                 Msg::End {
                                     next: cached_next,
                                     release_to_gc: true,
-                                    new_allocation: false,
+                                    new_allocation,
                                     grey_fields,
                                     white_start: self.invariant.white_start,
                                     white_end: self.invariant.white_end,
@@ -228,14 +228,14 @@ impl<T: Immutable + Trace> Drop for Arena<T> {
                             );
 
                             debug_assert!(!self.full());
-                            bus.cached_next = Some(next as *mut _);
+                            bus.cached_next = Some((next as *mut _, self.new_allocation));
                             false
                         } else {
                             true
                         }
                     } else {
                         debug_assert!(!self.full());
-                        bus.cached_next = Some(next as *mut _);
+                        bus.cached_next = Some((next as *mut _, self.new_allocation));
                         false
                     }
                 };
@@ -572,6 +572,7 @@ impl HeaderUnTyped {
     }
 
     pub(crate) fn init(ptr: *mut HeaderUnTyped) {
+        log::trace!("HeaderUnTyped::init {:?}", ptr);
         unsafe {
             ptr::write(
                 ptr,
@@ -583,6 +584,7 @@ impl HeaderUnTyped {
                 },
             )
         }
+        log::trace!("HeaderUnTyped::init {:?} Complete", ptr);
     }
 }
 
@@ -657,9 +659,8 @@ fn send(bus: &Bus, msg: Msg) -> usize {
 
 #[derive(Debug)]
 struct CacheBus {
-    // TODO remove Option,
-    // it does not get optized away.
-    cached_next: Option<*mut u8>,
+    /// (next, new_allocation)
+    cached_next: Option<(*mut u8, bool)>,
     known_invariant: Invariant,
     bus: Bus,
 }

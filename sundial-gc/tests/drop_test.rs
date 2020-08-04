@@ -17,7 +17,6 @@ use std::{
     time::Duration,
 };
 use sundial_gc::arena::*;
-use sundial_gc::TRIGGER_MAJOR_GC;
 
 fn log_init() {
     let _ = env_logger::builder().is_test(true).try_init();
@@ -49,7 +48,6 @@ fn drop_test() {
         }
     }
 
-    TRIGGER_MAJOR_GC.store(true, Ordering::Relaxed);
     while COUNT.load(Ordering::Relaxed) != 0 {
         eprintln!("Count {}", COUNT.load(Ordering::Relaxed));
         thread::sleep(Duration::from_millis(1000));

@@ -18,7 +18,7 @@ use std::{
 };
 use sundial_gc::arena::*;
 use sundial_gc::gc::Gc;
-use sundial_gc::{mark::*, TRIGGER_MAJOR_GC};
+use sundial_gc::{mark::*};
 use sundial_gc_derive::*;
 
 fn log_init() {
