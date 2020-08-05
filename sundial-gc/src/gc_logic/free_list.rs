@@ -7,6 +7,7 @@ use std::{
 
 pub(crate) struct FreeList {
     free: Vec<*mut Mem>,
+    /// More Arenas may be allocated then this count, due to workers allocating and freeing Arenas.
     pub allocated: usize,
 }
 
@@ -55,7 +56,8 @@ impl FreeList {
     pub fn dealloc(&mut self, arena: *mut HeaderUnTyped) {
         log::trace!("FreeList:dealloc: {:?}", arena);
         unsafe { ptr::drop_in_place(arena) };
-        self.allocated -= 1;
+        // More Arenas may be allocated then this count.
+        self.allocated = self.allocated.saturating_sub(1);
         self.free.push(arena as *mut Mem);
     }
 

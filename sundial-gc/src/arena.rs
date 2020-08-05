@@ -14,6 +14,7 @@ use std::mem::{self, transmute};
 use std::ptr;
 use std::sync::Mutex;
 use std::{
+    fmt::Debug,
     thread, thread_local,
     time::{Duration, Instant},
 };
@@ -207,37 +208,32 @@ impl<T: Immutable + Trace> Drop for Arena<T> {
             let grey_fields = unsafe { *self.marked_grey_fields.get() };
             let tm = unsafe { &mut *tm.get() };
             tm.entry(key::<T>()).and_modify(|bus| {
-                let capacity = self.capacity();
-
                 // A good candidate for https://github.com/rust-lang/rust/issues/53667
-                let release_to_gc = if capacity == 0 {
+                let release_to_gc = if self.full() {
+                    // log::trace!("Worker releasing full Arena: {:?}", next);
                     true
-                } else {
-                    if let Some((cached_next, new_allocation)) = bus.cached_next {
-                        if capacity > Self::capacity_ptr(cached_next as *const T) {
-                            send(
-                                &bus.bus,
-                                Msg::End {
-                                    next: cached_next,
-                                    release_to_gc: true,
-                                    new_allocation,
-                                    grey_fields,
-                                    white_start: self.invariant.white_start,
-                                    white_end: self.invariant.white_end,
-                                },
-                            );
+                } else if let Some((cached_next, new_allocation)) =
+                    bus.cached_arenas.put::<T>(next as _, self.new_allocation)
+                {
+                    // log::trace!("Worker releasing cached Arena {:?}",);
+                    send(
+                        &bus.bus,
+                        Msg::End {
+                            next: cached_next as _,
+                            release_to_gc: true,
+                            new_allocation,
+                            grey_fields,
+                            white_start: self.invariant.white_start,
+                            white_end: self.invariant.white_end,
+                        },
+                    );
 
-                            debug_assert!(!self.full());
-                            bus.cached_next = Some((next as *mut _, self.new_allocation));
-                            false
-                        } else {
-                            true
-                        }
-                    } else {
-                        debug_assert!(!self.full());
-                        bus.cached_next = Some((next as *mut _, self.new_allocation));
-                        false
-                    }
+                    debug_assert!(!self.full());
+                    false
+                } else {
+                    debug_assert!(!self.full());
+                    // We didn't cache it so the arena is released to the GC.
+                    true
                 };
 
                 let end = Msg::End {
@@ -327,8 +323,8 @@ impl<T: Immutable + Trace> Arena<T> {
         let bus = GC_BUS.with(|tm| {
             let tm = unsafe { &mut *tm.get() };
             tm.entry(key::<T>()).or_insert_with(|| {
-                let bus = Box::leak(Box::new(CacheBus {
-                    cached_next: None,
+                let bus = Box::leak(Box::new(BusState {
+                    cached_arenas: CachedArenas([CachedArena::null(); 2]),
                     known_invariant: Invariant::none(),
                     bus: Mutex::new([Msg::Slot; 8]),
                 }));
@@ -339,39 +335,46 @@ impl<T: Immutable + Trace> Arena<T> {
             })
         });
 
-        let mut msgs = bus.bus.lock().expect("Could not unlock bus");
-        let gc_idx = msgs
-            .iter()
+        let BusState {
+            bus,
+            known_invariant,
+            cached_arenas,
+        } = bus;
+        let mut msgs = bus.lock().expect("Could not unlock bus");
+        msgs.iter_mut()
             .enumerate()
-            .filter(|(_, o)| o.is_gc())
-            .map(|(i, _)| i)
+            .filter(|(_, msg)| match msg {
+                Msg::Invariant(inv) => {
+                    *known_invariant = *inv;
+                    true
+                }
+                _ => false,
+            })
+            .map(|(i, msg)| {
+                *msg = Msg::Slot;
+                i
+            })
             .next();
 
-        let mut new_allocation = false;
-        if let Some(&mut Msg::Gc {
-            ref mut next,
-            invariant,
-        }) = gc_idx.map(|i| &mut msgs[i])
+        let (next, new_allocation) = if let Some(n) = cached_arenas.get::<T>() {
+            n
+        } else if let Some(next) = msgs
+            .iter_mut()
+            .filter_map(|msg| match msg {
+                Msg::Next(next) => Some(*next as _),
+                _ => None,
+            })
+            .next()
         {
-            if bus.cached_next.is_none() {
-                bus.cached_next = *next;
-                *next = None;
-            };
-            bus.known_invariant = invariant;
-        };
-
-        let next = if let Some(n) = bus.cached_next {
-            bus.cached_next = None;
-            n as *mut T
+            (next, false)
         } else {
-            new_allocation = true;
-            Arena::alloc()
+            (Arena::alloc(), true)
         };
 
         drop(msgs);
         // send start message to gc
         let slot = send(
-            &bus.bus,
+            &bus,
             Msg::Start {
                 next: next as *const u8,
                 white_start: 0,
@@ -382,7 +385,7 @@ impl<T: Immutable + Trace> Arena<T> {
         Arena {
             bus_idx: slot as u8,
             new_allocation,
-            invariant: bus.known_invariant,
+            invariant: *known_invariant,
             next: UnsafeCell::new(next),
             marked_grey_fields: UnsafeCell::new(0b0000_0000),
             full: UnsafeCell::new(SmallVec::new()),
@@ -658,18 +661,109 @@ fn send(bus: &Bus, msg: Msg) -> usize {
 }
 
 #[derive(Debug)]
-struct CacheBus {
+struct BusState {
     /// (next, new_allocation)
-    cached_next: Option<(*mut u8, bool)>,
+    cached_arenas: CachedArenas,
     known_invariant: Invariant,
     bus: Bus,
+}
+
+#[derive(Debug)]
+struct CachedArenas([CachedArena; 2]);
+
+impl CachedArenas {
+    /// Try to cache an Arena.
+    /// If the Cache is full and the new Arena will be cached the old Arena with the least capacity will be returned.
+    fn put<T: Trace>(&mut self, next: *mut T, new_allocation: bool) -> Option<(*mut T, bool)> {
+        let (cached_arena, cap) = self
+            .0
+            .iter_mut()
+            .map(|a| {
+                let cap = Arena::<T>::capacity_ptr(a.next() as _);
+                (a, cap)
+            })
+            .min_by(|(_, ac), (_, bc)| ac.cmp(bc))
+            .unwrap();
+
+        if cap < Arena::<T>::capacity_ptr(next) {
+            let r = if cached_arena.is_null() {
+                None
+            } else {
+                Some((cached_arena.next() as _, cached_arena.new_allocation()))
+            };
+
+            *cached_arena = CachedArena::new(next as _, new_allocation);
+            r
+        } else {
+            None
+        }
+    }
+
+    fn get<T: Trace>(&mut self) -> Option<(*mut T, bool)> {
+        self.0
+            .iter_mut()
+            .filter(|a| !CachedArena::is_null(**a))
+            .map(|a| {
+                let cap = Arena::<T>::capacity_ptr(a.next() as _);
+                (a, cap)
+            })
+            .max_by(|(_, ac), (_, bc)| ac.cmp(bc))
+            .map(|(a, _)| {
+                let next = a.next() as _;
+                let new_allocation = a.new_allocation();
+                *a = CachedArena::null();
+                (next, new_allocation)
+            })
+    }
+}
+
+#[derive(Copy, Clone)]
+struct CachedArena {
+    tagged_next: usize,
+}
+
+impl Debug for CachedArena {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachedArena")
+            .field("header", &HeaderUnTyped::from(self.next()))
+            .field("next", &self.next())
+            .field("new_allocation", &self.new_allocation())
+            .finish()
+    }
+}
+
+impl CachedArena {
+    fn new(next: *mut u8, new_allocation: bool) -> CachedArena {
+        CachedArena {
+            tagged_next: if new_allocation {
+                next as usize | 1
+            } else {
+                next as usize
+            },
+        }
+    }
+
+    fn next(self) -> *mut u8 {
+        (self.tagged_next ^ 1) as _
+    }
+
+    fn new_allocation(self) -> bool {
+        self.tagged_next & 1 == 1
+    }
+
+    fn null() -> CachedArena {
+        CachedArena { tagged_next: 0 }
+    }
+    fn is_null(self) -> bool {
+        self.tagged_next == 0
+    }
 }
 
 thread_local! {
     /// Map from type to GC communication bus.
     /// `Arena.next` from an `Msg::End` with excise capacity.
     /// Cached invariant from last `Msg::Gc`.
-    static GC_BUS: UnsafeCell<HashMap<(GcTypeInfo, usize), &'static mut CacheBus>> = UnsafeCell::new(HashMap::new());
+    static GC_BUS: UnsafeCell<HashMap<(GcTypeInfo, usize), &'static mut BusState>> = UnsafeCell::new(HashMap::new());
 
     // FIXME upon drop/thread end send End for cached_next and Msg::Gc.next
 }
@@ -706,10 +800,8 @@ pub(crate) enum Msg {
         white_start: usize,
         white_end: usize,
     },
-    Gc {
-        next: Option<*mut u8>,
-        invariant: Invariant,
-    },
+    Invariant(Invariant),
+    Next(*mut u8),
 }
 
 impl Msg {
@@ -721,9 +813,9 @@ impl Msg {
         }
     }
 
-    pub fn is_gc(&self) -> bool {
+    pub fn is_invariant(&self) -> bool {
         match self {
-            Msg::Gc { .. } => true,
+            Msg::Invariant { .. } => true,
             _ => false,
         }
     }

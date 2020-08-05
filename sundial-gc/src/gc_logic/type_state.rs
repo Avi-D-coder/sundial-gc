@@ -19,8 +19,8 @@ use std::{
 /// `RelatedTypeStates` will implement `Send`
 pub(crate) struct TypeState {
     pub(crate) type_info: GcTypeInfo,
-    /// Map Type to Bit
-    buses: UnsafeCell<HashMap<ThreadId, BusPtr>>,
+    /// Map worker thread => (Bus, worker arena count).
+    buses: UnsafeCell<HashMap<ThreadId, (BusPtr, usize)>>,
     pub arenas: UnsafeCell<Arenas>,
     pending: UnsafeCell<Pending>,
     // TODO support multiple simultaneous cycles.
@@ -67,7 +67,7 @@ impl TypeState {
             HeaderUnTyped::from(next)
         );
         log::trace!("{:?}", pending);
-        if let Some(e) = pending.arenas.remove(&HeaderUnTyped::from(next)) {
+        if let Some(_) = pending.arenas.remove(&HeaderUnTyped::from(next)) {
             // if e < pending.transitive_epoch {
             //     pending.known_transitive_grey -= 1;
             // }
@@ -82,7 +82,7 @@ impl TypeState {
         log::info!("{:?}", self);
         let mut done = false;
         let state = &mut *self.state.get();
-        let arenas = &mut *self.arenas.get();
+        let arenas: &mut Arenas = &mut *self.arenas.get();
         let pending = &mut *self.pending.get();
         let buses = &mut *self.buses.get();
 
@@ -90,8 +90,7 @@ impl TypeState {
 
         let mut grey: SmallVec<[(*const u8, u8); 16]> = SmallVec::new();
 
-        buses.iter().for_each(|(thread_id, bus)| {
-            let mut has_gc_msg = false;
+        buses.iter_mut().for_each(|(thread_id, (bus, count))| {
             let mut bus = bus.0.lock().expect("Could not unlock bus");
             grey.extend(bus.iter_mut().filter_map(|msg| match msg {
                 Msg::Start {
@@ -172,66 +171,59 @@ impl TypeState {
                         };
 
                         arenas.worker.remove(&(header as *const _));
+                        if !*new_allocation {
+                            *count -= 1
+                        };
                     } else {
                         // store active worker arenas
                         arenas
                             .worker
                             .entry(HeaderUnTyped::from(next))
                             .and_modify(|(n, _)| *n = next)
-                            .or_insert((
-                                next,
-                                HeaderUnTyped::from(next) as usize
-                                    + HeaderUnTyped::high_offset(
-                                        self.type_info.align,
-                                        self.type_info.size,
-                                    ) as usize,
-                            ));
+                            .or_insert({
+                                *count += 1;
+                                (
+                                    next,
+                                    HeaderUnTyped::from(next) as usize
+                                        + HeaderUnTyped::high_offset(
+                                            self.type_info.align,
+                                            self.type_info.size,
+                                        ) as usize,
+                                )
+                            });
                     };
 
                     *msg = Msg::Slot;
                     ret
                 }
-                Msg::Gc { next, invariant } => {
-                    has_gc_msg = true;
-                    if next.is_none() {
-                        *next = Some(arenas.partial.get_arena(&self.type_info, free));
-                        log::trace!("GC sent Arena {:?}", *next);
-                    };
-
-                    if let Some(cycle) = state {
-                        if cycle.handler.invariant != *invariant {
-                            *invariant = cycle.handler.invariant
-                        }
-                    };
-
-                    None
-                }
                 _ => None,
             }));
 
-            // Add a GC message to the bus if it does not yet have one.
-            if !has_gc_msg {
-                log::trace!("Adding Msg::GC to thread {:?}'s bus", thread_id);
-                bus.iter_mut().filter(|m| m.is_slot()).next().map(|slot| {
-                    let next = Some(arenas.partial.get_arena(&self.type_info, free));
-                    if let Some(Collection {
-                        handler: HandlerManager { invariant, .. },
-                        ..
-                    }) = *state
-                    {
-                        *slot = Msg::Gc { next, invariant };
-                    } else {
-                        *slot = Msg::Gc {
-                            next,
-                            invariant: Invariant::none(),
-                        };
-                    }
-                });
+            if let Some(cycle) = state.as_mut() {
+                let inv = Msg::Invariant(cycle.handler.invariant);
+                if let Some(slot) = bus.iter_mut().find(|msg| msg.is_invariant()) {
+                    *slot = inv
+                } else {
+                    *bus.iter_mut().find(|msg| msg.is_slot()).unwrap() = inv;
+                };
+            };
+
+            if *count < 2 {
+                if let Some(slot) = bus.iter_mut().find(|msg| msg.is_slot()) {
+                    *count += 1;
+                    let next = arenas.partial.get_arena(&self.type_info, free);
+                    log::trace!("GC sent header: {:?}, next: {:?}", HeaderUnTyped::from(next), next);
+                    *slot = Msg::Next(next);
+                };
             };
 
             // log::trace!("\n\n GC sent:\n {:?}\n\n", bus);
             drop(bus);
         });
+
+        if let Some(cycle) = state.as_mut() {
+            cycle.sent_invariant = true;
+        };
 
         // trace grey, updating refs
         if let Some(cycle) = state {
@@ -340,7 +332,7 @@ impl TypeState {
         while ptr >= low {
             // TODO sort and iterate between evacuated
             if !evacuated.contains_key(&index(ptr as *const u8, size, align)) {
-                log::trace!("drop_arena: {:?}", ptr as *mut u8);
+                log::trace!("drop ptr: {:?}", ptr as *mut u8);
                 drop_in_place(ptr as *mut u8)
             };
             ptr -= size as usize;
@@ -380,6 +372,9 @@ pub(crate) struct Collection {
     /// A map of `TypeState` -> `epoch: usize`
     waiting_transitive_parents: SmallVec<[(&'static TypeState, usize); 5]>,
     waiting_transitive: bool,
+    /// Has the invariant be sent to workers.
+    /// TODO(optimization) delay sending invariant.
+    sent_invariant: bool,
 }
 
 impl Debug for Collection {
@@ -430,6 +425,7 @@ impl Collection {
             condemned: Default::default(),
             waiting_transitive_parents: SmallVec::new(),
             waiting_transitive: false,
+            sent_invariant: false,
         }
     }
 
@@ -736,6 +732,7 @@ impl HandlerManager {
         true
     }
 }
+///
 
 /// All known relations between GCed types.
 /// New relationships are first known upon `TotalRelations::register`.
@@ -825,7 +822,7 @@ impl TotalRelations {
         });
 
         let buses = unsafe { &mut *ts.buses.get() };
-        buses.insert(thread_id, bus_ptr);
+        buses.insert(thread_id, (bus_ptr, 0));
         if active_ts.is_none() {
             Some(ts)
         } else {
