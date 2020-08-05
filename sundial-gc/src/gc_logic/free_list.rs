@@ -33,6 +33,7 @@ impl Default for FreeList {
 impl FreeList {
     pub fn alloc(&mut self) -> &mut HeaderUnTyped {
         log::trace!("FreeList: {:?}", self);
+        self.allocated += 1;
         if let Some(header) = self.free.pop() {
             log::trace!("Reusing Arena: {:?}", header);
             HeaderUnTyped::init(header as *mut HeaderUnTyped);
@@ -41,7 +42,6 @@ impl FreeList {
             log::trace!("Reusing Arena 2: {:?}", header);
             h
         } else {
-            self.allocated += 1;
             let header = unsafe { System.alloc(Layout::new::<Mem>()) } as *mut HeaderUnTyped;
             log::trace!("Allocating Arena: {:?}", header);
             HeaderUnTyped::init(header as *mut HeaderUnTyped);

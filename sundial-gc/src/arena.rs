@@ -13,11 +13,7 @@ use std::collections::HashMap;
 use std::mem::{self, transmute};
 use std::ptr;
 use std::sync::Mutex;
-use std::{
-    fmt::Debug,
-    thread, thread_local,
-    time::{Duration, Instant},
-};
+use std::{fmt::Debug, thread_local};
 
 pub const ARENA_SIZE: usize = 16384;
 #[repr(align(16384))]
@@ -208,6 +204,10 @@ impl<T: Immutable + Trace> Drop for Arena<T> {
             let grey_fields = unsafe { *self.marked_grey_fields.get() };
             let tm = unsafe { &mut *tm.get() };
             tm.entry(key::<T>()).and_modify(|bus| {
+                let BusState {
+                    cached_arenas, bus, ..
+                } = bus;
+                let mut bus = bus.lock().expect("Worker could not unlock bus");
                 // A good candidate for https://github.com/rust-lang/rust/issues/53667
                 let release_to_gc = if self.full() {
                     log::trace!(
@@ -217,7 +217,7 @@ impl<T: Immutable + Trace> Drop for Arena<T> {
                     );
                     true
                 } else {
-                    match bus.cached_arenas.put::<T>(next as _, self.new_allocation) {
+                    match cached_arenas.put::<T>(next as _, self.new_allocation) {
                         CacheStatus::Cached((cached_next, new_allocation)) => {
                             log::trace!(
                                 "Worker releasing cached Arena header: {:?}, next: {:?}",
@@ -225,7 +225,7 @@ impl<T: Immutable + Trace> Drop for Arena<T> {
                                 next
                             );
                             send(
-                                &bus.bus,
+                                &mut bus,
                                 Msg::End {
                                     next: cached_next as _,
                                     release_to_gc: true,
@@ -262,28 +262,20 @@ impl<T: Immutable + Trace> Drop for Arena<T> {
                     white_end: self.invariant.white_end,
                 };
 
-                // locked bus
-                {
-                    let mut msgs = bus
-                        .bus
-                        .lock()
-                        .expect("Could not unlock bus while dropping Arena");
-                    let msg = &mut msgs[self.bus_idx as usize];
+                let msg = &mut bus[self.bus_idx as usize];
 
-                    match msg {
-                        Msg::Slot | Msg::Start { .. } => *msg = end,
-                        _ => {
-                            drop(msgs);
-                            send(&bus.bus, end);
-                        }
-                    };
-                }
+                match msg {
+                    Msg::Slot | Msg::Start { .. } => *msg = end,
+                    _ => {
+                        send(&mut bus, end);
+                    }
+                };
 
                 full.into_iter()
                     .cloned()
                     .for_each(|(next, new_allocation, grey_fields)| {
                         send(
-                            &bus.bus,
+                            &mut bus,
                             Msg::End {
                                 release_to_gc: true,
                                 new_allocation,
@@ -343,7 +335,7 @@ impl<T: Immutable + Trace> Arena<T> {
                 let bus = Box::leak(Box::new(BusState {
                     cached_arenas: CachedArenas([CachedArena::null(); 2]),
                     known_invariant: Invariant::none(),
-                    bus: Mutex::new([Msg::Slot; 8]),
+                    bus: Mutex::new(SmallVec::new()),
                 }));
 
                 let mut reg = GcThreadBus::get().lock().expect("Could not unlock RegBus");
@@ -357,8 +349,8 @@ impl<T: Immutable + Trace> Arena<T> {
             known_invariant,
             cached_arenas,
         } = bus;
-        let mut msgs = bus.lock().expect("Could not unlock bus");
-        msgs.iter_mut()
+        let mut bus = bus.lock().expect("Could not unlock bus");
+        bus.iter_mut()
             .enumerate()
             .filter(|(_, msg)| match msg {
                 Msg::Invariant(inv) => {
@@ -375,7 +367,7 @@ impl<T: Immutable + Trace> Arena<T> {
 
         let (next, new_allocation) = if let Some(n) = cached_arenas.get::<T>() {
             n
-        } else if let Some(next) = msgs
+        } else if let Some(next) = bus
             .iter_mut()
             .filter_map(|msg| match msg {
                 Msg::Next(next) => Some(*next as _),
@@ -388,10 +380,9 @@ impl<T: Immutable + Trace> Arena<T> {
             (Arena::alloc(), true)
         };
 
-        drop(msgs);
         // send start message to gc
         let slot = send(
-            &bus,
+            &mut bus,
             Msg::Start {
                 next: next as *const u8,
                 white_start: 0,
@@ -417,6 +408,7 @@ impl<T: Immutable + Trace> Arena<T> {
                 *self.marked_grey_fields.get(),
             ));
             *self.next.get() = Self::alloc();
+            log::trace!("new_block alloc Complete");
         }
     }
 
@@ -426,8 +418,9 @@ impl<T: Immutable + Trace> Arena<T> {
         unsafe {
             if self.full() {
                 log::info!("Growing an Arena. This is slow!");
-                self.new_block()
-            }
+                self.new_block();
+                log::info!("Growing an Arena. Complete");
+            };
             let ptr = *self.next.get();
             *self.next.get() = self.bump_down() as *mut T;
             ptr::write(ptr, t);
@@ -456,7 +449,11 @@ impl<T: Immutable + Trace> Arena<T> {
     /// Returns highest ptr.
     pub(crate) fn alloc() -> *mut T {
         // Get more memory from system allocator
+        log::trace!("Arena::alloc");
+        // FIXME it's the last thing logged because it 's when the os tells of the gc threads
+        // demise
         let header = unsafe { System.alloc(Layout::new::<Mem>()) };
+        log::trace!("Arena::alloc got mem");
         debug_assert!(
             (header as usize)
                 < unsafe { &std::mem::transmute::<_, &Mem>(header)._mem[ARENA_SIZE - 1] }
@@ -644,36 +641,21 @@ impl<T> Header<T> {
     }
 }
 
-pub(crate) type Bus = Mutex<[Msg; 8]>;
+pub(crate) type Bus = Mutex<SmallVec<[Msg; 8]>>;
 
-/// FIXME(extend_bus) This is a pause on the worker!
 /// Returns index of sent message.
-fn send(bus: &Bus, msg: Msg) -> usize {
-    let mut waiting_since: Option<Instant> = None;
-    let mut sleep = 2;
-    loop {
-        let mut msgs = bus.lock().expect("Could not unlock bus");
-        if let Some((i, slot)) = msgs
-            .iter_mut()
-            .enumerate()
-            .filter(|(_, o)| o.is_slot())
-            .next()
-        {
-            *slot = msg;
-            drop(msgs);
-            break i;
-        } else {
-            drop(msgs);
-            let since = waiting_since.unwrap_or_else(|| {
-                let n = Instant::now();
-                waiting_since = Some(n);
-                n
-            });
-            let elapsed = since.elapsed();
-            thread::sleep(Duration::from_millis(sleep));
-            log::info!("Worker has waited for {}ms", elapsed.as_millis());
-            sleep *= 2;
-        };
+fn send(bus: &mut SmallVec<[Msg; 8]>, msg: Msg) -> usize {
+    if let Some((i, slot)) = bus
+        .iter_mut()
+        .enumerate()
+        .filter(|(_, o)| o.is_slot())
+        .next()
+    {
+        *slot = msg;
+        i
+    } else {
+        bus.push(msg);
+        bus.len() - 1
     }
 }
 
@@ -700,10 +682,19 @@ impl CachedArenas {
     /// If the Cache is full and the new Arena will be cached the old Arena with the least capacity will be returned.
     fn put<T: Trace>(&mut self, next: *mut T, new_allocation: bool) -> CacheStatus<T> {
         let header = HeaderUnTyped::from(next as _);
-        log::trace!("CachedArenas::put(header: {:?}, next: {:?}, new_allocation: {:?})", header, next, new_allocation);
+        log::trace!(
+            "CachedArenas::put(header: {:?}, next: {:?}, new_allocation: {:?})",
+            header,
+            next,
+            new_allocation
+        );
         log::trace!("CachedArenas::put {:?}", self);
 
-        debug_assert!(self.0.iter().find(|ca| HeaderUnTyped::from(ca.next()) == header).is_none());
+        debug_assert!(self
+            .0
+            .iter()
+            .find(|ca| HeaderUnTyped::from(ca.next()) == header)
+            .is_none());
 
         let (cached_arena, cap) = self
             .0

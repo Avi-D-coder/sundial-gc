@@ -185,6 +185,7 @@ impl TypeGroup {
     }
 
     pub(crate) fn step(&mut self) {
+        log::trace!("step");
         log::trace!(
             "TypeGroup {:?}",
             self.related
@@ -209,6 +210,8 @@ impl TypeGroup {
             *gc_in_progress = None;
             *last_gc_completed = Instant::now();
             *pre_allocated = free.allocated;
+
+            related.iter().for_each(|ts| unsafe { ts.reset() });
             log::warn!("Major GC complete {:?}", self);
         } else if let Some(start) = gc_in_progress {
             let elapsed = start.elapsed();
@@ -219,7 +222,8 @@ impl TypeGroup {
         } else if self.free.allocated >= 2 * *pre_allocated
             || last_gc_completed.elapsed() > Duration::from_secs(2)
         {
-            self.major_gc()
+            self.major_gc();
+            log::trace!("major gc");
         };
     }
 }

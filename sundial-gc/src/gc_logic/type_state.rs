@@ -6,8 +6,14 @@ use mark::{EffTypes, GcTypeInfo, Handlers, Invariant, Tti, TypeRow};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::{
-    cell::UnsafeCell, cmp::max, collections::HashSet, fmt::Debug, ops::Range, ptr,
-    sync::atomic::Ordering, thread::ThreadId,
+    cell::{Cell, UnsafeCell},
+    cmp::max,
+    collections::HashSet,
+    fmt::Debug,
+    ops::Range,
+    ptr,
+    sync::atomic::Ordering,
+    thread::ThreadId,
 };
 
 /// Each `Gc<T>` has a `TypeState` object.
@@ -21,6 +27,9 @@ pub(crate) struct TypeState {
     pub(crate) type_info: GcTypeInfo,
     /// Map worker thread => (Bus, worker arena count).
     buses: UnsafeCell<HashMap<ThreadId, (BusPtr, usize)>>,
+    /// Has the invariant be sent to workers.
+    /// TODO(optimization) delay sending invariant.
+    sent_invariant: Cell<bool>,
     pub arenas: UnsafeCell<Arenas>,
     pending: UnsafeCell<Pending>,
     // TODO support multiple simultaneous cycles.
@@ -78,6 +87,7 @@ impl TypeState {
     }
 
     /// For safe usage See `TypeState` docs.
+    /// Returns true when collection is complete.
     pub(crate) unsafe fn step(&self, free: &mut FreeList) -> bool {
         log::info!("{:?}", self);
         let mut done = false;
@@ -199,20 +209,33 @@ impl TypeState {
                 _ => None,
             }));
 
-            if let Some(cycle) = state.as_mut() {
-                let inv = Msg::Invariant(cycle.handler.invariant);
+            if !self.sent_invariant.get() {
+                let inv = Msg::Invariant(
+                    state
+                        .as_ref()
+                        .map(|cycle| cycle.handler.invariant)
+                        .unwrap_or(Invariant::none()),
+                );
+
+                // Send invariant replacing invariant bus if it exists.
                 if let Some(slot) = bus.iter_mut().find(|msg| msg.is_invariant()) {
                     *slot = inv
                 } else {
                     *bus.iter_mut().find(|msg| msg.is_slot()).unwrap() = inv;
                 };
+
+                log::trace!("GC sent thread {:?}, {:?}", thread_id, inv);
             };
 
             if *count < 2 {
                 if let Some(slot) = bus.iter_mut().find(|msg| msg.is_slot()) {
                     *count += 1;
                     let next = arenas.partial.get_arena(&self.type_info, free);
-                    log::trace!("GC sent header: {:?}, next: {:?}", HeaderUnTyped::from(next), next);
+                    log::trace!(
+                        "GC sent header: {:?}, next: {:?}",
+                        HeaderUnTyped::from(next),
+                        next
+                    );
                     *slot = Msg::Next(next);
                 };
             };
@@ -221,9 +244,7 @@ impl TypeState {
             drop(bus);
         });
 
-        if let Some(cycle) = state.as_mut() {
-            cycle.sent_invariant = true;
-        };
+        self.sent_invariant.set(true);
 
         // trace grey, updating refs
         if let Some(cycle) = state {
@@ -283,6 +304,9 @@ impl TypeState {
                 });
 
                 if children_complete {
+                    log::trace!("Children complete Collection cleared!");
+                    // This will trigger the Invariant::none to be sent to the workers.
+                    self.sent_invariant.set(false);
                     *state = None;
                     done = true;
                 };
@@ -332,11 +356,19 @@ impl TypeState {
         while ptr >= low {
             // TODO sort and iterate between evacuated
             if !evacuated.contains_key(&index(ptr as *const u8, size, align)) {
-                log::trace!("drop ptr: {:?}", ptr as *mut u8);
+                // log::trace!("drop ptr: {:?}", ptr as *mut u8);
                 drop_in_place(ptr as *mut u8)
             };
             ptr -= size as usize;
         }
+    }
+
+    pub unsafe fn reset(&self) {
+        debug_assert!(self.state.get().as_ref().unwrap().is_none());
+
+        let pending = &mut *self.pending.get();
+        pending.epoch = 0;
+        pending.arenas.iter_mut().for_each(|(_, epoch)| *epoch = 1);
     }
 }
 
@@ -372,9 +404,6 @@ pub(crate) struct Collection {
     /// A map of `TypeState` -> `epoch: usize`
     waiting_transitive_parents: SmallVec<[(&'static TypeState, usize); 5]>,
     waiting_transitive: bool,
-    /// Has the invariant be sent to workers.
-    /// TODO(optimization) delay sending invariant.
-    sent_invariant: bool,
 }
 
 impl Debug for Collection {
@@ -425,7 +454,6 @@ impl Collection {
             condemned: Default::default(),
             waiting_transitive_parents: SmallVec::new(),
             waiting_transitive: false,
-            sent_invariant: false,
         }
     }
 
@@ -461,7 +489,12 @@ impl Collection {
             self.latest_grey,
             pending.epoch
         );
-        pending.known_grey == 0 && self.latest_grey < pending.epoch + 2
+        pending.known_grey == 0
+            && self.latest_grey < pending.epoch - 2
+            && pending
+                .arenas
+                .values()
+                .all(|epoch| self.latest_grey < epoch - 2)
     }
 
     /// Evacuate rooted objects from condemned `Arenas`.
@@ -768,6 +801,7 @@ impl TotalRelations {
             let ts = Box::leak(Box::new(TypeState {
                 type_info,
                 buses: Default::default(),
+                sent_invariant: Cell::from(true),
                 arenas: UnsafeCell::new(Arenas::default()),
                 pending: UnsafeCell::new(Pending {
                     epoch: 0,

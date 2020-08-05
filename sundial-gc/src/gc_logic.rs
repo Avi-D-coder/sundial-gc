@@ -149,9 +149,11 @@ fn gc_loop() {
             }
         }
 
+        log::trace!("{:?}", type_groups);
         type_groups.groups.iter().for_each(|(_, tg)| {
             let tg = unsafe { &mut *(*tg as *mut TypeGroup) };
             tg.step();
+            log::trace!("step");
         });
 
         thread::sleep(Duration::from_millis(500))

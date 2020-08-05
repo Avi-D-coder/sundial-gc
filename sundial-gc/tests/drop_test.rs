@@ -41,11 +41,12 @@ impl Drop for Count {
 #[test]
 fn drop_test() {
     log_init();
-    for _ in 0..1000 {
+    for i in 0..1000 {
         let a = Arena::new();
         for _ in 0..100 {
             a.gc_alloc(Count::new());
         }
+        log::trace!("i: {}",i);
     }
 
     while COUNT.load(Ordering::Relaxed) != 0 {
