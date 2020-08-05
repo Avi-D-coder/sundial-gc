@@ -210,30 +210,47 @@ impl<T: Immutable + Trace> Drop for Arena<T> {
             tm.entry(key::<T>()).and_modify(|bus| {
                 // A good candidate for https://github.com/rust-lang/rust/issues/53667
                 let release_to_gc = if self.full() {
-                    // log::trace!("Worker releasing full Arena: {:?}", next);
-                    true
-                } else if let Some((cached_next, new_allocation)) =
-                    bus.cached_arenas.put::<T>(next as _, self.new_allocation)
-                {
-                    // log::trace!("Worker releasing cached Arena {:?}",);
-                    send(
-                        &bus.bus,
-                        Msg::End {
-                            next: cached_next as _,
-                            release_to_gc: true,
-                            new_allocation,
-                            grey_fields,
-                            white_start: self.invariant.white_start,
-                            white_end: self.invariant.white_end,
-                        },
+                    log::trace!(
+                        "Worker releasing full Arena header: {:?}, next: {:?}",
+                        HeaderUnTyped::from(next),
+                        next
                     );
-
-                    debug_assert!(!self.full());
-                    false
-                } else {
-                    debug_assert!(!self.full());
-                    // We didn't cache it so the arena is released to the GC.
                     true
+                } else {
+                    match bus.cached_arenas.put::<T>(next as _, self.new_allocation) {
+                        CacheStatus::Cached((cached_next, new_allocation)) => {
+                            log::trace!(
+                                "Worker releasing cached Arena header: {:?}, next: {:?}",
+                                HeaderUnTyped::from(next),
+                                next
+                            );
+                            send(
+                                &bus.bus,
+                                Msg::End {
+                                    next: cached_next as _,
+                                    release_to_gc: true,
+                                    new_allocation,
+                                    grey_fields,
+                                    white_start: self.invariant.white_start,
+                                    white_end: self.invariant.white_end,
+                                },
+                            );
+
+                            debug_assert!(!self.full());
+                            false
+                        }
+                        CacheStatus::Err => {
+                            log::trace!(
+                                "Worker releasing Arena header: {:?}, next: {:?}",
+                                HeaderUnTyped::from(next),
+                                next
+                            );
+                            debug_assert!(!self.full());
+                            // We didn't cache it so the arena is released to the GC.
+                            true
+                        }
+                        CacheStatus::Stored => false,
+                    }
                 };
 
                 let end = Msg::End {
@@ -671,10 +688,23 @@ struct BusState {
 #[derive(Debug)]
 struct CachedArenas([CachedArena; 2]);
 
+#[derive(Debug)]
+enum CacheStatus<T> {
+    Cached((*mut T, bool)),
+    Stored,
+    Err,
+}
+
 impl CachedArenas {
     /// Try to cache an Arena.
     /// If the Cache is full and the new Arena will be cached the old Arena with the least capacity will be returned.
-    fn put<T: Trace>(&mut self, next: *mut T, new_allocation: bool) -> Option<(*mut T, bool)> {
+    fn put<T: Trace>(&mut self, next: *mut T, new_allocation: bool) -> CacheStatus<T> {
+        let header = HeaderUnTyped::from(next as _);
+        log::trace!("CachedArenas::put(header: {:?}, next: {:?}, new_allocation: {:?})", header, next, new_allocation);
+        log::trace!("CachedArenas::put {:?}", self);
+
+        debug_assert!(self.0.iter().find(|ca| HeaderUnTyped::from(ca.next()) == header).is_none());
+
         let (cached_arena, cap) = self
             .0
             .iter_mut()
@@ -687,15 +717,16 @@ impl CachedArenas {
 
         if cap < Arena::<T>::capacity_ptr(next) {
             let r = if cached_arena.is_null() {
-                None
+                CacheStatus::Stored
             } else {
-                Some((cached_arena.next() as _, cached_arena.new_allocation()))
+                CacheStatus::Cached((cached_arena.next() as _, cached_arena.new_allocation()))
             };
 
             *cached_arena = CachedArena::new(next as _, new_allocation);
+            log::trace!("CachedArenas::put modified {:?}", self);
             r
         } else {
-            None
+            CacheStatus::Err
         }
     }
 
@@ -744,7 +775,7 @@ impl CachedArena {
     }
 
     fn next(self) -> *mut u8 {
-        (self.tagged_next ^ 1) as _
+        (self.tagged_next & !1) as _
     }
 
     fn new_allocation(self) -> bool {
