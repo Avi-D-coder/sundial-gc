@@ -229,6 +229,7 @@ unsafe impl Sync for GcTypeInfo {}
 pub struct Invariant {
     pub(crate) white_start: usize,
     pub(crate) white_end: usize,
+    pub(crate) invariant_id: u8,
     pub(crate) grey_fields: u8,
     pub(crate) grey_self: bool,
 }
@@ -238,17 +239,19 @@ impl Invariant {
         Self {
             grey_self: false,
             grey_fields: 0b0000_0000,
+            invariant_id: 0,
             white_start: 0,
             white_end: 0,
         }
     }
 
-    pub(crate) const fn all() -> Self {
+    pub(crate) const fn all(invariant_id: u8) -> Self {
         Invariant {
             white_start: 0,
             white_end: usize::MAX,
             grey_fields: 0b1111_1111,
             grey_self: true,
+            invariant_id,
         }
     }
 

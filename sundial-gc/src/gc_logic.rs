@@ -1,24 +1,20 @@
+pub(crate) mod bus;
 pub(crate) mod free_list;
 pub(crate) mod type_group;
 pub(crate) mod type_state;
 
-use crate::arena::*;
-use crate::{gc::RootIntern, mark::*};
+use crate::mark::*;
 use smallvec::SmallVec;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicBool, AtomicPtr, Ordering},
+    atomic::{AtomicPtr, Ordering},
     Mutex,
 };
 
+use bus::{Bus, BusPtr};
 use std::panic;
 use std::thread::{self, ThreadId};
-use std::{
-    alloc::{GlobalAlloc, Layout, System},
-    cmp::max,
-    mem, process, ptr,
-    time::Duration,
-};
+use std::{mem, process, ptr, time::Duration};
 use type_group::{TypeGroup, TypeGroups};
 use type_state::{TotalRelations, TypeState};
 
@@ -71,18 +67,6 @@ impl GcThreadBus {
         ))
     }
 }
-
-#[derive(Copy, Clone)]
-pub(crate) struct BusPtr(&'static Bus);
-
-impl BusPtr {
-    pub unsafe fn new(ptr: *const Bus) -> Self {
-        BusPtr(&*ptr)
-    }
-}
-
-unsafe impl Send for BusPtr {}
-unsafe impl Sync for BusPtr {}
 
 #[derive(Copy, Clone)]
 pub(crate) enum RegMsg {
@@ -156,6 +140,6 @@ fn gc_loop() {
             log::trace!("step");
         });
 
-        thread::sleep(Duration::from_millis(500))
+        thread::sleep(Duration::from_millis(10))
     }
 }

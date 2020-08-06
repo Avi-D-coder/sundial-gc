@@ -1,9 +1,13 @@
 use crate::auto_traits::*;
 use crate::gc::{self, Gc};
 use crate::{
-    gc_logic::GcThreadBus,
+    gc_logic::{
+        bus::{self, Bus, Msg},
+        GcThreadBus,
+    },
     mark::{GcTypeInfo, Invariant, Mark, Trace},
 };
+use bus::WorkerMsg;
 use gc::RootIntern;
 use smallvec::SmallVec;
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -224,16 +228,15 @@ impl<T: Immutable + Trace> Drop for Arena<T> {
                                 HeaderUnTyped::from(next),
                                 next
                             );
-                            send(
+                            bus::send(
                                 &mut bus,
-                                Msg::End {
+                                Msg::Worker(WorkerMsg::End {
                                     next: cached_next as _,
                                     release_to_gc: true,
                                     new_allocation,
                                     grey_fields,
-                                    white_start: self.invariant.white_start,
-                                    white_end: self.invariant.white_end,
-                                },
+                                    invariant_id: self.invariant.invariant_id,
+                                }),
                             );
 
                             debug_assert!(!self.full());
@@ -253,37 +256,37 @@ impl<T: Immutable + Trace> Drop for Arena<T> {
                     }
                 };
 
-                let end = Msg::End {
+                let end = Msg::Worker(WorkerMsg::End {
                     release_to_gc,
                     new_allocation: self.new_allocation,
                     next,
                     grey_fields: unsafe { *self.marked_grey_fields.get() },
-                    white_start: self.invariant.white_start,
-                    white_end: self.invariant.white_end,
-                };
+                    invariant_id: self.invariant.invariant_id,
+                });
 
-                let msg = &mut bus[self.bus_idx as usize];
+                let msg = bus.get_mut(self.bus_idx as usize);
 
                 match msg {
-                    Msg::Slot | Msg::Start { .. } => *msg = end,
+                    Some(msg @ Msg::Slot) | Some(msg @ Msg::Worker(WorkerMsg::Start { .. })) => {
+                        *msg = end
+                    }
                     _ => {
-                        send(&mut bus, end);
+                        bus::send(&mut bus, end);
                     }
                 };
 
                 full.into_iter()
                     .cloned()
                     .for_each(|(next, new_allocation, grey_fields)| {
-                        send(
+                        bus::send(
                             &mut bus,
-                            Msg::End {
+                            Msg::Worker(WorkerMsg::End {
                                 release_to_gc: true,
                                 new_allocation,
                                 next: next as *mut u8,
                                 grey_fields,
-                                white_start: self.invariant.white_start,
-                                white_end: self.invariant.white_end,
-                            },
+                                invariant_id: self.invariant.invariant_id,
+                            }),
                         );
                     });
             });
@@ -381,13 +384,12 @@ impl<T: Immutable + Trace> Arena<T> {
         };
 
         // send start message to gc
-        let slot = send(
+        let slot = bus::send(
             &mut bus,
-            Msg::Start {
+            Msg::Worker(WorkerMsg::Start {
                 next: next as *const u8,
-                white_start: 0,
-                white_end: 1,
-            },
+                invariant_id: known_invariant.invariant_id,
+            }),
         );
 
         Arena {
@@ -641,24 +643,6 @@ impl<T> Header<T> {
     }
 }
 
-pub(crate) type Bus = Mutex<SmallVec<[Msg; 8]>>;
-
-/// Returns index of sent message.
-fn send(bus: &mut SmallVec<[Msg; 8]>, msg: Msg) -> usize {
-    if let Some((i, slot)) = bus
-        .iter_mut()
-        .enumerate()
-        .filter(|(_, o)| o.is_slot())
-        .next()
-    {
-        *slot = msg;
-        i
-    } else {
-        bus.push(msg);
-        bus.len() - 1
-    }
-}
-
 #[derive(Debug)]
 struct BusState {
     /// (next, new_allocation)
@@ -795,50 +779,4 @@ fn key<T: Trace>() -> (GcTypeInfo, usize) {
         GcTypeInfo::new::<T>(),
         ptr::drop_in_place::<T> as *const fn(*mut T) as usize,
     )
-}
-
-// TODO replace with atomic 64 byte header encoding.
-// Plus variable length condemned region messages.
-#[derive(Debug, Copy, Clone)]
-pub(crate) enum Msg {
-    Slot,
-    /// The `mem_addr` of the area
-    Start {
-        /// The condemned ptr range
-        white_start: usize,
-        white_end: usize,
-        /// TODO cache on GC side per Bus
-        next: *const u8,
-    },
-    End {
-        /// Worker will not finish filling the Arena
-        release_to_gc: bool,
-        new_allocation: bool,
-        /// Address of the 16 kB arena
-        next: *const u8,
-        grey_fields: u8,
-        /// The condemned ptr range
-        /// Will be replaced with epoch
-        white_start: usize,
-        white_end: usize,
-    },
-    Invariant(Invariant),
-    Next(*mut u8),
-}
-
-impl Msg {
-    #[inline(always)]
-    pub fn is_slot(&self) -> bool {
-        match self {
-            Msg::Slot => true,
-            _ => false,
-        }
-    }
-
-    pub fn is_invariant(&self) -> bool {
-        match self {
-            Msg::Invariant { .. } => true,
-            _ => false,
-        }
-    }
 }

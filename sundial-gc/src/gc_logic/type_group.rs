@@ -123,11 +123,14 @@ impl TypeGroup {
         } = self;
 
         related.iter().for_each(|ts| {
+            // 0 is null.
+            ts.invariant_id.set(ts.invariant_id.get().checked_add(1).unwrap_or(1));
+
             let state = unsafe { &mut *ts.state.get() };
             let arenas = unsafe { &mut *ts.arenas.get() };
             let relations = unsafe { &mut *ts.relations.get() };
 
-            let mut collection = Collection::new(&ts.type_info, relations, free);
+            let mut collection = Collection::new(&ts.type_info, relations, free, ts.invariant_id.get());
 
             if let Some(Collection {
                 condemned:

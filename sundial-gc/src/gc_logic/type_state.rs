@@ -1,7 +1,12 @@
 use crate::*;
-use arena::{bump_down, full, index, HeaderUnTyped, Msg, ARENA_SIZE};
+use arena::{bump_down, full, index, HeaderUnTyped, ARENA_SIZE};
+use bus::WorkerMsg;
 use gc::RootIntern;
-use gc_logic::{free_list::FreeList, BusPtr};
+use gc_logic::{
+    bus::{self, Msg},
+    free_list::FreeList,
+    BusPtr,
+};
 use mark::{EffTypes, GcTypeInfo, Handlers, Invariant, Tti, TypeRow};
 use smallvec::SmallVec;
 use std::collections::HashMap;
@@ -10,7 +15,6 @@ use std::{
     cmp::max,
     collections::HashSet,
     fmt::Debug,
-    ops::Range,
     ptr,
     sync::atomic::Ordering,
     thread::ThreadId,
@@ -30,6 +34,7 @@ pub(crate) struct TypeState {
     /// Has the invariant be sent to workers.
     /// TODO(optimization) delay sending invariant.
     sent_invariant: Cell<bool>,
+    pub invariant_id: Cell<u8>,
     pub arenas: UnsafeCell<Arenas>,
     pending: UnsafeCell<Pending>,
     // TODO support multiple simultaneous cycles.
@@ -56,8 +61,8 @@ impl PartialEq for TypeState {
 
 impl TypeState {
     /// `condemned` is the range the worker knew about.
-    fn start(pending: &mut Pending, cycle: &mut Collection, next: *const u8, white: Range<usize>) {
-        if cycle.handler.invariant.contains(white) {
+    fn start(pending: &mut Pending, cycle: &mut Collection, next: *const u8, invariant_id: u8) {
+        if cycle.handler.invariant.invariant_id == invariant_id {
             pending
                 .arenas
                 .insert(HeaderUnTyped::from(next), pending.epoch);
@@ -101,63 +106,52 @@ impl TypeState {
         let mut grey: SmallVec<[(*const u8, u8); 16]> = SmallVec::new();
 
         buses.iter_mut().for_each(|(thread_id, (bus, count))| {
-            let mut bus = bus.0.lock().expect("Could not unlock bus");
-            grey.extend(bus.iter_mut().filter_map(|msg| match msg {
-                Msg::Start {
-                    white_start,
-                    white_end,
-                    next,
-                } => {
+            let msgs = bus::reduce(&mut bus.lock().expect("Could not unlock bus"));
+
+            grey.extend(msgs.into_iter().filter_map(|msg| match msg {
+                WorkerMsg::Start { invariant_id, next } => {
                     log::info!(
                         "GC received from thread: {:?}: {:?}",
                         thread_id,
-                        Msg::Start {
-                            white_start: *white_start,
-                            white_end: *white_end,
-                            next: *next
-                        }
+                        WorkerMsg::Start { invariant_id, next }
                     );
                     if let Some(cycle) = state {
-                        TypeState::start(pending, cycle, *next, *white_start..*white_end);
+                        TypeState::start(pending, cycle, next, invariant_id);
                     };
-                    *msg = Msg::Slot;
                     None
                 }
 
-                Msg::End {
+                WorkerMsg::End {
                     release_to_gc,
                     new_allocation,
                     next,
                     grey_fields,
-                    white_start,
-                    white_end,
+                    invariant_id,
                 } => {
                     log::info!(
                         "GC received from thread: {:?}: {:?}",
                         thread_id,
-                        Msg::End {
-                            white_start: *white_start,
-                            white_end: *white_end,
-                            next: *next,
-                            new_allocation: *new_allocation,
-                            release_to_gc: *release_to_gc,
-                            grey_fields: *grey_fields,
+                        WorkerMsg::End {
+                            next,
+                            new_allocation,
+                            release_to_gc,
+                            grey_fields,
+                            invariant_id,
                         }
                     );
-                    let next = *next;
 
                     let ret = if let Some(cycle) = state {
-                        if cycle.handler.invariant.contains(*white_start..*white_end) {
-                            if !*new_allocation {
+                        if cycle.handler.invariant.invariant_id == invariant_id {
+                            if !new_allocation {
                                 TypeState::resolve(pending, next);
                             };
 
                             // Nothing was marked.
                             // Allocated objects contain no condemned pointers into the white set.
-                            if *grey_fields == 0b0000_0000 {
+                            if grey_fields == 0b0000_0000 {
                                 None
                             } else {
-                                Some((next, *grey_fields))
+                                Some((next, grey_fields))
                             }
                         } else {
                             Some((next, 0b1111_1111))
@@ -166,7 +160,7 @@ impl TypeState {
                         None
                     };
 
-                    if *release_to_gc {
+                    if release_to_gc {
                         let header = HeaderUnTyped::from(next) as *mut _;
                         if full(next, self.type_info.align) {
                             log::trace!("Full Arena released: header: {:?}", header);
@@ -181,7 +175,7 @@ impl TypeState {
                         };
 
                         arenas.worker.remove(&(header as *const _));
-                        if !*new_allocation {
+                        if !new_allocation {
                             *count -= 1
                         };
                     } else {
@@ -203,10 +197,8 @@ impl TypeState {
                             });
                     };
 
-                    *msg = Msg::Slot;
                     ret
                 }
-                _ => None,
             }));
 
             if !self.sent_invariant.get() {
@@ -217,31 +209,30 @@ impl TypeState {
                         .unwrap_or(Invariant::none()),
                 );
 
+                let mut bus = bus.lock().expect("Could not unlock bus");
                 // Send invariant replacing invariant bus if it exists.
                 if let Some(slot) = bus.iter_mut().find(|msg| msg.is_invariant()) {
                     *slot = inv
                 } else {
-                    *bus.iter_mut().find(|msg| msg.is_slot()).unwrap() = inv;
+                    bus.push(inv)
                 };
 
                 log::trace!("GC sent thread {:?}, {:?}", thread_id, inv);
             };
 
             if *count < 2 {
-                if let Some(slot) = bus.iter_mut().find(|msg| msg.is_slot()) {
-                    *count += 1;
-                    let next = arenas.partial.get_arena(&self.type_info, free);
-                    log::trace!(
-                        "GC sent header: {:?}, next: {:?}",
-                        HeaderUnTyped::from(next),
-                        next
-                    );
-                    *slot = Msg::Next(next);
-                };
+                *count += 1;
+                let next = arenas.partial.get_arena(&self.type_info, free);
+                log::trace!(
+                    "GC sent header: {:?}, next: {:?}",
+                    HeaderUnTyped::from(next),
+                    next
+                );
+                let mut bus = bus.lock().expect("Could not unlock bus");
+                bus.push(Msg::Next(next))
             };
 
             // log::trace!("\n\n GC sent:\n {:?}\n\n", bus);
-            drop(bus);
         });
 
         self.sent_invariant.set(true);
@@ -421,6 +412,7 @@ impl Collection {
         type_info: &GcTypeInfo,
         relations: &ActiveRelations,
         free: &mut FreeList,
+        invariant_id: u8,
     ) -> Collection {
         let direct_children: EffTypes = relations
             .direct_children
@@ -446,7 +438,7 @@ impl Collection {
                     free,
                 },
                 eff_types: direct_children,
-                invariant: Invariant::all(),
+                invariant: Invariant::all(invariant_id),
                 evacuate_fn: unsafe { type_info.evacuate_fn() },
                 last_nexts,
             },
@@ -802,6 +794,7 @@ impl TotalRelations {
                 type_info,
                 buses: Default::default(),
                 sent_invariant: Cell::from(true),
+                invariant_id: Cell::from(0),
                 arenas: UnsafeCell::new(Arenas::default()),
                 pending: UnsafeCell::new(Pending {
                     epoch: 0,
