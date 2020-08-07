@@ -124,13 +124,16 @@ impl TypeGroup {
 
         related.iter().for_each(|ts| {
             // 0 is null.
-            ts.invariant_id.set(ts.invariant_id.get().checked_add(1).unwrap_or(1));
+            ts.invariant_id
+                .set(ts.invariant_id.get().checked_add(1).unwrap_or(1));
+            ts.sent_invariant.set(false);
 
             let state = unsafe { &mut *ts.state.get() };
             let arenas = unsafe { &mut *ts.arenas.get() };
             let relations = unsafe { &mut *ts.relations.get() };
 
-            let mut collection = Collection::new(&ts.type_info, relations, free, ts.invariant_id.get());
+            let mut collection =
+                Collection::new(&ts.type_info, relations, free, ts.invariant_id.get());
 
             if let Some(Collection {
                 condemned:
@@ -150,18 +153,18 @@ impl TypeGroup {
             collection
                 .condemned
                 .full
-                .extend(arenas.full.drain().map(|header| {
-                    unsafe { &mut *header }.condemned = true;
-                    header
+                .extend(arenas.full.drain().map(|(header, top)| {
+                    unsafe { &mut *(header as *mut HeaderUnTyped) }.condemned = true;
+                    (header, top)
                 }));
+
             collection
                 .condemned
                 .partial
-                .0
-                .extend(arenas.partial.0.drain().map(|next| {
-                    let header = unsafe { &mut *(HeaderUnTyped::from(next) as *mut HeaderUnTyped) };
+                .extend(arenas.partial.drain().map(|(header, (next, top))| {
+                    let header = unsafe { &mut *(header as *mut HeaderUnTyped) };
                     header.condemned = true;
-                    next
+                    (header as _, (next, top))
                 }));
 
             arenas.worker.iter_mut().for_each(|(h, (next, end))| {

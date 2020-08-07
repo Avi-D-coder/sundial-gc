@@ -9,12 +9,12 @@ use gc_logic::{
 };
 use mark::{EffTypes, GcTypeInfo, Handlers, Invariant, Tti, TypeRow};
 use smallvec::SmallVec;
-use std::collections::HashMap;
 use std::{
     cell::{Cell, UnsafeCell},
     cmp::max,
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt::Debug,
+    ops::{Deref, DerefMut},
     ptr,
     sync::atomic::Ordering,
     thread::ThreadId,
@@ -33,7 +33,7 @@ pub(crate) struct TypeState {
     buses: UnsafeCell<HashMap<ThreadId, (BusPtr, usize)>>,
     /// Has the invariant be sent to workers.
     /// TODO(optimization) delay sending invariant.
-    sent_invariant: Cell<bool>,
+    pub sent_invariant: Cell<bool>,
     pub invariant_id: Cell<u8>,
     pub arenas: UnsafeCell<Arenas>,
     pending: UnsafeCell<Pending>,
@@ -60,37 +60,6 @@ impl PartialEq for TypeState {
 }
 
 impl TypeState {
-    /// `condemned` is the range the worker knew about.
-    fn start(pending: &mut Pending, cycle: &mut Collection, next: *const u8, invariant_id: u8) {
-        if cycle.handler.invariant.invariant_id == invariant_id {
-            pending
-                .arenas
-                .insert(HeaderUnTyped::from(next), pending.epoch);
-        } else {
-            cycle.latest_grey = pending.epoch;
-            pending.known_grey += 1;
-        }
-    }
-
-    /// `resolve` must be called on every Arena.
-    /// It's the dual of `TypeState.start`.
-    fn resolve(pending: &mut Pending, next: *const u8) {
-        log::trace!(
-            "TypeState::resolve: next: {:?}, header: {:?}",
-            next,
-            HeaderUnTyped::from(next)
-        );
-        log::trace!("{:?}", pending);
-        if let Some(_) = pending.arenas.remove(&HeaderUnTyped::from(next)) {
-            // if e < pending.transitive_epoch {
-            //     pending.known_transitive_grey -= 1;
-            // }
-        } else {
-            // FIXME
-            pending.known_grey -= 1;
-        };
-    }
-
     /// For safe usage See `TypeState` docs.
     /// Returns true when collection is complete.
     pub(crate) unsafe fn step(&self, free: &mut FreeList) -> bool {
@@ -107,6 +76,7 @@ impl TypeState {
 
         buses.iter_mut().for_each(|(thread_id, (bus, count))| {
             let msgs = bus::reduce(&mut bus.lock().expect("Could not unlock bus"));
+            log::trace!("Thread: {:?}, received: {:?}", thread_id, msgs);
 
             grey.extend(msgs.into_iter().filter_map(|msg| match msg {
                 WorkerMsg::Start { invariant_id, next } => {
@@ -116,8 +86,22 @@ impl TypeState {
                         WorkerMsg::Start { invariant_id, next }
                     );
                     if let Some(cycle) = state {
-                        TypeState::start(pending, cycle, next, invariant_id);
+                        if cycle.handler.invariant.id == invariant_id {
+                            pending
+                                .arenas
+                                .insert(HeaderUnTyped::from(next), pending.epoch);
+                        } else {
+                            cycle.latest_grey = pending.epoch;
+                            pending.known_grey += 1;
+                        }
+                    } else {
+                        if invariant_id != 0 {
+                            pending.arenas.insert(HeaderUnTyped::from(next), 0);
+                        } else {
+                            pending.known_grey += 1;
+                        };
                     };
+
                     None
                 }
 
@@ -128,8 +112,10 @@ impl TypeState {
                     grey_fields,
                     invariant_id,
                 } => {
+                    let header = HeaderUnTyped::from(next);
+
                     log::info!(
-                        "GC received from thread: {:?}: {:?}",
+                        "GC received from thread: {:?}: {:?}, header: {:?}",
                         thread_id,
                         WorkerMsg::End {
                             next,
@@ -137,13 +123,16 @@ impl TypeState {
                             release_to_gc,
                             grey_fields,
                             invariant_id,
-                        }
+                        },
+                        header
                     );
 
+                    // Option::map makes the borrow checker unhappy.
                     let ret = if let Some(cycle) = state {
-                        if cycle.handler.invariant.invariant_id == invariant_id {
+                        debug_assert_eq!(cycle.handler.invariant.id, self.invariant_id.get());
+                        if cycle.handler.invariant.id == invariant_id || invariant_id == 0 {
                             if !new_allocation {
-                                TypeState::resolve(pending, next);
+                                pending.arenas.remove(&header);
                             };
 
                             // Nothing was marked.
@@ -160,23 +149,43 @@ impl TypeState {
                         None
                     };
 
+                    if !new_allocation
+                        && invariant_id != self.invariant_id.get()
+                        && invariant_id != 0
+                        && arenas.worker.contains_key(&header)
+                    {
+                        pending.known_grey -= 1;
+                    };
+
                     if release_to_gc {
-                        let header = HeaderUnTyped::from(next) as *mut _;
+                        let top = arenas
+                            .worker
+                            .remove(&header)
+                            .map(|(_, t)| t)
+                            .unwrap_or_else(|| {
+                                debug_assert!(new_allocation);
+                                header as usize
+                                    + HeaderUnTyped::high_offset(
+                                        self.type_info.align,
+                                        self.type_info.size,
+                                    ) as usize
+                            });
+
                         if full(next, self.type_info.align) {
                             log::trace!("Full Arena released: header: {:?}", header);
-                            arenas.full.insert(header);
+                            arenas.full.insert(header, top);
                         } else {
                             log::trace!(
                                 "Non full Arena released: header {:?}, next: {:?}",
                                 header,
                                 next
                             );
-                            arenas.partial.0.insert(next as *mut _);
+                            arenas.partial.insert(header, (next, top));
                         };
 
-                        arenas.worker.remove(&(header as *const _));
                         if !new_allocation {
-                            *count -= 1
+                            // FIXME this should not be needed
+                            *count = count.saturating_sub(1);
                         };
                     } else {
                         // store active worker arenas
@@ -206,7 +215,7 @@ impl TypeState {
                     state
                         .as_ref()
                         .map(|cycle| cycle.handler.invariant)
-                        .unwrap_or(Invariant::none()),
+                        .unwrap_or_else(|| Invariant::none(0)),
                 );
 
                 let mut bus = bus.lock().expect("Could not unlock bus");
@@ -222,14 +231,13 @@ impl TypeState {
 
             if *count < 2 {
                 *count += 1;
-                let next = arenas.partial.get_arena(&self.type_info, free);
-                log::trace!(
-                    "GC sent header: {:?}, next: {:?}",
-                    HeaderUnTyped::from(next),
-                    next
-                );
+                let (next, top) = arenas.partial.remove_arena(&self.type_info, free);
+                let header = HeaderUnTyped::from(next);
+
+                arenas.worker.insert(header, (next, top));
+                log::trace!("GC sent header: {:?}, next: {:?}", header, next);
                 let mut bus = bus.lock().expect("Could not unlock bus");
-                bus.push(Msg::Next(next))
+                bus.push(Msg::Next(next as _))
             };
 
             // log::trace!("\n\n GC sent:\n {:?}\n\n", bus);
@@ -268,18 +276,23 @@ impl TypeState {
 
             if cycle.safe_to_free(pending, relations) {
                 log::trace!("safe_to_free: {}", self.type_info.type_name);
-                cycle
-                    .condemned
-                    .full
-                    .drain()
-                    .for_each(|header| self.drop_arena(header as *mut u8, free));
+
+                cycle.condemned.full.drain().for_each(|(header, top)| {
+                    self.drop_arena(
+                        (header as usize + HeaderUnTyped::low_offset(self.type_info.align) as usize)
+                            as *mut u8,
+                        top,
+                        free,
+                    )
+                });
+
                 cycle
                     .condemned
                     .partial
                     .0
                     .drain()
                     .into_iter()
-                    .for_each(|next| self.drop_arena(next, free));
+                    .for_each(|(_, (next, top))| self.drop_arena(next as _, top, free));
 
                 if self.type_info.needs_drop {
                     cycle.condemned.worker.drain().for_each(|(_, range)| {
@@ -298,6 +311,9 @@ impl TypeState {
                     log::trace!("Children complete Collection cleared!");
                     // This will trigger the Invariant::none to be sent to the workers.
                     self.sent_invariant.set(false);
+                    debug_assert_eq!(pending.known_grey, 0);
+                    pending.known_grey = pending.arenas.len();
+                    pending.arenas.clear();
                     *state = None;
                     done = true;
                 };
@@ -307,7 +323,7 @@ impl TypeState {
         done
     }
 
-    unsafe fn drop_arena(&self, next: *mut u8, free: &mut FreeList) {
+    unsafe fn drop_arena(&self, next: *mut u8, top: usize, free: &mut FreeList) {
         let header = HeaderUnTyped::from(next) as *mut HeaderUnTyped;
         log::trace!("drop_arena(header: {:?}, next: {:?})", header, next);
 
@@ -320,11 +336,8 @@ impl TypeState {
             panic!("Old Arena Rooted");
         }
 
-        let high = header as usize
-            + HeaderUnTyped::high_offset(self.type_info.align, self.type_info.size) as usize;
-
         if self.type_info.needs_drop {
-            self.drop_objects(header, (next, high));
+            self.drop_objects(header, (next, top));
         };
 
         free.dealloc(header)
@@ -486,7 +499,8 @@ impl Collection {
             && pending
                 .arenas
                 .values()
-                .all(|epoch| self.latest_grey < epoch - 2)
+                .cloned()
+                .all(|epoch| epoch > self.latest_grey + 2)
     }
 
     /// Evacuate rooted objects from condemned `Arenas`.
@@ -527,9 +541,9 @@ impl Collection {
                 if root.ref_count.load(Ordering::Relaxed) == 0 {
                     unsafe { ptr::drop_in_place(root) }
                 } else {
-                    let next = partial.get_arena(type_info, free);
+                    let (next, top) = partial.remove_arena(type_info, free);
 
-                    unsafe { ptr::copy(gc, next, 1) }
+                    unsafe { ptr::copy(gc, next as _, 1) }
 
                     let to_header =
                         unsafe { &mut *(HeaderUnTyped::from(next) as *mut HeaderUnTyped) };
@@ -542,14 +556,14 @@ impl Collection {
                     let ptr = bump_down(next, size, align);
 
                     if arena::full(ptr, align) {
-                        full.insert(ptr as *mut _);
+                        full.insert(header, top);
                     } else {
                         log::trace!(
                             "Evacuated root to Arena {{header: {:?}, next: {:?}}}",
                             to_header as *const _,
                             next
                         );
-                        partial.0.insert(ptr as *mut _);
+                        partial.0.insert(header, (ptr, top));
                     }
                 };
             });
@@ -559,16 +573,15 @@ impl Collection {
         condemned
             .partial
             .0
-            .iter()
+            .keys()
             .cloned()
-            .map(|next| HeaderUnTyped::from(next))
             .for_each(|header| er(header, type_info, handler, arenas, free));
 
         log::trace!("evaced root's in partial: {:?}", condemned.partial.0);
 
         condemned
             .full
-            .iter()
+            .keys()
             .cloned()
             .map(|h| h as *const _)
             .for_each(|header| er(header, type_info, handler, arenas, free));
@@ -591,48 +604,88 @@ pub(crate) struct Arenas {
     ///
     /// Will not include all Arenas owned by workers.
     /// Only contains Arenas that the gc owns some of.
-    pub worker: HashMap<*const HeaderUnTyped, (*const u8, usize)>,
+    pub worker: ArenaBounds,
     /// Arena owned by GC, that have not been completely filled.
     pub partial: Partial,
-    pub full: HashSet<*mut HeaderUnTyped>,
+    /// header => top
+    pub full: HashMap<*const HeaderUnTyped, usize>,
 }
 
 impl Default for Arenas {
     fn default() -> Self {
         Arenas {
-            worker: HashMap::new(),
-            partial: Partial::default(),
-            full: HashSet::new(),
+            worker: Default::default(),
+            partial: Default::default(),
+            full: Default::default(),
         }
     }
 }
 
 impl Arenas {
     fn is_empty(&self) -> bool {
-        self.worker.is_empty() && self.full.is_empty() && self.partial.0.is_empty()
+        self.worker.is_empty() && self.full.is_empty() && self.partial.is_empty()
     }
 }
 
 #[derive(Debug)]
-pub(crate) struct Partial(pub HashSet<*mut u8>);
+pub(crate) struct Partial(ArenaBounds);
+
+impl Deref for Partial {
+    type Target = <ArenaBounds as Deref>::Target;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for Partial {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 impl Default for Partial {
     fn default() -> Self {
-        Partial(HashSet::new())
+        Partial(Default::default())
     }
 }
 
 impl Partial {
     /// Reuse or allocate a new Arena
-    fn get_arena(&mut self, type_info: &GcTypeInfo, free: &mut FreeList) -> *mut u8 {
-        if let Some(arena) = self.0.iter().cloned().next() {
-            self.0.remove(&arena);
-            arena
+    fn remove_arena(&mut self, type_info: &GcTypeInfo, free: &mut FreeList) -> (*const u8, usize) {
+        if let Some((header, (next, top))) = self.iter().next().map(|(h, (n, t))| (*h, (*n, *t))) {
+            self.remove(&header);
+            (next as _, top)
         } else {
-            (free.alloc() as *mut _ as usize
-                + HeaderUnTyped::high_offset(type_info.align, type_info.size) as usize)
-                as *mut u8
+            let next = free.alloc() as *mut _ as usize
+                + HeaderUnTyped::high_offset(type_info.align, type_info.size) as usize;
+            (next as *mut u8, next)
         }
+    }
+}
+
+type Droped = (*const u8, usize);
+
+#[derive(Debug, Clone)]
+/// Header => (next, top)
+/// top..ARENA_SIZE has already been droped.
+pub(crate) struct ArenaBounds(HashMap<*const HeaderUnTyped, Droped>);
+
+impl Default for ArenaBounds {
+    fn default() -> Self {
+        ArenaBounds(HashMap::with_capacity(100))
+    }
+}
+
+impl Deref for ArenaBounds {
+    type Target = HashMap<*const HeaderUnTyped, Droped>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for ArenaBounds {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
 
@@ -655,10 +708,14 @@ impl Drop for HandlerManager {
             .for_each(|(i, next)| {
                 let child_ts = self.eff_types[i];
                 let child_arenas = unsafe { &mut *child_ts.arenas.get() };
+                let header = HeaderUnTyped::from(*next);
+                let top = header as usize
+                    + HeaderUnTyped::high_offset(child_ts.type_info.align, child_ts.type_info.size)
+                        as usize;
                 if *next as usize % ARENA_SIZE == 0 {
-                    child_arenas.full.insert(*next as *mut HeaderUnTyped);
+                    child_arenas.full.insert(header as _, top);
                 } else {
-                    child_arenas.partial.0.insert(*next);
+                    child_arenas.partial.0.insert(header, (*next, top));
                 }
             });
 
@@ -736,9 +793,16 @@ impl HandlerManager {
                 let child_arenas = unsafe { &mut *child_ts.arenas.get() };
 
                 headers.iter().for_each(|header| {
-                    let b = child_arenas.full.insert(*header);
+                    let b = child_arenas.full.insert(
+                        *header,
+                        *header as usize
+                            + HeaderUnTyped::high_offset(
+                                child_ts.type_info.align,
+                                child_ts.type_info.size,
+                            ) as usize,
+                    );
                     // Assert full will never have `header`.
-                    debug_assert!(b);
+                    debug_assert!(b.is_none());
                 });
 
                 // Root filled Arenas if child is undergoing a GC.
@@ -794,7 +858,7 @@ impl TotalRelations {
                 type_info,
                 buses: Default::default(),
                 sent_invariant: Cell::from(true),
-                invariant_id: Cell::from(0),
+                invariant_id: Cell::from(1),
                 arenas: UnsafeCell::new(Arenas::default()),
                 pending: UnsafeCell::new(Pending {
                     epoch: 0,

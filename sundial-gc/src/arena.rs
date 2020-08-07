@@ -12,7 +12,7 @@ use gc::RootIntern;
 use smallvec::SmallVec;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::any::type_name;
-use std::cell::UnsafeCell;
+use std::cell::{Cell, UnsafeCell};
 use std::collections::HashMap;
 use std::mem::{self, transmute};
 use std::ptr;
@@ -32,23 +32,23 @@ pub struct Arena<T: Trace + Immutable> {
     /// The index of this Arenas start message.
     /// Currently infallible
     bus_idx: u8,
-    new_allocation: bool,
+    new_allocation: Cell<bool>,
     invariant: Invariant,
     marked_grey_fields: UnsafeCell<u8>,
     // TODO pub(crate)
-    pub next: UnsafeCell<*mut T>,
+    pub next: Cell<*mut T>,
     /// (next, new_allocation, grey_fields)
     full: UnsafeCell<SmallVec<[(*mut T, bool, u8); 2]>>,
 }
 
 impl<T: Immutable + Trace> Arena<T> {
     pub fn header(&self) -> &Header<T> {
-        unsafe { &*Header::from(*self.next.get() as *const _) }
+        unsafe { &*Header::from(self.next.get() as *const _) }
     }
 
     pub fn capacity(&self) -> u16 {
         capacity(
-            unsafe { *self.next.get() } as *const u8,
+            self.next.get() as *const u8,
             mem::size_of::<T>() as u16,
             mem::align_of::<T>() as u16,
         )
@@ -64,10 +64,7 @@ impl<T: Immutable + Trace> Arena<T> {
     }
 
     pub fn full(&self) -> bool {
-        full(
-            unsafe { *self.next.get() } as *const u8,
-            mem::align_of::<T>() as u16,
-        )
+        full(self.next.get() as *const u8, mem::align_of::<T>() as u16)
     }
 
     #[inline(always)]
@@ -81,7 +78,7 @@ impl<T: Immutable + Trace> Arena<T> {
     /// `self.next` must be aligned!
     pub fn bump_down(&self) -> *const T {
         bump_down(
-            unsafe { *self.next.get() } as *const u8,
+            self.next.get() as *const u8,
             mem::size_of::<T>() as u16,
             mem::align_of::<T>() as u16,
         ) as *const T
@@ -171,15 +168,14 @@ unsafe impl<'o, 'n, 'r: 'n, O: Trace + 'o, N: Trace + 'r> Mark<'o, 'n, 'r, O, N>
         unsafe { *self.marked_grey_fields.get() |= cf }
 
         if condemned_self || (0b0000_0000 != cf) {
-            let next_slot = self.next.get();
-            let next = unsafe { *next_slot };
+            let next = self.next.get();
             if Self::full_ptr(next) {
                 log::info!("Growing an Arena. This is slow!");
                 self.new_block()
             };
 
             unsafe {
-                *next_slot = Self::bump_down_ptr(next) as *mut N;
+                self.next.set(Self::bump_down_ptr(next) as *mut N);
                 std::ptr::copy(old_ptr, next, 1);
             };
 
@@ -203,7 +199,7 @@ unsafe impl<'o, 'n, 'r: 'n, O: Trace + 'o, N: Trace + 'r> Mark<'o, 'n, 'r, O, N>
 impl<T: Immutable + Trace> Drop for Arena<T> {
     fn drop(&mut self) {
         GC_BUS.with(|tm| {
-            let next = unsafe { *self.next.get() } as *const u8;
+            let next = self.next.get() as *const u8;
             let full = unsafe { &*self.full.get() };
             let grey_fields = unsafe { *self.marked_grey_fields.get() };
             let tm = unsafe { &mut *tm.get() };
@@ -221,7 +217,7 @@ impl<T: Immutable + Trace> Drop for Arena<T> {
                     );
                     true
                 } else {
-                    match cached_arenas.put::<T>(next as _, self.new_allocation) {
+                    match cached_arenas.put::<T>(next as _, self.new_allocation.get()) {
                         CacheStatus::Cached((cached_next, new_allocation)) => {
                             log::trace!(
                                 "Worker releasing cached Arena header: {:?}, next: {:?}",
@@ -235,7 +231,7 @@ impl<T: Immutable + Trace> Drop for Arena<T> {
                                     release_to_gc: true,
                                     new_allocation,
                                     grey_fields,
-                                    invariant_id: self.invariant.invariant_id,
+                                    invariant_id: self.invariant.id,
                                 }),
                             );
 
@@ -258,10 +254,10 @@ impl<T: Immutable + Trace> Drop for Arena<T> {
 
                 let end = Msg::Worker(WorkerMsg::End {
                     release_to_gc,
-                    new_allocation: self.new_allocation,
+                    new_allocation: self.new_allocation.get(),
                     next,
                     grey_fields: unsafe { *self.marked_grey_fields.get() },
-                    invariant_id: self.invariant.invariant_id,
+                    invariant_id: self.invariant.id,
                 });
 
                 let msg = bus.get_mut(self.bus_idx as usize);
@@ -285,7 +281,7 @@ impl<T: Immutable + Trace> Drop for Arena<T> {
                                 new_allocation,
                                 next: next as *mut u8,
                                 grey_fields,
-                                invariant_id: self.invariant.invariant_id,
+                                invariant_id: self.invariant.id,
                             }),
                         );
                     });
@@ -303,7 +299,7 @@ unsafe impl<'o, 'n, 'r: 'n, O: NoGc + Immutable + 'o, N: NoGc + Immutable + 'r>
         assert_eq!(type_name::<O>(), type_name::<N>());
         if self.invariant.grey_self && self.invariant.condemned(o.0) {
             let next = self.next.get();
-            unsafe { ptr::copy(transmute(o), *next, 1) };
+            unsafe { ptr::copy(transmute(o), next, 1) };
             let mut new_gc = next as *const N;
             let old_addr = &*o as *const O as usize;
             let offset = old_addr % ARENA_SIZE;
@@ -315,7 +311,8 @@ unsafe impl<'o, 'n, 'r: 'n, O: NoGc + Immutable + 'o, N: NoGc + Immutable + 'r>
                 .and_modify(|gc| new_gc = *gc as *const N)
                 .or_insert_with(|| {
                     // FIXME overrun
-                    unsafe { *next = ((*next as usize) - mem::size_of::<N>()) as *mut N };
+                    self.next
+                        .set(((next as usize) - mem::size_of::<N>()) as *mut N);
                     new_gc as *const u8
                 });
             Gc::new(unsafe { &*new_gc })
@@ -337,7 +334,7 @@ impl<T: Immutable + Trace> Arena<T> {
             tm.entry(key::<T>()).or_insert_with(|| {
                 let bus = Box::leak(Box::new(BusState {
                     cached_arenas: CachedArenas([CachedArena::null(); 2]),
-                    known_invariant: Invariant::none(),
+                    known_invariant: Invariant::none(0),
                     bus: Mutex::new(SmallVec::new()),
                 }));
 
@@ -388,15 +385,15 @@ impl<T: Immutable + Trace> Arena<T> {
             &mut bus,
             Msg::Worker(WorkerMsg::Start {
                 next: next as *const u8,
-                invariant_id: known_invariant.invariant_id,
+                invariant_id: known_invariant.id,
             }),
         );
 
         Arena {
             bus_idx: slot as u8,
-            new_allocation,
+            new_allocation: Cell::new(new_allocation),
             invariant: *known_invariant,
-            next: UnsafeCell::new(next),
+            next: Cell::new(next),
             marked_grey_fields: UnsafeCell::new(0b0000_0000),
             full: UnsafeCell::new(SmallVec::new()),
         }
@@ -405,11 +402,12 @@ impl<T: Immutable + Trace> Arena<T> {
     fn new_block(&self) {
         unsafe {
             self.full.get().as_mut().unwrap().push((
-                *self.next.get(),
-                self.new_allocation,
+                self.next.get(),
+                self.new_allocation.get(),
                 *self.marked_grey_fields.get(),
             ));
-            *self.next.get() = Self::alloc();
+            self.next.set(Self::alloc());
+            self.new_allocation.set(true);
             log::trace!("new_block alloc Complete");
         }
     }
@@ -423,8 +421,8 @@ impl<T: Immutable + Trace> Arena<T> {
                 self.new_block();
                 log::info!("Growing an Arena. Complete");
             };
-            let ptr = *self.next.get();
-            *self.next.get() = self.bump_down() as *mut T;
+            let ptr = self.next.get();
+            self.next.set(self.bump_down() as *mut T);
             ptr::write(ptr, t);
             Gc::new(&*ptr)
         }
@@ -436,8 +434,8 @@ impl<T: Immutable + Trace> Arena<T> {
                 log::info!("Growing an Arena. This is slow!");
                 self.new_block()
             }
-            let ptr = *self.next.get();
-            *self.next.get() = self.bump_down() as *mut T;
+            let ptr = self.next.get();
+            self.next.set(self.bump_down() as *mut T);
             ptr::write(ptr, t);
             gc::Box::new(&mut *ptr)
         }
@@ -476,8 +474,8 @@ impl<T: Immutable + Trace + Copy> Arena<T> {
                 log::info!("Growing an Arena. This is slow!");
                 self.new_block()
             }
-            let ptr = *self.next.get();
-            *self.next.get() = self.bump_down() as *mut T;
+            let ptr = self.next.get();
+            self.next.set(self.bump_down() as *mut T);
             ptr::copy(t, ptr, 1);
             Gc::new(&*ptr)
         }
@@ -490,8 +488,8 @@ impl<T: Immutable + Trace + Copy> Arena<T> {
                 log::info!("Growing an Arena. This is slow!");
                 self.new_block()
             }
-            let ptr = *self.next.get();
-            *self.next.get() = self.bump_down() as *mut T;
+            let ptr = self.next.get();
+            self.next.set(self.bump_down() as *mut T);
             ptr::copy(t, ptr, 1);
             gc::Box::new(&mut *ptr)
         }
@@ -532,8 +530,8 @@ impl<T: Immutable + Trace + Clone> Arena<T> {
                 log::info!("Growing an Arena. This is slow!");
                 self.new_block()
             }
-            let ptr = *self.next.get();
-            *self.next.get() = self.bump_down() as *mut T;
+            let ptr = self.next.get();
+            self.next.set(self.bump_down() as *mut T);
             ptr::write(ptr, t.clone());
             Gc::new(&*ptr)
         }
@@ -545,8 +543,8 @@ impl<T: Immutable + Trace + Clone> Arena<T> {
                 log::info!("Growing an Arena. This is slow!");
                 self.new_block()
             }
-            let ptr = *self.next.get();
-            *self.next.get() = self.bump_down() as *mut T;
+            let ptr = self.next.get();
+            self.next.set(self.bump_down() as *mut T);
             ptr::write(ptr, t.clone());
             gc::Box::new(&mut *ptr)
         }
@@ -666,13 +664,13 @@ impl CachedArenas {
     /// If the Cache is full and the new Arena will be cached the old Arena with the least capacity will be returned.
     fn put<T: Trace>(&mut self, next: *mut T, new_allocation: bool) -> CacheStatus<T> {
         let header = HeaderUnTyped::from(next as _);
-        log::trace!(
-            "CachedArenas::put(header: {:?}, next: {:?}, new_allocation: {:?})",
-            header,
-            next,
-            new_allocation
-        );
-        log::trace!("CachedArenas::put {:?}", self);
+        // log::trace!(
+        //     "CachedArenas::put(header: {:?}, next: {:?}, new_allocation: {:?})",
+        //     header,
+        //     next,
+        //     new_allocation
+        // );
+        // log::trace!("CachedArenas::put {:?}", self);
 
         debug_assert!(self
             .0
@@ -698,7 +696,7 @@ impl CachedArenas {
             };
 
             *cached_arena = CachedArena::new(next as _, new_allocation);
-            log::trace!("CachedArenas::put modified {:?}", self);
+            // log::trace!("CachedArenas::put modified {:?}", self);
             r
         } else {
             CacheStatus::Err

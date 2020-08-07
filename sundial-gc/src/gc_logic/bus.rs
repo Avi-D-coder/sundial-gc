@@ -231,6 +231,7 @@ impl WorkerMsg {
                 },
             ) => {
                 if invariant_id == id && HeaderUnTyped::from(next) == HeaderUnTyped::from(nxt) {
+                    debug_assert_eq!(new_allocation, na);
                     Ok(WorkerMsg::End {
                         release_to_gc: release_to_gc || rtg,
                         new_allocation,
@@ -242,8 +243,6 @@ impl WorkerMsg {
                     Err((self, b))
                 }
             }
-
-            _ => Err((self, b)),
         }
     }
 }
