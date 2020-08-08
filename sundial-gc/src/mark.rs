@@ -57,21 +57,18 @@ pub(crate) struct Translator {
 pub(crate) type EffTypes = SmallVec<[&'static TypeState; 5]>;
 
 impl Translator {
-    pub(crate) fn from<T: Trace>(effs: &EffTypes) -> (Translator, u8) {
+    pub(crate) fn from<T: Trace>(direct_gc_types: &SmallVec<[(&'static TypeState, TypeRow); 3]>) -> (Translator, u8) {
+        log::trace!("Translator::from(effs: {:?})", direct_gc_types.iter().map(|(ts, _)| ts.type_info.type_name));
         let mut types: HashMap<GcTypeInfo, TypeRow> = HashMap::with_capacity(16);
         T::direct_gc_types(&mut types, 0);
+
+        log::trace!("types: {:?}", types);
 
         let mut offsets = SmallVec::from([255; 16]);
         let mut bloom = 0b0000_0000;
 
-        types.drain().for_each(|(ti, (type_offs, bits))| {
+        direct_gc_types.iter().enumerate().for_each(|(i, (ti, (type_offs, bits)))| {
             bloom |= bits;
-            if let Some((i, _)) = effs
-                .iter()
-                .cloned()
-                .enumerate()
-                .find(|(_, eff)| eff.type_info == ti)
-            {
                 type_offs.iter().for_each(|off| {
                     if offsets.len() < *off as usize {
                         offsets.extend(iter::repeat(255).take(1 + *off as usize - offsets.len()));
@@ -79,9 +76,9 @@ impl Translator {
 
                     offsets[*off as usize] = i as u8;
                 });
-            };
         });
 
+        log::trace!("Translator::from done");
         (Self { offsets }, bloom)
     }
 }
@@ -89,7 +86,7 @@ impl Translator {
 impl Index<Offset> for Translator {
     type Output = Offset;
     fn index(&self, i: Offset) -> &Self::Output {
-        unsafe { self.offsets.get_unchecked(i as usize) }
+        unsafe { self.offsets.get(i as usize).expect("Handlers does not exist") }
     }
 }
 
@@ -168,7 +165,7 @@ pub struct GcTypeInfo {
     direct_gc_types_fn: *const (),
     /// `unsafe fn(*mut u8)`
     drop_in_place_fn: *const (),
-    /// from(effs: &Vec<GcTypeInfo>) -> (Self, u8)
+    /// from(effs: &SmallVec<[(&'static TypeState, TypeRow); 3]>) -> (Self, u8)
     translator_from_fn: *const (),
     pub(crate) needs_drop: bool,
     pub(crate) size: u16,
@@ -217,7 +214,7 @@ impl GcTypeInfo {
         mem::transmute(self.drop_in_place_fn)
     }
 
-    pub(crate) const fn translator_from_fn(&self) -> fn(&EffTypes) -> (Translator, u8) {
+    pub(crate) const fn translator_from_fn(&self) -> fn(&SmallVec<[(&'static TypeState, TypeRow); 3]>) -> (Translator, u8) {
         unsafe { mem::transmute(self.translator_from_fn) }
     }
 }

@@ -134,6 +134,7 @@ impl TypeGroup {
 
             let mut collection =
                 Collection::new(&ts.type_info, relations, free, ts.invariant_id.get());
+            log::trace!("{:?}", collection);
 
             if let Some(Collection {
                 condemned:
@@ -145,11 +146,13 @@ impl TypeGroup {
                 ..
             }) = state
             {
+                log::warn!("Collection already in progress");
                 mem::swap(full, &mut collection.condemned.full);
                 mem::swap(partial, &mut collection.condemned.partial);
                 mem::swap(worker, &mut collection.condemned.worker);
             };
 
+            log::trace!("marking: full {:?}", collection.condemned.full);
             collection
                 .condemned
                 .full
@@ -158,6 +161,7 @@ impl TypeGroup {
                     (header, top)
                 }));
 
+            log::trace!("marking: partial {:?}", collection.condemned.partial);
             collection
                 .condemned
                 .partial
@@ -167,6 +171,7 @@ impl TypeGroup {
                     (header as _, (next, top))
                 }));
 
+            log::trace!("marking: worker {:?}", collection.condemned.worker);
             arenas.worker.iter_mut().for_each(|(h, (next, end))| {
                 let header = unsafe { &mut *(*h as *mut HeaderUnTyped) };
                 header.condemned = true;
@@ -180,7 +185,7 @@ impl TypeGroup {
                     })
                     .or_insert((*next, *end));
 
-                *end = *next as usize;
+                *end = *next;
             });
 
             *state = Some(collection);
@@ -209,17 +214,20 @@ impl TypeGroup {
             log_duration,
         } = self;
 
-        if related
-            .iter()
-            .fold(true, |done, ts| unsafe { done && ts.step(free) })
-        {
+        if related.iter().fold(true, |done, ts| unsafe {
+            let r = ts.step(free) && done;
+            log::trace!("r: {}", r);
+            r
+        }) {
             *gc_in_progress = None;
             *last_gc_completed = Instant::now();
-            *pre_allocated = free.allocated;
 
+            log::warn!("reseting");
             related.iter().for_each(|ts| unsafe { ts.reset() });
             log::warn!("Major GC complete {:?}", self);
         } else if let Some(start) = gc_in_progress {
+            log::trace!("not done");
+            *pre_allocated = free.allocated;
             let elapsed = start.elapsed();
             if elapsed > *log_duration * 2 {
                 *log_duration = elapsed;
@@ -228,8 +236,9 @@ impl TypeGroup {
         } else if self.free.allocated >= 2 * *pre_allocated
             || last_gc_completed.elapsed() > Duration::from_secs(2)
         {
-            self.major_gc();
             log::trace!("major gc");
+            self.major_gc();
         };
+        log::trace!("TypeGroup::step complete");
     }
 }

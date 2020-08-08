@@ -40,6 +40,8 @@ pub(crate) struct TypeState {
     // TODO support multiple simultaneous cycles.
     pub state: UnsafeCell<Option<Collection>>,
     pub relations: UnsafeCell<ActiveRelations>,
+    #[cfg(debug)]
+    slots: UnsafeCell<HashSet<*const u8>>,
 }
 
 impl Debug for TypeState {
@@ -105,6 +107,8 @@ impl TypeState {
                     None
                 }
 
+                m
+                @
                 WorkerMsg::End {
                     release_to_gc,
                     new_allocation,
@@ -117,15 +121,24 @@ impl TypeState {
                     log::info!(
                         "GC received from thread: {:?}: {:?}, header: {:?}",
                         thread_id,
-                        WorkerMsg::End {
-                            next,
-                            new_allocation,
-                            release_to_gc,
-                            grey_fields,
-                            invariant_id,
-                        },
+                        m,
                         header
                     );
+
+                    fn debug() {}
+                    #[cfg(debug)]
+                    fn debug() {
+                        let slots: HashSet<*const u8> = &mut *self.slots.get();
+                        let lowest = next as usize + self.type_info.size as usize;
+                        let high = header as usize
+                            + HeaderUnTyped::high_offset(self.type_info.align, self.type_info.size)
+                                as usize;
+                        for ptr in lowest..high {
+                            slots.insert(ptr as _);
+                        }
+                    }
+
+                    debug();
 
                     // Option::map makes the borrow checker unhappy.
                     let ret = if let Some(cycle) = state {
@@ -164,11 +177,11 @@ impl TypeState {
                             .map(|(_, t)| t)
                             .unwrap_or_else(|| {
                                 debug_assert!(new_allocation);
-                                header as usize
+                                (header as usize
                                     + HeaderUnTyped::high_offset(
                                         self.type_info.align,
                                         self.type_info.size,
-                                    ) as usize
+                                    ) as usize) as _
                             });
 
                         if full(next, self.type_info.align) {
@@ -197,11 +210,11 @@ impl TypeState {
                                 *count += 1;
                                 (
                                     next,
-                                    HeaderUnTyped::from(next) as usize
+                                    (HeaderUnTyped::from(next) as usize
                                         + HeaderUnTyped::high_offset(
                                             self.type_info.align,
                                             self.type_info.size,
-                                        ) as usize,
+                                        ) as usize) as _,
                                 )
                             });
                     };
@@ -210,12 +223,14 @@ impl TypeState {
                 }
             }));
 
+            log::trace!("Messages handled");
+
             if !self.sent_invariant.get() {
                 let inv = Msg::Invariant(
                     state
                         .as_ref()
                         .map(|cycle| cycle.handler.invariant)
-                        .unwrap_or_else(|| Invariant::none(0)),
+                        .unwrap_or_else(|| Invariant::none(self.invariant_id.get())),
                 );
 
                 let mut bus = bus.lock().expect("Could not unlock bus");
@@ -239,11 +254,17 @@ impl TypeState {
                 let mut bus = bus.lock().expect("Could not unlock bus");
                 bus.push(Msg::Next(next as _))
             };
-
-            // log::trace!("\n\n GC sent:\n {:?}\n\n", bus);
         });
 
+        log::trace!("grey: {:?}", grey);
+
         self.sent_invariant.set(true);
+
+        debug_assert!(if !grey.is_empty() {
+            state.is_some()
+        } else {
+            true
+        });
 
         // trace grey, updating refs
         if let Some(cycle) = state {
@@ -270,10 +291,15 @@ impl TypeState {
                     .root(*next as *mut u8, self.type_info.align, self.type_info.size)
             });
 
-            cycle.evac_roots(&self.type_info, arenas, free);
+            log::trace!("cycle.evac_roots");
 
+            // FIXME
+            // cycle.evac_roots(&self.type_info, arenas, free);
+
+            log::trace!("while cycle.handler.root_grey_children");
             while cycle.handler.root_grey_children() {}
 
+            log::trace!("cycle.safe_to_free");
             if cycle.safe_to_free(pending, relations) {
                 log::trace!("safe_to_free: {}", self.type_info.type_name);
 
@@ -311,19 +337,30 @@ impl TypeState {
                     log::trace!("Children complete Collection cleared!");
                     // This will trigger the Invariant::none to be sent to the workers.
                     self.sent_invariant.set(false);
+                    self.invariant_id
+                        .set(self.invariant_id.get().checked_add(1).unwrap_or(1));
+                    log::trace!("pending.known_grey: {}", pending.known_grey);
                     debug_assert_eq!(pending.known_grey, 0);
+                    log::trace!(
+                        "pending.arenas: len: {}, {:?}",
+                        pending.arenas.len(),
+                        pending.arenas
+                    );
                     pending.known_grey = pending.arenas.len();
                     pending.arenas.clear();
+                    log::trace!("clearing state");
                     *state = None;
+                    log::trace!("state cleared");
                     done = true;
                 };
             };
         };
 
+        log::trace!("step::done: {:?}", done);
         done
     }
 
-    unsafe fn drop_arena(&self, next: *mut u8, top: usize, free: &mut FreeList) {
+    unsafe fn drop_arena(&self, next: *mut u8, top: *const u8, free: &mut FreeList) {
         let header = HeaderUnTyped::from(next) as *mut HeaderUnTyped;
         log::trace!("drop_arena(header: {:?}, next: {:?})", header, next);
 
@@ -344,7 +381,7 @@ impl TypeState {
     }
 
     /// Runs destructor on objects from the top of the `Arena` to next;
-    unsafe fn drop_objects(&self, header: *mut HeaderUnTyped, range: (*const u8, usize)) {
+    unsafe fn drop_objects(&self, header: *mut HeaderUnTyped, range: DropedBounds) {
         debug_assert!(self.type_info.needs_drop);
 
         let GcTypeInfo { align, size, .. } = self.type_info;
@@ -361,6 +398,14 @@ impl TypeState {
             // TODO sort and iterate between evacuated
             if !evacuated.contains_key(&index(ptr as *const u8, size, align)) {
                 // log::trace!("drop ptr: {:?}", ptr as *mut u8);
+                fn debug() {}
+                #[cfg(debug)]
+                fn debug() {
+                    let slots: HashSet<*const u8> = &mut *self.slots.get();
+                    assert!(slots.remove(ptr));
+                }
+
+                debug();
                 drop_in_place(ptr as *mut u8)
             };
             ptr -= size as usize;
@@ -427,17 +472,19 @@ impl Collection {
         free: &mut FreeList,
         invariant_id: u8,
     ) -> Collection {
-        let direct_children: EffTypes = relations
+        log::trace!(
+            "Collection::new {}, relations: {:?}",
+            type_info.type_name,
+            relations
+        );
+
+        log::trace!("Making last_nexts");
+        let last_nexts: SmallVec<_> = relations
             .direct_children
             .iter()
-            .map(|(ts, _)| *ts)
-            .collect();
-
-        let last_nexts: SmallVec<_> = direct_children
-            .iter()
-            .map(|ts| {
+            .map(|t| {
                 (free.alloc() as *mut _ as usize
-                    + HeaderUnTyped::high_offset(ts.type_info.align, ts.type_info.size) as usize)
+                    + HeaderUnTyped::high_offset(t.0.type_info.align, t.0.type_info.size) as usize)
                     as *mut u8
             })
             .collect();
@@ -445,12 +492,16 @@ impl Collection {
         Collection {
             handler: HandlerManager {
                 handlers: Handlers {
-                    translator: type_info.translator_from_fn()(&direct_children).0,
+                    translator: type_info.translator_from_fn()(&relations.direct_children).0,
                     nexts: last_nexts.clone(),
                     filled: last_nexts.iter().map(|_| SmallVec::new()).collect(),
                     free,
                 },
-                eff_types: direct_children,
+                eff_types: relations
+                    .direct_children
+                    .iter()
+                    .map(|(ts, _)| *ts)
+                    .collect(),
                 invariant: Invariant::all(invariant_id),
                 evacuate_fn: unsafe { type_info.evacuate_fn() },
                 last_nexts,
@@ -464,6 +515,7 @@ impl Collection {
 
     /// Ensures no ptrs exist in to the `TypeState`'s condemned arenas.
     fn safe_to_free(&mut self, pending: &Pending, relations: &ActiveRelations) -> bool {
+        log::trace!("safe_to_free");
         // TODO(drop) ensure transitive_parents drop order.
         // Or panic on Arena::new in a destructor.
         if self.no_grey_arenas(pending) {
@@ -608,7 +660,7 @@ pub(crate) struct Arenas {
     /// Arena owned by GC, that have not been completely filled.
     pub partial: Partial,
     /// header => top
-    pub full: HashMap<*const HeaderUnTyped, usize>,
+    pub full: HashMap<*const HeaderUnTyped, *const u8>,
 }
 
 impl Default for Arenas {
@@ -651,24 +703,24 @@ impl Default for Partial {
 
 impl Partial {
     /// Reuse or allocate a new Arena
-    fn remove_arena(&mut self, type_info: &GcTypeInfo, free: &mut FreeList) -> (*const u8, usize) {
+    fn remove_arena(&mut self, type_info: &GcTypeInfo, free: &mut FreeList) -> DropedBounds {
         if let Some((header, (next, top))) = self.iter().next().map(|(h, (n, t))| (*h, (*n, *t))) {
             self.remove(&header);
             (next as _, top)
         } else {
             let next = free.alloc() as *mut _ as usize
                 + HeaderUnTyped::high_offset(type_info.align, type_info.size) as usize;
-            (next as *mut u8, next)
+            (next as *mut u8, next as _)
         }
     }
 }
 
-type Droped = (*const u8, usize);
+type DropedBounds = (*const u8, *const u8);
 
 #[derive(Debug, Clone)]
 /// Header => (next, top)
 /// top..ARENA_SIZE has already been droped.
-pub(crate) struct ArenaBounds(HashMap<*const HeaderUnTyped, Droped>);
+pub(crate) struct ArenaBounds(HashMap<*const HeaderUnTyped, DropedBounds>);
 
 impl Default for ArenaBounds {
     fn default() -> Self {
@@ -677,7 +729,7 @@ impl Default for ArenaBounds {
 }
 
 impl Deref for ArenaBounds {
-    type Target = HashMap<*const HeaderUnTyped, Droped>;
+    type Target = HashMap<*const HeaderUnTyped, DropedBounds>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
@@ -701,6 +753,7 @@ struct HandlerManager {
 
 impl Drop for HandlerManager {
     fn drop(&mut self) {
+        log::trace!("HandlerManager::Drop: {:?}", self.handlers);
         self.handlers
             .nexts
             .iter()
@@ -709,17 +762,19 @@ impl Drop for HandlerManager {
                 let child_ts = self.eff_types[i];
                 let child_arenas = unsafe { &mut *child_ts.arenas.get() };
                 let header = HeaderUnTyped::from(*next);
-                let top = header as usize
+                let top = (header as usize
                     + HeaderUnTyped::high_offset(child_ts.type_info.align, child_ts.type_info.size)
-                        as usize;
+                        as usize) as _;
+
                 if *next as usize % ARENA_SIZE == 0 {
                     child_arenas.full.insert(header as _, top);
                 } else {
-                    child_arenas.partial.0.insert(header, (*next, top));
+                    child_arenas.partial.insert(header, (*next, top));
                 }
             });
 
         assert_eq!(self.handlers.filled.iter().flatten().count(), 0);
+        log::trace!("HandlerManager::Drop done");
     }
 }
 
@@ -749,6 +804,7 @@ impl HandlerManager {
 
     /// Returns `true` when new values were evacuated.
     fn root_grey_children(&mut self) -> bool {
+        log::trace!("root_grey_children");
         let HandlerManager {
             handlers,
             eff_types,
@@ -795,11 +851,11 @@ impl HandlerManager {
                 headers.iter().for_each(|header| {
                     let b = child_arenas.full.insert(
                         *header,
-                        *header as usize
+                        (*header as usize
                             + HeaderUnTyped::high_offset(
                                 child_ts.type_info.align,
                                 child_ts.type_info.size,
-                            ) as usize,
+                            ) as usize) as _,
                     );
                     // Assert full will never have `header`.
                     debug_assert!(b.is_none());
@@ -930,6 +986,31 @@ pub(crate) struct ActiveRelations {
     transitive_parents: SmallVec<[&'static TypeState; 5]>,
     direct_children: SmallVec<[(&'static TypeState, TypeRow); 3]>,
     transitive_children: SmallVec<[&'static TypeState; 5]>,
+}
+
+impl Debug for ActiveRelations {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActiveRelations")
+            .field(
+                "direct_parents",
+                &self
+                    .direct_parents
+                    .iter()
+                    .map(|(ts, tr)| (ts.type_info.type_name, tr))
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "direct_children",
+                &self
+                    .direct_children
+                    .iter()
+                    .map(|(ts, tr)| (ts.type_info.type_name, tr))
+                    .collect::<Vec<_>>(),
+            )
+            .field("transitive_parents", &self.transitive_parents)
+            .field("transitive_children", &self.transitive_children)
+            .finish()
+    }
 }
 
 impl ActiveRelations {

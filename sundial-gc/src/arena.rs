@@ -499,27 +499,27 @@ impl<T: Immutable + Trace + Copy> Arena<T> {
 #[test]
 fn gc_alloc_test() {
     let a: Arena<usize> = Arena::new();
-    let n1 = unsafe { *a.next.get() } as usize;
+    let n1 = a.next.get() as usize;
     a.gc_alloc(1);
-    let n2 = unsafe { *a.next.get() } as usize;
+    let n2 = a.next.get() as usize;
     assert!(n1 == n2 + 8)
 }
 
 #[test]
 fn gc_clone_test() {
     let a: Arena<usize> = Arena::new();
-    let n1 = unsafe { *a.next.get() } as usize;
+    let n1 = a.next.get() as usize;
     a.gc_clone(&1);
-    let n2 = unsafe { *a.next.get() } as usize;
+    let n2 = a.next.get() as usize;
     assert!(n1 == n2 + 8)
 }
 
 #[test]
 fn gc_copy_test() {
     let a: Arena<usize> = Arena::new();
-    let n1 = unsafe { *a.next.get() } as usize;
+    let n1 = a.next.get() as usize;
     a.gc_copy(&1);
-    let n2 = unsafe { *a.next.get() } as usize;
+    let n2 = a.next.get() as usize;
     assert!(n1 == n2 + 8)
 }
 
