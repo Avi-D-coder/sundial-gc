@@ -82,8 +82,9 @@ impl Translator {
                 });
             });
 
-        log::trace!("Translator::from done");
-        (Self { offsets }, bloom)
+        let r = (Self { offsets }, bloom);
+        log::trace!("Translator::from -> {:?}", r);
+        r
     }
 }
 

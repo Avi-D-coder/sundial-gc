@@ -5,12 +5,12 @@ fn gc_allocs_test() {
     let _ = env_logger::builder().is_test(true).try_init();
     for _ in 0..arena::ARENA_SIZE {
         let a: Arena<usize> = Arena::new();
-        let n1 = unsafe { *a.next.get() } as usize;
+        let n1 = a.next_ptr();
         a.gc_alloc(1);
-        let n2 = unsafe { *a.next.get() } as usize;
-        if !a.full() {
-            assert!(n1 == n2 + 8)
-        }
+        let n2 = a.next_ptr();
+        if let (Some(n1), Some(n2)) = (n1, n2) {
+            assert!(n1 as usize == n2 as usize + 8);
+        };
     }
 }
 
@@ -18,10 +18,12 @@ fn gc_allocs_test() {
 fn gc_clones_test() {
     for _ in 0..arena::ARENA_SIZE {
         let a: Arena<usize> = Arena::new();
-        let n1 = unsafe { *a.next.get() } as usize;
+        let n1 = a.next_ptr();
         a.gc_clone(&1);
-        let n2 = unsafe { *a.next.get() } as usize;
-        assert!(n1 == n2 + 8 || a.full())
+        let n2 = a.next_ptr();
+        if let (Some(n1), Some(n2)) = (n1, n2) {
+            assert!(n1 as usize == n2 as usize + 8);
+        };
     }
 }
 
@@ -29,10 +31,12 @@ fn gc_clones_test() {
 fn gc_copys_test() {
     for _ in 0..arena::ARENA_SIZE {
         let a: Arena<usize> = Arena::new();
-        let n1 = unsafe { *a.next.get() } as usize;
+        let n1 = a.next_ptr();
         a.gc_copy(&1);
-        let n2 = unsafe { *a.next.get() } as usize;
-        assert!(n1 == n2 + 8 || a.full())
+        let n2 = a.next_ptr();
+        if let (Some(n1), Some(n2)) = (n1, n2) {
+            assert!(n1 as usize == n2 as usize + 8);
+        };
     }
 }
 
@@ -52,19 +56,18 @@ fn capacitys_test() {
     let _ = env_logger::builder().is_test(true).try_init();
     let (mut next, mut cap) = {
         let a = Arena::<usize>::new();
-        (unsafe { *a.next.get() }, a.capacity())
+        (a.next_ptr(), a.capacity())
     };
     for _ in 0.. {
         let a: Arena<usize> = Arena::new();
-        let nxt = unsafe { *a.next.get() };
-        assert_eq!(next, nxt);
+        assert_eq!(next, a.next_ptr());
         assert!(!a.full());
         a.gc_alloc(1);
         let c = a.capacity();
         assert!(cap - 1 == c);
 
         cap -= 1;
-        next = unsafe { *a.next.get() };
+        next = a.next_ptr();
         if a.full() {
             break;
         }

@@ -58,7 +58,8 @@ impl FreeList {
         unsafe { ptr::drop_in_place(arena) };
         // More Arenas may be allocated then this count.
         self.allocated = self.allocated.saturating_sub(1);
-        self.free.push(arena as *mut Mem);
+        unsafe { System.dealloc(arena as *mut u8, Layout::new::<Mem>()) };
+        // self.free.push(arena as *mut Mem);
     }
 
     pub fn merge(&mut self, with: &mut FreeList) {

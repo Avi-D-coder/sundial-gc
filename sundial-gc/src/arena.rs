@@ -36,12 +36,22 @@ pub struct Arena<T: Trace + Immutable> {
     invariant: Invariant,
     marked_grey_fields: UnsafeCell<u8>,
     // TODO pub(crate)
-    pub next: Cell<*mut T>,
+    next: Cell<*mut T>,
     /// (next, new_allocation, grey_fields)
     full: UnsafeCell<SmallVec<[(*mut T, bool, u8); 2]>>,
 }
 
 impl<T: Immutable + Trace> Arena<T> {
+    /// Returns the pointer of the next object to be allocated.
+    /// Returns `None` when the `Arena` is full.
+    pub fn next_ptr(&self) -> Option<*const T> {
+        if !self.full() {
+            Some(self.next.get() as _)
+        } else {
+            None
+        }
+    }
+
     pub fn header(&self) -> &Header<T> {
         unsafe { &*Header::from(self.next.get() as *const _) }
     }
@@ -232,6 +242,7 @@ impl<T: Immutable + Trace> Drop for Arena<T> {
                                     new_allocation,
                                     grey_fields,
                                     invariant_id: self.invariant.id,
+                                    transient: false,
                                 }),
                             );
 
@@ -252,22 +263,25 @@ impl<T: Immutable + Trace> Drop for Arena<T> {
                     }
                 };
 
-                let end = Msg::Worker(WorkerMsg::End {
-                    release_to_gc,
-                    new_allocation: self.new_allocation.get(),
-                    next,
-                    grey_fields: unsafe { *self.marked_grey_fields.get() },
-                    invariant_id: self.invariant.id,
-                });
+                let end = |transient| {
+                    Msg::Worker(WorkerMsg::End {
+                        release_to_gc,
+                        new_allocation: self.new_allocation.get(),
+                        next,
+                        grey_fields: unsafe { *self.marked_grey_fields.get() },
+                        invariant_id: self.invariant.id,
+                        transient,
+                    })
+                };
 
                 let msg = bus.get_mut(self.bus_idx as usize);
 
                 match msg {
                     Some(msg @ Msg::Slot) | Some(msg @ Msg::Worker(WorkerMsg::Start { .. })) => {
-                        *msg = end
+                        *msg = end(true);
                     }
                     _ => {
-                        bus::send(&mut bus, end);
+                        bus::send(&mut bus, end(false));
                     }
                 };
 
@@ -282,6 +296,8 @@ impl<T: Immutable + Trace> Drop for Arena<T> {
                                 next: next as *mut u8,
                                 grey_fields,
                                 invariant_id: self.invariant.id,
+                                // This could be true.
+                                transient: false,
                             }),
                         );
                     });

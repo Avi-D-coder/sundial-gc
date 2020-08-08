@@ -5,7 +5,7 @@ use mark::GcTypeInfo;
 use std::{
     collections::{HashMap, HashSet},
     fmt::Debug,
-    mem,
+    mem, ptr,
     time::{Duration, Instant},
 };
 
@@ -143,6 +143,7 @@ impl TypeGroup {
                         partial,
                         worker,
                     },
+                handler,
                 ..
             }) = state
             {
@@ -150,6 +151,7 @@ impl TypeGroup {
                 mem::swap(full, &mut collection.condemned.full);
                 mem::swap(partial, &mut collection.condemned.partial);
                 mem::swap(worker, &mut collection.condemned.worker);
+                handler.drop();
             };
 
             log::trace!("marking: full {:?}", collection.condemned.full);
@@ -224,6 +226,45 @@ impl TypeGroup {
 
             log::warn!("reseting");
             related.iter().for_each(|ts| unsafe { ts.reset() });
+
+            let debug = || {
+                related.iter().cloned().for_each(|ts| {
+                    let slots = unsafe { &mut *ts.slots.get() };
+                    let mut ptrs: Vec<_> = slots
+                        .iter()
+                        .filter(|(_, live)| **live)
+                        .map(|(p, _)| *p)
+                        .collect();
+
+                    if ptrs.is_empty() {
+                        slots.clear();
+                        slots.shrink_to_fit();
+                    } else {
+                        ptrs.sort();
+
+                        let mut ranges = Vec::new();
+                        let r = ptrs.into_iter().fold(
+                            (ptr::null(), ptr::null()..=ptr::null()),
+                            |(header, range), ptr| {
+                                if *range.end() as usize + ts.type_info.size as usize
+                                    == ptr as usize
+                                    && header == HeaderUnTyped::from(ptr)
+                                {
+                                    (header, *range.start()..=ptr)
+                                } else {
+                                    ranges.push((header, range));
+                                    (HeaderUnTyped::from(ptr), ptr..=ptr)
+                                }
+                            },
+                        );
+
+                        ranges.push(r);
+                        log::info!("Leftover: {:?}", ranges);
+                    }
+                });
+            };
+
+            debug();
             log::warn!("Major GC complete {:?}", self);
         } else if let Some(start) = gc_in_progress {
             log::trace!("not done");
@@ -236,7 +277,6 @@ impl TypeGroup {
         } else if self.free.allocated >= 2 * *pre_allocated
             || last_gc_completed.elapsed() > Duration::from_secs(2)
         {
-            log::trace!("major gc");
             self.major_gc();
         };
         log::trace!("TypeGroup::step complete");

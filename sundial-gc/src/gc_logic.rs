@@ -75,18 +75,18 @@ pub(crate) enum RegMsg {
 }
 
 fn gc_loop() {
-    panic::set_hook(Box::new(|panic_info| {
-        let backtrace = std::backtrace::Backtrace::force_capture();
-        if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
-            println!("panic occurred: {},\n\n{}", s, backtrace);
-            log::error!("panic occurred: {},\n\n{}", s, backtrace);
-        } else {
-            println!("panic occurred");
-            log::error!("panic occurred,\n\n{}", backtrace);
-        }
+    // panic::set_hook(Box::new(|panic_info| {
+    //     let backtrace = std::backtrace::Backtrace::force_capture();
+    //     if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+    //         println!("panic occurred: {},\n\n{}", s, backtrace);
+    //         log::error!("panic occurred: {},\n\n{}", s, backtrace);
+    //     } else {
+    //         println!("panic occurred");
+    //         log::error!("panic occurred,\n\n{}", backtrace);
+    //     }
 
-        process::exit(0);
-    }));
+    //     process::exit(0);
+    // }));
 
     let mut active: HashMap<&'static GcTypeInfo, &'static TypeState> = Default::default();
     let mut type_groups: TypeGroups = Default::default();

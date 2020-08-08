@@ -7,18 +7,8 @@ pub type Bus = Mutex<SmallVec<[Msg; 8]>>;
 
 /// Returns index of sent message.
 pub fn send(bus: &mut SmallVec<[Msg; 8]>, msg: Msg) -> usize {
-    if let Some((i, slot)) = bus
-        .iter_mut()
-        .enumerate()
-        .filter(|(_, o)| o.is_slot())
-        .next()
-    {
-        *slot = msg;
-        i
-    } else {
-        bus.push(msg);
-        bus.len() - 1
-    }
+    bus.push(msg);
+    bus.len() - 1
 }
 
 /// Removes `Msg::Slot`s and `Msg::Worker`s.
@@ -134,10 +124,15 @@ pub enum WorkerMsg {
         next: *const u8,
     },
     End {
-        /// Worker will not finish filling the Arena
+        /// Worker will not finish filling the Arena.
         release_to_gc: bool,
+        /// A Worker allocated Arena.
         new_allocation: bool,
-        /// Address of the 16 kB arena
+        /// `true` when a start and a End message were merged.
+        /// This will occur when the GC does not read the bus
+        /// between the start and end of a Arena lifetime.
+        transient: bool,
+        /// Address of the 16 kB arena.
         next: *const u8,
         grey_fields: u8,
         invariant_id: u8,
@@ -153,10 +148,66 @@ impl PartialOrd for WorkerMsg {
 impl Ord for WorkerMsg {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
         match (self, other) {
-            (WorkerMsg::End { next: a, .. }, WorkerMsg::End { next: b, .. }) => a.cmp(b),
-            (WorkerMsg::End { next: a, .. }, WorkerMsg::Start { next: b, .. }) => a.cmp(b),
-            (WorkerMsg::Start { next: a, .. }, WorkerMsg::End { next: b, .. }) => a.cmp(b),
-            (WorkerMsg::Start { next: a, .. }, WorkerMsg::Start { next: b, .. }) => a.cmp(b),
+            (
+                WorkerMsg::End {
+                    next: a,
+                    invariant_id: ai,
+                    ..
+                },
+                WorkerMsg::End {
+                    next: b,
+                    invariant_id: bi,
+                    ..
+                },
+            ) => match a.cmp(b) {
+                cmp::Ordering::Equal => ai.cmp(bi),
+                o => o,
+            },
+            (
+                WorkerMsg::End {
+                    next: a,
+                    invariant_id: ai,
+                    ..
+                },
+                WorkerMsg::Start {
+                    next: b,
+                    invariant_id: bi,
+                    ..
+                },
+            ) => match a.cmp(b) {
+                cmp::Ordering::Equal => ai.cmp(bi),
+                o => o,
+            },
+            (
+                WorkerMsg::Start {
+                    next: a,
+                    invariant_id: ai,
+                    ..
+                },
+                WorkerMsg::End {
+                    next: b,
+                    invariant_id: bi,
+                    ..
+                },
+            ) => match a.cmp(b) {
+                cmp::Ordering::Equal => ai.cmp(bi),
+                o => o,
+            },
+            (
+                WorkerMsg::Start {
+                    next: a,
+                    invariant_id: ai,
+                    ..
+                },
+                WorkerMsg::Start {
+                    next: b,
+                    invariant_id: bi,
+                    ..
+                },
+            ) => match a.cmp(b) {
+                cmp::Ordering::Equal => ai.cmp(bi),
+                o => o,
+            },
         }
     }
 }
@@ -182,13 +233,17 @@ impl WorkerMsg {
             }
 
             (
-                WorkerMsg::Start { invariant_id, next },
+                WorkerMsg::Start {
+                    invariant_id,
+                    next: nxt,
+                },
                 WorkerMsg::End {
                     new_allocation,
                     release_to_gc,
                     grey_fields,
                     invariant_id: id,
-                    next: nxt,
+                    next,
+                    ..
                 },
             )
             | (
@@ -197,9 +252,13 @@ impl WorkerMsg {
                     release_to_gc,
                     grey_fields,
                     invariant_id: id,
+                    next,
+                    ..
+                },
+                WorkerMsg::Start {
+                    invariant_id,
                     next: nxt,
                 },
-                WorkerMsg::Start { invariant_id, next },
             ) => {
                 if invariant_id == id && HeaderUnTyped::from(next) == HeaderUnTyped::from(nxt) {
                     Ok(WorkerMsg::End {
@@ -208,6 +267,7 @@ impl WorkerMsg {
                         next,
                         grey_fields,
                         invariant_id,
+                        transient: true,
                     })
                 } else {
                     Err((self, b))
@@ -221,6 +281,7 @@ impl WorkerMsg {
                     next,
                     grey_fields,
                     invariant_id,
+                    transient: t1,
                 },
                 WorkerMsg::End {
                     release_to_gc: rtg,
@@ -228,6 +289,7 @@ impl WorkerMsg {
                     next: nxt,
                     grey_fields: gf,
                     invariant_id: id,
+                    transient: t2,
                 },
             ) => {
                 if invariant_id == id && HeaderUnTyped::from(next) == HeaderUnTyped::from(nxt) {
@@ -238,6 +300,7 @@ impl WorkerMsg {
                         next: cmp::min(next, nxt),
                         grey_fields: grey_fields | gf,
                         invariant_id,
+                        transient: t1 || t2,
                     })
                 } else {
                     Err((self, b))

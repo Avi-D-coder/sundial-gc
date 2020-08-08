@@ -27,14 +27,14 @@ struct Count(usize);
 
 impl Count {
     pub fn new() -> Self {
-        COUNT.fetch_add(1, Ordering::Relaxed);
+        COUNT.fetch_add(1, Ordering::SeqCst);
         Count(1)
     }
 }
 
 impl Drop for Count {
     fn drop(&mut self) {
-        COUNT.fetch_sub(1, Ordering::Relaxed);
+        COUNT.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -43,14 +43,14 @@ fn drop_test() {
     log_init();
     for i in 0..1000 {
         let a = Arena::new();
-        for _ in 0..100 {
+        for _ in 0..1000 {
             a.gc_alloc(Count::new());
         }
-        log::trace!("i: {}",i);
+        log::trace!("i: {}", i);
     }
 
-    while COUNT.load(Ordering::Relaxed) != 0 {
-        eprintln!("Count {}", COUNT.load(Ordering::Relaxed));
-        thread::sleep(Duration::from_millis(1000));
+    while COUNT.load(Ordering::SeqCst) != 0 {
+        log::info!("DROP COUNT {}", COUNT.load(Ordering::SeqCst));
+        thread::sleep(Duration::from_millis(100));
     }
 }

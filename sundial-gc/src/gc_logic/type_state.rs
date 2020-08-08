@@ -40,8 +40,10 @@ pub(crate) struct TypeState {
     // TODO support multiple simultaneous cycles.
     pub state: UnsafeCell<Option<Collection>>,
     pub relations: UnsafeCell<ActiveRelations>,
-    #[cfg(debug)]
-    slots: UnsafeCell<HashSet<*const u8>>,
+    // FIXME #[cfg(debug)]
+    /// object ptr => live
+    /// live will only be true when `needs_drop` is.
+    pub slots: UnsafeCell<HashMap<*const u8, bool>>,
 }
 
 impl Debug for TypeState {
@@ -115,6 +117,7 @@ impl TypeState {
                     next,
                     grey_fields,
                     invariant_id,
+                    transient,
                 } => {
                     let header = HeaderUnTyped::from(next);
 
@@ -125,18 +128,23 @@ impl TypeState {
                         header
                     );
 
-                    fn debug() {}
-                    #[cfg(debug)]
-                    fn debug() {
-                        let slots: HashSet<*const u8> = &mut *self.slots.get();
-                        let lowest = next as usize + self.type_info.size as usize;
+                    // fn debug() {}
+                    // #[cfg(debug)]
+                    let debug = || {
+                        let slots = &mut *self.slots.get();
+                        let lowest = if next == header as _ {
+                            header as usize
+                                + HeaderUnTyped::low_offset(self.type_info.align) as usize
+                        } else {
+                            next as usize + self.type_info.size as usize
+                        };
                         let high = header as usize
                             + HeaderUnTyped::high_offset(self.type_info.align, self.type_info.size)
                                 as usize;
-                        for ptr in lowest..high {
-                            slots.insert(ptr as _);
+                        for ptr in (lowest..=high).step_by(self.type_info.size as usize) {
+                            slots.insert(ptr as _, self.type_info.needs_drop);
                         }
-                    }
+                    };
 
                     debug();
 
@@ -163,6 +171,7 @@ impl TypeState {
                     };
 
                     if !new_allocation
+                        && !transient
                         && invariant_id != self.invariant_id.get()
                         && invariant_id != 0
                         && arenas.worker.contains_key(&header)
@@ -303,14 +312,11 @@ impl TypeState {
             if cycle.safe_to_free(pending, relations) {
                 log::trace!("safe_to_free: {}", self.type_info.type_name);
 
-                cycle.condemned.full.drain().for_each(|(header, top)| {
-                    self.drop_arena(
-                        (header as usize + HeaderUnTyped::low_offset(self.type_info.align) as usize)
-                            as *mut u8,
-                        top,
-                        free,
-                    )
-                });
+                cycle
+                    .condemned
+                    .full
+                    .drain()
+                    .for_each(|(header, top)| self.drop_arena(header as *mut u8, top, free));
 
                 cycle
                     .condemned
@@ -349,6 +355,7 @@ impl TypeState {
                     pending.known_grey = pending.arenas.len();
                     pending.arenas.clear();
                     log::trace!("clearing state");
+                    cycle.handler.drop();
                     *state = None;
                     log::trace!("state cleared");
                     done = true;
@@ -364,14 +371,14 @@ impl TypeState {
         let header = HeaderUnTyped::from(next) as *mut HeaderUnTyped;
         log::trace!("drop_arena(header: {:?}, next: {:?})", header, next);
 
-        let roots = { &*header }
-            .roots
-            .lock()
-            .expect("Could not unlock roots while freeing Arena");
-        if roots.len() != 0 {
-            // FIXME should reset latest_grey and try again latter.
-            panic!("Old Arena Rooted");
-        }
+        // let roots = { &*header }
+        //     .roots
+        //     .lock()
+        //     .expect("Could not unlock roots while freeing Arena");
+        // if roots.len() != 0 {
+        //     // FIXME should reset latest_grey and try again latter.
+        //     panic!("Old Arena Rooted");
+        // }
 
         if self.type_info.needs_drop {
             self.drop_objects(header, (next, top));
@@ -385,25 +392,42 @@ impl TypeState {
         debug_assert!(self.type_info.needs_drop);
 
         let GcTypeInfo { align, size, .. } = self.type_info;
-        let low = max(
-            range.0 as usize + size as usize,
-            header as usize + HeaderUnTyped::low_offset(align) as usize,
-        );
+        let low = if header == range.0 as _ {
+            header as usize + HeaderUnTyped::low_offset(align) as usize
+        } else {
+            range.0 as usize + size as usize
+        };
+
         let mut ptr = range.1 as usize;
 
         let drop_in_place = self.type_info.drop_in_place_fn();
         let evacuated = { &mut *header }.evacuated.lock().unwrap();
 
+        log::trace!(
+            "drop_objects(header: {:?}, range: {:?}): {:?}..={:?}",
+            header,
+            range,
+            low as *const u8,
+            ptr as *const u8
+        );
+
         while ptr >= low {
             // TODO sort and iterate between evacuated
             if !evacuated.contains_key(&index(ptr as *const u8, size, align)) {
                 // log::trace!("drop ptr: {:?}", ptr as *mut u8);
-                fn debug() {}
-                #[cfg(debug)]
-                fn debug() {
-                    let slots: HashSet<*const u8> = &mut *self.slots.get();
-                    assert!(slots.remove(ptr));
-                }
+                // fn debug() {}
+                // FIXME #[cfg(debug)]
+                let debug = || {
+                    let slots = &mut *self.slots.get();
+                    let live = slots
+                        .get_mut(&(ptr as _))
+                        .unwrap_or_else(|| panic!("Droping invalid ptr: {:?}", ptr as *mut u8));
+                    if !*live {
+                        panic!("Double freeing ptr: {:?}", ptr as *mut u8);
+                    } else {
+                        *live = false
+                    }
+                };
 
                 debug();
                 drop_in_place(ptr as *mut u8)
@@ -444,7 +468,7 @@ struct Pending {
 
 /// A single collection cycle.
 pub(crate) struct Collection {
-    handler: HandlerManager,
+    pub handler: HandlerManager,
     /// The last epoch a condemned ptr of this type was seen in.
     latest_grey: usize,
     /// Arenas being freed.
@@ -489,28 +513,52 @@ impl Collection {
             })
             .collect();
 
-        Collection {
+        log::trace!("Making eff_types");
+        let eff_types = relations
+            .direct_children
+            .iter()
+            .map(|(ts, _)| *ts)
+            .collect();
+
+        log::trace!("Making evac_fn");
+        let evacuate_fn = unsafe { type_info.evacuate_fn() };
+
+        log::trace!("Making translator");
+        let translator = type_info.translator_from_fn()(&relations.direct_children).0;
+
+        log::trace!("Making filled");
+        let filled = last_nexts.iter().map(|_| SmallVec::new()).collect();
+
+        let nexts = last_nexts.clone();
+
+        log::trace!("Making condemned");
+        let condemned = Default::default();
+
+        log::trace!("Making Invariant::all(invariant_id: {})", invariant_id);
+        let invariant = Invariant::all(invariant_id);
+
+        log::trace!("Making Collection");
+        let r = Collection {
             handler: HandlerManager {
                 handlers: Handlers {
-                    translator: type_info.translator_from_fn()(&relations.direct_children).0,
-                    nexts: last_nexts.clone(),
-                    filled: last_nexts.iter().map(|_| SmallVec::new()).collect(),
+                    translator,
+                    nexts,
+                    filled,
                     free,
                 },
-                eff_types: relations
-                    .direct_children
-                    .iter()
-                    .map(|(ts, _)| *ts)
-                    .collect(),
-                invariant: Invariant::all(invariant_id),
-                evacuate_fn: unsafe { type_info.evacuate_fn() },
+                eff_types,
+                invariant,
+                evacuate_fn,
                 last_nexts,
             },
             latest_grey: 0,
-            condemned: Default::default(),
+            condemned,
             waiting_transitive_parents: SmallVec::new(),
             waiting_transitive: false,
-        }
+        };
+        log::trace!("Collection::new {:?}", r);
+
+        r
     }
 
     /// Ensures no ptrs exist in to the `TypeState`'s condemned arenas.
@@ -724,7 +772,7 @@ pub(crate) struct ArenaBounds(HashMap<*const HeaderUnTyped, DropedBounds>);
 
 impl Default for ArenaBounds {
     fn default() -> Self {
-        ArenaBounds(HashMap::with_capacity(100))
+        ArenaBounds(HashMap::new())
     }
 }
 
@@ -741,7 +789,7 @@ impl DerefMut for ArenaBounds {
     }
 }
 
-struct HandlerManager {
+pub(crate) struct HandlerManager {
     handlers: Handlers,
     eff_types: EffTypes,
     invariant: Invariant,
@@ -749,34 +797,6 @@ struct HandlerManager {
     evacuate_fn: fn(*const u8, u8, u8, *const Invariant, *mut Handlers),
     /// A snapshot of nexts at last call to `unclean_children`.
     last_nexts: SmallVec<[*mut u8; 4]>,
-}
-
-impl Drop for HandlerManager {
-    fn drop(&mut self) {
-        log::trace!("HandlerManager::Drop: {:?}", self.handlers);
-        // self.handlers
-        //     .nexts
-        //     .iter()
-        //     .enumerate()
-        //     .for_each(|(i, next)| {
-        //         let child_ts = self.eff_types[i];
-        //         let child_arenas = unsafe { &mut *child_ts.arenas.get() };
-        //         let header = HeaderUnTyped::from(*next);
-        //         let top = (header as usize
-        //             + HeaderUnTyped::high_offset(child_ts.type_info.align, child_ts.type_info.size)
-        //                 as usize) as _;
-
-        //         if *next as usize % ARENA_SIZE == 0 {
-        //             child_arenas.full.insert(header as _, top);
-        //         } else {
-        //             child_arenas.partial.insert(header, (*next, top));
-        //         }
-        //     });
-
-        log::trace!("776");
-        assert_eq!(self.handlers.filled.iter().flatten().count(), 0);
-        log::trace!("HandlerManager::Drop done");
-    }
 }
 
 impl HandlerManager {
@@ -877,6 +897,32 @@ impl HandlerManager {
         *last_nexts = handlers.nexts.clone();
         true
     }
+
+    /// This panics when in the Drop trait
+    pub fn drop(&mut self) {
+        log::trace!("HandlerManager::Drop: {:?}", self.handlers);
+        self.handlers
+            .nexts
+            .iter()
+            .enumerate()
+            .for_each(|(i, next)| {
+                let child_ts = self.eff_types[i];
+                let child_arenas = unsafe { &mut *child_ts.arenas.get() };
+                let header = HeaderUnTyped::from(*next);
+                let top = (header as usize
+                    + HeaderUnTyped::high_offset(child_ts.type_info.align, child_ts.type_info.size)
+                        as usize) as _;
+
+                if *next as usize % ARENA_SIZE == 0 {
+                    child_arenas.full.insert(header as _, top);
+                } else {
+                    child_arenas.partial.insert(header, (*next, top));
+                }
+            });
+
+        assert_eq!(self.handlers.filled.iter().flatten().count(), 0);
+        log::trace!("HandlerManager::Drop done");
+    }
 }
 ///
 
@@ -931,6 +977,7 @@ impl TotalRelations {
                     direct_children: Default::default(),
                     transitive_children: Default::default(),
                 }),
+                slots: Default::default(),
             }));
 
             let ts = &*ts;
