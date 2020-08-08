@@ -754,25 +754,26 @@ struct HandlerManager {
 impl Drop for HandlerManager {
     fn drop(&mut self) {
         log::trace!("HandlerManager::Drop: {:?}", self.handlers);
-        self.handlers
-            .nexts
-            .iter()
-            .enumerate()
-            .for_each(|(i, next)| {
-                let child_ts = self.eff_types[i];
-                let child_arenas = unsafe { &mut *child_ts.arenas.get() };
-                let header = HeaderUnTyped::from(*next);
-                let top = (header as usize
-                    + HeaderUnTyped::high_offset(child_ts.type_info.align, child_ts.type_info.size)
-                        as usize) as _;
+        // self.handlers
+        //     .nexts
+        //     .iter()
+        //     .enumerate()
+        //     .for_each(|(i, next)| {
+        //         let child_ts = self.eff_types[i];
+        //         let child_arenas = unsafe { &mut *child_ts.arenas.get() };
+        //         let header = HeaderUnTyped::from(*next);
+        //         let top = (header as usize
+        //             + HeaderUnTyped::high_offset(child_ts.type_info.align, child_ts.type_info.size)
+        //                 as usize) as _;
 
-                if *next as usize % ARENA_SIZE == 0 {
-                    child_arenas.full.insert(header as _, top);
-                } else {
-                    child_arenas.partial.insert(header, (*next, top));
-                }
-            });
+        //         if *next as usize % ARENA_SIZE == 0 {
+        //             child_arenas.full.insert(header as _, top);
+        //         } else {
+        //             child_arenas.partial.insert(header, (*next, top));
+        //         }
+        //     });
 
+        log::trace!("776");
         assert_eq!(self.handlers.filled.iter().flatten().count(), 0);
         log::trace!("HandlerManager::Drop done");
     }

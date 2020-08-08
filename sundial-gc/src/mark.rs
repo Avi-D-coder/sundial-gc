@@ -64,10 +64,6 @@ impl Translator {
             "Translator::from(effs: {:?})",
             direct_gc_types.iter().map(|(ts, _)| ts.type_info.type_name)
         );
-        let mut types: HashMap<GcTypeInfo, TypeRow> = HashMap::with_capacity(16);
-        T::direct_gc_types(&mut types, 0);
-
-        log::trace!("types: {:?}", types);
 
         let mut offsets = SmallVec::from([255; 16]);
         let mut bloom = 0b0000_0000;
@@ -75,7 +71,7 @@ impl Translator {
         direct_gc_types
             .iter()
             .enumerate()
-            .for_each(|(i, (ti, (type_offs, bits)))| {
+            .for_each(|(i, (_, (type_offs, bits)))| {
                 bloom |= bits;
                 type_offs.iter().for_each(|off| {
                     if offsets.len() < *off as usize {
