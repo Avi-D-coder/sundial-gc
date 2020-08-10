@@ -34,7 +34,7 @@ pub struct Arena<T: Trace> {
     bus_idx: u8,
     new_allocation: Cell<bool>,
     invariant: Invariant,
-    marked_grey_fields: UnsafeCell<u8>,
+    marked_grey_fields: Cell<u8>,
     // TODO pub(crate)
     next: Cell<*mut T>,
     /// (next, new_allocation, grey_fields)
@@ -184,16 +184,15 @@ unsafe impl<'o, 'n, 'r: 'n, O: Trace + 'o, N: Trace + 'r> Mark<'o, 'n, 'r, O, N>
         let condemned_self =
             self.invariant.grey_self && self.invariant.condemned(old.0 as *const O as *const _);
 
-        let grey_fields = unsafe { &mut *self.marked_grey_fields.get() };
-        let cf = Trace::fields(old.0, 0, *grey_fields, &self.invariant);
+        let cf = Trace::fields(old.0, 0, self.marked_grey_fields.get(), &self.invariant);
 
         // Worker encountered fields marked in cf.
-        unsafe { *self.marked_grey_fields.get() |= cf }
+        self.marked_grey_fields
+            .set(self.marked_grey_fields.get() | cf);
 
         if condemned_self || (0b0000_0000 != cf) {
             let next = self.next.get();
             if Self::full_ptr(next) {
-                log::info!("Growing an Arena. This is slow!");
                 self.new_block()
             };
 
@@ -221,11 +220,14 @@ unsafe impl<'o, 'n, 'r: 'n, O: Trace + 'o, N: Trace + 'r> Mark<'o, 'n, 'r, O, N>
 
 impl<T: Trace> Drop for Arena<T> {
     fn drop(&mut self) {
-        log::trace!("Worker droping: {:?}", self);
+        log::trace!("WORKER: droping: {:?}", self);
 
         GC_BUS.with(|tm| {
-            let next = self.next.get() as *const u8;
-            let full = unsafe { &*self.full.get() };
+            let last_next = self.next.get();
+            let last_new_allocation = self.new_allocation.get();
+            let last_grey_fields = self.marked_grey_fields.get();
+            let last_header = HeaderUnTyped::from(last_next as _);
+
             let tm = unsafe { &mut *tm.get() };
             tm.entry(key::<T>()).and_modify(|bus| {
                 let BusState {
@@ -233,115 +235,108 @@ impl<T: Trace> Drop for Arena<T> {
                 } = bus;
                 let mut bus = bus.lock().expect("Worker could not unlock bus");
                 // A good candidate for https://github.com/rust-lang/rust/issues/53667
-                let release_to_gc = if self.full() {
-                    log::trace!(
-                        "Worker releasing full Arena header: {:?}, next: {:?}",
-                        HeaderUnTyped::from(next),
-                        next
-                    );
-                    true
-                } else {
-                    match cached_arenas.put::<T>(next as _) {
-                        CacheStatus::Cached(cached_next) => {
-                            log::trace!(
-                                "Worker releasing cached Arena header: {:?}, next: {:?}",
-                                HeaderUnTyped::from(next),
-                                next
-                            );
-                            bus::send(&mut bus, Msg::Worker(WorkerMsg::Release(cached_next as _)));
 
-                            debug_assert!(!self.full());
-                            false
-                        }
-                        CacheStatus::Err => {
-                            log::trace!(
-                                "Worker releasing Arena header: {:?}, next: {:?}",
-                                HeaderUnTyped::from(next),
-                                next
-                            );
-                            debug_assert!(!self.full());
-                            // We didn't cache it so the arena is released to the GC.
-                            true
-                        }
-                        CacheStatus::Stored => false,
+                let last_release_to_gc = match cached_arenas.put::<T>(last_next as _) {
+                    CacheStatus::Cached(cached_next) => {
+                        log::trace!(
+                            "WORKER: releasing cached Arena header: {:?}, next: {:?}",
+                            last_header,
+                            last_next
+                        );
+                        bus::send(&mut bus, Msg::Worker(WorkerMsg::Release(cached_next as _)));
+
+                        debug_assert!(!self.full());
+                        false
                     }
+                    CacheStatus::Err => {
+                        log::trace!(
+                            "WORKER: releasing Arena header: {:?}, next: {:?}",
+                            last_header,
+                            last_next
+                        );
+                        // We didn't cache it so the arena is released to the GC.
+                        true
+                    }
+                    CacheStatus::Stored => false,
                 };
+
+                let invariant_id = self.invariant.id;
+                let full = unsafe { &mut *self.full.get() };
+                // Get the orginal arena block
+                let (header, next, release_to_gc, new_allocation, grey_fields) = full
+                    .first()
+                    .cloned()
+                    .map(|(n, na, gf)| {
+                        *full.first_mut().unwrap() =
+                            (last_next, last_new_allocation, last_grey_fields);
+
+                        full.iter().cloned().enumerate().for_each(
+                            |(i, (next, new_allocation, grey_fields))| {
+                                let release_to_gc = i != 0 || last_release_to_gc;
+
+                                let end = Msg::Worker(WorkerMsg::End {
+                                    release_to_gc,
+                                    new_allocation,
+                                    next: next as *mut u8,
+                                    grey_fields,
+                                    invariant_id,
+                                    transient: true,
+                                });
+
+                                log::trace!(
+                                    "WORKER: sending: {:?}, header: {:?}",
+                                    end,
+                                    HeaderUnTyped::from(next as _)
+                                );
+                                bus::send(&mut bus, end);
+                            },
+                        );
+
+                        (HeaderUnTyped::from(n as _), n, true, na, gf)
+                    })
+                    .unwrap_or((
+                        last_header,
+                        last_next,
+                        last_release_to_gc,
+                        last_new_allocation,
+                        last_grey_fields,
+                    ));
 
                 let end = |transient| {
                     Msg::Worker(WorkerMsg::End {
                         release_to_gc,
-                        new_allocation: self.new_allocation.get(),
-                        next,
-                        grey_fields: unsafe { *self.marked_grey_fields.get() },
-                        invariant_id: self.invariant.id,
+                        new_allocation,
+                        next: next as *mut u8,
+                        grey_fields,
+                        invariant_id,
                         transient,
                     })
+                };
+                let closing_end = |bus| {
+                    let end = end(false);
+                    log::trace!("WORKER: sending: {:?}, header: {:?}", end, header);
+                    bus::send(bus, end);
                 };
 
                 let msg = bus.get_mut(self.bus_idx as usize);
                 match msg {
                     Some(Msg::Worker(WorkerMsg::Start { next: nxt, .. })) => {
-                        if HeaderUnTyped::from(next) == HeaderUnTyped::from(*nxt) {
-                            debug_assert!(full.is_empty());
-
+                        if header == HeaderUnTyped::from(*nxt) {
                             let end = end(true);
 
                             log::trace!(
-                                "Worker sending merged:\n  {:?},\n=>{:?}, header: {:?}",
+                                "WORKER: sending merged: {:?} => {:?}, header: {:?}",
                                 msg,
                                 end,
-                                HeaderUnTyped::from(next)
+                                header
                             );
                             *msg.unwrap() = end;
                         } else {
-                            let end = end(!full.is_empty());
-
-                            log::trace!(
-                                "Worker sending: {:?}, header: {:?}",
-                                end,
-                                HeaderUnTyped::from(next)
-                            );
-                            bus::send(&mut bus, end);
+                            closing_end(&mut bus)
                         }
                     }
-                    _ => {
-                        let end = end(!full.is_empty());
-                        log::trace!(
-                            "Worker sending: {:?}, header: {:?}",
-                            end,
-                            HeaderUnTyped::from(next)
-                        );
-                        bus::send(&mut bus, end);
-                    }
+                    _ => closing_end(&mut bus),
                 };
-
-                full.into_iter().cloned().enumerate().for_each(
-                    |(i, (next, new_allocation, grey_fields))| {
-                        let transient = if i == 0 {
-                            // The first Arena block sent the start message.
-                            false
-                        } else {
-                            debug_assert!(new_allocation);
-                            true
-                        };
-
-                        let end = Msg::Worker(WorkerMsg::End {
-                            release_to_gc: true,
-                            new_allocation,
-                            next: next as *mut u8,
-                            grey_fields,
-                            invariant_id: self.invariant.id,
-                            transient,
-                        });
-
-                        log::trace!(
-                            "Worker sending: {:?}, header: {:?}",
-                            end,
-                            HeaderUnTyped::from(next as _)
-                        );
-                        bus::send(&mut bus, end);
-                    },
-                );
             });
         });
     }
@@ -411,7 +406,7 @@ impl<T: Immutable + Trace> Arena<T> {
         // Update invariant
         bus.iter_mut().for_each(|msg| {
             if let Msg::Invariant(inv) = msg {
-                log::trace!("Worker knows of {:?}", inv);
+                log::trace!("WORKER knows of {:?}", inv);
                 *known_invariant = *inv;
                 *msg = Msg::Slot;
             };
@@ -441,7 +436,7 @@ impl<T: Immutable + Trace> Arena<T> {
             invariant_id: known_invariant.id,
         };
         log::trace!(
-            "Worker sending: {:?}, header: {:?}",
+            "WORKER sending: {:?}, header: {:?}",
             start,
             HeaderUnTyped::from(next as _)
         );
@@ -452,22 +447,19 @@ impl<T: Immutable + Trace> Arena<T> {
             new_allocation: Cell::new(new_allocation),
             invariant: *known_invariant,
             next: Cell::new(next),
-            marked_grey_fields: UnsafeCell::new(0b0000_0000),
+            marked_grey_fields: Cell::new(0b0000_0000),
             full: UnsafeCell::new(SmallVec::new()),
         }
     }
 
     fn new_block(&self) {
-        unsafe {
-            self.full.get().as_mut().unwrap().push((
-                self.next.get(),
-                self.new_allocation.get(),
-                *self.marked_grey_fields.get(),
-            ));
-            self.next.set(Self::alloc());
-            self.new_allocation.set(true);
-            log::trace!("new_block alloc Complete");
-        }
+        unsafe { self.full.get().as_mut().unwrap() }.push((
+            self.next.get(),
+            self.new_allocation.get(),
+            self.marked_grey_fields.get(),
+        ));
+        self.next.set(Self::alloc());
+        self.new_allocation.set(true);
     }
 
     /// Create a new `Gc<T>`.
@@ -475,9 +467,7 @@ impl<T: Immutable + Trace> Arena<T> {
     pub fn gc_alloc<'a, 'r: 'a>(&'a self, t: T) -> Gc<'r, T> {
         unsafe {
             if self.full() {
-                log::info!("Growing an Arena. This is slow!");
                 self.new_block();
-                log::info!("Growing an Arena. Complete");
             };
             let ptr = self.next.get();
             self.next.set(self.bump_down() as *mut T);
@@ -489,7 +479,6 @@ impl<T: Immutable + Trace> Arena<T> {
     pub fn box_alloc<'a, 'r: 'a>(&'a self, t: T) -> gc::Box<'r, T> {
         unsafe {
             if self.full() {
-                log::info!("Growing an Arena. This is slow!");
                 self.new_block()
             }
             let ptr = self.next.get();
@@ -507,11 +496,7 @@ impl<T: Immutable + Trace> Arena<T> {
     /// Returns highest ptr.
     pub(crate) fn alloc() -> *mut T {
         // Get more memory from system allocator
-        log::trace!("Arena::alloc");
-        // FIXME it's the last thing logged because it 's when the os tells of the gc threads
-        // demise
         let header = unsafe { System.alloc(Layout::new::<Mem>()) };
-        log::trace!("Arena::alloc got mem");
         debug_assert!(
             (header as usize)
                 < unsafe { &std::mem::transmute::<_, &Mem>(header)._mem[ARENA_SIZE - 1] }
@@ -529,7 +514,6 @@ impl<T: Immutable + Trace + Copy> Arena<T> {
     pub fn gc_copy<'a, 'r: 'a>(&'a self, t: &T) -> Gc<'r, T> {
         unsafe {
             if self.full() {
-                log::info!("Growing an Arena. This is slow!");
                 self.new_block()
             }
             let ptr = self.next.get();
@@ -543,7 +527,6 @@ impl<T: Immutable + Trace + Copy> Arena<T> {
     pub fn box_copy<'a, 'r: 'a>(&'a self, t: &T) -> gc::Box<'r, T> {
         unsafe {
             if self.full() {
-                log::info!("Growing an Arena. This is slow!");
                 self.new_block()
             }
             let ptr = self.next.get();
@@ -585,7 +568,6 @@ impl<T: Immutable + Trace + Clone> Arena<T> {
     pub fn gc_clone<'a, 'r: 'a>(&'a self, t: &T) -> Gc<'r, T> {
         unsafe {
             if self.full() {
-                log::info!("Growing an Arena. This is slow!");
                 self.new_block()
             }
             let ptr = self.next.get();
@@ -598,7 +580,6 @@ impl<T: Immutable + Trace + Clone> Arena<T> {
     pub fn box_clone<'a, 'r: 'a>(&'a self, t: &T) -> gc::Box<'r, T> {
         unsafe {
             if self.full() {
-                log::info!("Growing an Arena. This is slow!");
                 self.new_block()
             }
             let ptr = self.next.get();
@@ -647,7 +628,7 @@ impl HeaderUnTyped {
     }
 
     pub(crate) fn init(ptr: *mut HeaderUnTyped) {
-        log::trace!("HeaderUnTyped::init {:?}", ptr);
+        // log::trace!("HeaderUnTyped::init {:?}", ptr);
         unsafe {
             ptr::write(
                 ptr,
@@ -659,7 +640,7 @@ impl HeaderUnTyped {
                 },
             )
         }
-        log::trace!("HeaderUnTyped::init {:?} Complete", ptr);
+        // log::trace!("HeaderUnTyped::init {:?} Complete", ptr);
     }
 }
 
@@ -762,7 +743,7 @@ impl CachedArenas {
             };
 
             *cached_arena = CachedArena::new(next as _);
-            // log::trace!("CachedArenas::put modified {:?}", self);
+            log::trace!("WORKER: CachedArenas::put modified {:?}", self);
             r
         } else {
             CacheStatus::Err
