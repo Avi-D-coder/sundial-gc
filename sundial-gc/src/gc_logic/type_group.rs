@@ -272,7 +272,7 @@ impl TypeGroup {
             let elapsed = start.elapsed();
             if elapsed > *log_duration * 2 {
                 *log_duration = elapsed;
-                log::warn!("Major Gc running for {}s, {:?}", elapsed.as_secs(), self);
+                log::warn!("Major GC running for {}s, {:?}", elapsed.as_secs(), self);
             };
         } else if self.free.allocated >= 2 * *pre_allocated
             || last_gc_completed.elapsed() > Duration::from_secs(2)

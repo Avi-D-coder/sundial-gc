@@ -31,12 +31,20 @@ pub fn reduce(bus: &mut SmallVec<[Msg; 8]>) -> SmallVec<[WorkerMsg; 8]> {
     bus.sort();
     wms.sort();
 
+    log::trace!("Worker messages: {:?}", wms);
+
     let mut v = SmallVec::new();
-    wms.into_iter().for_each(|b: WorkerMsg| {
-        if let Some(Ok(m)) = v.last().map(|a: &WorkerMsg| (*a).try_merge(b)) {
+    wms.iter().for_each(|b: &WorkerMsg| {
+        if let Some(Ok(m)) = v.last().map(|a: &WorkerMsg| (*a).try_merge(*b)) {
+            log::trace!(
+                "Merged:\n  a: {:?},\n  b: {:?},\n=>{:?}",
+                v.last().unwrap(),
+                b,
+                m
+            );
             *v.last_mut().unwrap() = m;
         } else {
-            v.push(b)
+            v.push(*b)
         }
     });
     v
@@ -99,13 +107,6 @@ impl Ord for Msg {
 
 impl Msg {
     #[inline(always)]
-    pub fn is_slot(&self) -> bool {
-        match self {
-            Msg::Slot => true,
-            _ => false,
-        }
-    }
-
     pub fn is_invariant(&self) -> bool {
         match self {
             Msg::Invariant { .. } => true,
@@ -137,6 +138,7 @@ pub enum WorkerMsg {
         grey_fields: u8,
         invariant_id: u8,
     },
+    Release(*mut u8),
 }
 
 impl PartialOrd for WorkerMsg {
@@ -152,19 +154,55 @@ impl Ord for WorkerMsg {
                 WorkerMsg::End {
                     next: a,
                     invariant_id: ai,
+                    transient: tb,
                     ..
                 },
                 WorkerMsg::End {
                     next: b,
                     invariant_id: bi,
+                    transient: ta,
                     ..
                 },
-            ) => match a.cmp(b) {
-                cmp::Ordering::Equal => ai.cmp(bi),
+            ) => match cmp::Reverse(a).cmp(&cmp::Reverse(b)) {
+                cmp::Ordering::Equal => match (ta, tb) {
+                    (true, false) => cmp::Ordering::Less,
+                    (false, true) => cmp::Ordering::Greater,
+                    _ => ai.cmp(bi),
+                },
                 o => o,
             },
             (
                 WorkerMsg::End {
+                    next: a, transient, ..
+                },
+                WorkerMsg::Start { next: b, .. },
+            ) => match cmp::Reverse(a).cmp(&cmp::Reverse(b)) {
+                cmp::Ordering::Equal => {
+                    if *transient {
+                        cmp::Ordering::Less
+                    } else {
+                        cmp::Ordering::Greater
+                    }
+                }
+                o => o,
+            },
+            (
+                WorkerMsg::Start { next: a, .. },
+                WorkerMsg::End {
+                    next: b, transient, ..
+                },
+            ) => match cmp::Reverse(a).cmp(&cmp::Reverse(b)) {
+                cmp::Ordering::Equal => {
+                    if *transient {
+                        cmp::Ordering::Greater
+                    } else {
+                        cmp::Ordering::Less
+                    }
+                }
+                o => o,
+            },
+            (
+                WorkerMsg::Start {
                     next: a,
                     invariant_id: ai,
                     ..
@@ -174,40 +212,14 @@ impl Ord for WorkerMsg {
                     invariant_id: bi,
                     ..
                 },
-            ) => match a.cmp(b) {
+            ) => match cmp::Reverse(a).cmp(&cmp::Reverse(b)) {
                 cmp::Ordering::Equal => ai.cmp(bi),
                 o => o,
             },
-            (
-                WorkerMsg::Start {
-                    next: a,
-                    invariant_id: ai,
-                    ..
-                },
-                WorkerMsg::End {
-                    next: b,
-                    invariant_id: bi,
-                    ..
-                },
-            ) => match a.cmp(b) {
-                cmp::Ordering::Equal => ai.cmp(bi),
-                o => o,
-            },
-            (
-                WorkerMsg::Start {
-                    next: a,
-                    invariant_id: ai,
-                    ..
-                },
-                WorkerMsg::Start {
-                    next: b,
-                    invariant_id: bi,
-                    ..
-                },
-            ) => match a.cmp(b) {
-                cmp::Ordering::Equal => ai.cmp(bi),
-                o => o,
-            },
+
+            (WorkerMsg::Release(a), WorkerMsg::Release(b)) => cmp::Reverse(a).cmp(&cmp::Reverse(b)),
+            (WorkerMsg::Release(_), _) => cmp::Ordering::Greater,
+            (_, WorkerMsg::Release(_)) => cmp::Ordering::Less,
         }
     }
 }
@@ -216,23 +228,6 @@ impl WorkerMsg {
     pub fn try_merge(self, b: WorkerMsg) -> Result<WorkerMsg, (WorkerMsg, WorkerMsg)> {
         match (self, b) {
             (
-                WorkerMsg::Start { invariant_id, next },
-                WorkerMsg::Start {
-                    invariant_id: id,
-                    next: nxt,
-                },
-            ) => {
-                if invariant_id == id && HeaderUnTyped::from(next) == HeaderUnTyped::from(nxt) {
-                    Ok(WorkerMsg::Start {
-                        invariant_id,
-                        next: cmp::min(next, nxt),
-                    })
-                } else {
-                    Err((self, b))
-                }
-            }
-
-            (
                 WorkerMsg::Start {
                     invariant_id,
                     next: nxt,
@@ -243,21 +238,8 @@ impl WorkerMsg {
                     grey_fields,
                     invariant_id: id,
                     next,
+                    transient: false,
                     ..
-                },
-            )
-            | (
-                WorkerMsg::End {
-                    new_allocation,
-                    release_to_gc,
-                    grey_fields,
-                    invariant_id: id,
-                    next,
-                    ..
-                },
-                WorkerMsg::Start {
-                    invariant_id,
-                    next: nxt,
                 },
             ) => {
                 if invariant_id == id && HeaderUnTyped::from(next) == HeaderUnTyped::from(nxt) {
@@ -274,38 +256,7 @@ impl WorkerMsg {
                 }
             }
 
-            (
-                WorkerMsg::End {
-                    release_to_gc,
-                    new_allocation,
-                    next,
-                    grey_fields,
-                    invariant_id,
-                    transient: t1,
-                },
-                WorkerMsg::End {
-                    release_to_gc: rtg,
-                    new_allocation: na,
-                    next: nxt,
-                    grey_fields: gf,
-                    invariant_id: id,
-                    transient: t2,
-                },
-            ) => {
-                if invariant_id == id && HeaderUnTyped::from(next) == HeaderUnTyped::from(nxt) {
-                    debug_assert_eq!(new_allocation, na);
-                    Ok(WorkerMsg::End {
-                        release_to_gc: release_to_gc || rtg,
-                        new_allocation,
-                        next: cmp::min(next, nxt),
-                        grey_fields: grey_fields | gf,
-                        invariant_id,
-                        transient: t1 || t2,
-                    })
-                } else {
-                    Err((self, b))
-                }
-            }
+            _ => Err((self, b)),
         }
     }
 }

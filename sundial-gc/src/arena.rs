@@ -25,7 +25,7 @@ pub(crate) struct Mem {
     _mem: [u8; ARENA_SIZE],
 }
 
-pub struct Arena<T: Trace + Immutable> {
+pub struct Arena<T: Trace> {
     // TODO compact representation of arenas
     // TODO make all these private by wrapping up needed functionality.
     // TODO derive header from next
@@ -39,6 +39,19 @@ pub struct Arena<T: Trace + Immutable> {
     next: Cell<*mut T>,
     /// (next, new_allocation, grey_fields)
     full: UnsafeCell<SmallVec<[(*mut T, bool, u8); 2]>>,
+}
+
+impl<T: Trace> Debug for Arena<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct(&format!("Arena<{}>", type_name::<T>()))
+            .field("header", &(self.header() as *const Header<T>))
+            .field("next", &self.next.get())
+            .field("new_allocation", &self.new_allocation.get())
+            .field("marked_grey_fields", &self.marked_grey_fields.get())
+            .field("full", unsafe { &*self.full.get() })
+            .field("invariant", &self.invariant)
+            .finish()
+    }
 }
 
 impl<T: Immutable + Trace> Arena<T> {
@@ -206,12 +219,13 @@ unsafe impl<'o, 'n, 'r: 'n, O: Trace + 'o, N: Trace + 'r> Mark<'o, 'n, 'r, O, N>
     }
 }
 
-impl<T: Immutable + Trace> Drop for Arena<T> {
+impl<T: Trace> Drop for Arena<T> {
     fn drop(&mut self) {
+        log::trace!("Worker droping: {:?}", self);
+
         GC_BUS.with(|tm| {
             let next = self.next.get() as *const u8;
             let full = unsafe { &*self.full.get() };
-            let grey_fields = unsafe { *self.marked_grey_fields.get() };
             let tm = unsafe { &mut *tm.get() };
             tm.entry(key::<T>()).and_modify(|bus| {
                 let BusState {
@@ -227,24 +241,14 @@ impl<T: Immutable + Trace> Drop for Arena<T> {
                     );
                     true
                 } else {
-                    match cached_arenas.put::<T>(next as _, self.new_allocation.get()) {
-                        CacheStatus::Cached((cached_next, new_allocation)) => {
+                    match cached_arenas.put::<T>(next as _) {
+                        CacheStatus::Cached(cached_next) => {
                             log::trace!(
                                 "Worker releasing cached Arena header: {:?}, next: {:?}",
                                 HeaderUnTyped::from(next),
                                 next
                             );
-                            bus::send(
-                                &mut bus,
-                                Msg::Worker(WorkerMsg::End {
-                                    next: cached_next as _,
-                                    release_to_gc: true,
-                                    new_allocation,
-                                    grey_fields,
-                                    invariant_id: self.invariant.id,
-                                    transient: false,
-                                }),
-                            );
+                            bus::send(&mut bus, Msg::Worker(WorkerMsg::Release(cached_next as _)));
 
                             debug_assert!(!self.full());
                             false
@@ -275,32 +279,69 @@ impl<T: Immutable + Trace> Drop for Arena<T> {
                 };
 
                 let msg = bus.get_mut(self.bus_idx as usize);
-
                 match msg {
-                    Some(msg @ Msg::Slot) | Some(msg @ Msg::Worker(WorkerMsg::Start { .. })) => {
-                        *msg = end(true);
+                    Some(Msg::Worker(WorkerMsg::Start { next: nxt, .. })) => {
+                        if HeaderUnTyped::from(next) == HeaderUnTyped::from(*nxt) {
+                            debug_assert!(full.is_empty());
+
+                            let end = end(true);
+
+                            log::trace!(
+                                "Worker sending merged:\n  {:?},\n=>{:?}, header: {:?}",
+                                msg,
+                                end,
+                                HeaderUnTyped::from(next)
+                            );
+                            *msg.unwrap() = end;
+                        } else {
+                            let end = end(!full.is_empty());
+
+                            log::trace!(
+                                "Worker sending: {:?}, header: {:?}",
+                                end,
+                                HeaderUnTyped::from(next)
+                            );
+                            bus::send(&mut bus, end);
+                        }
                     }
                     _ => {
-                        bus::send(&mut bus, end(false));
+                        let end = end(!full.is_empty());
+                        log::trace!(
+                            "Worker sending: {:?}, header: {:?}",
+                            end,
+                            HeaderUnTyped::from(next)
+                        );
+                        bus::send(&mut bus, end);
                     }
                 };
 
-                full.into_iter()
-                    .cloned()
-                    .for_each(|(next, new_allocation, grey_fields)| {
-                        bus::send(
-                            &mut bus,
-                            Msg::Worker(WorkerMsg::End {
-                                release_to_gc: true,
-                                new_allocation,
-                                next: next as *mut u8,
-                                grey_fields,
-                                invariant_id: self.invariant.id,
-                                // This could be true.
-                                transient: false,
-                            }),
+                full.into_iter().cloned().enumerate().for_each(
+                    |(i, (next, new_allocation, grey_fields))| {
+                        let transient = if i == 0 {
+                            // The first Arena block sent the start message.
+                            false
+                        } else {
+                            debug_assert!(new_allocation);
+                            true
+                        };
+
+                        let end = Msg::Worker(WorkerMsg::End {
+                            release_to_gc: true,
+                            new_allocation,
+                            next: next as *mut u8,
+                            grey_fields,
+                            invariant_id: self.invariant.id,
+                            transient,
+                        });
+
+                        log::trace!(
+                            "Worker sending: {:?}, header: {:?}",
+                            end,
+                            HeaderUnTyped::from(next as _)
                         );
-                    });
+                        bus::send(&mut bus, end);
+                    },
+                );
             });
         });
     }
@@ -366,44 +407,44 @@ impl<T: Immutable + Trace> Arena<T> {
             cached_arenas,
         } = bus;
         let mut bus = bus.lock().expect("Could not unlock bus");
-        bus.iter_mut()
-            .enumerate()
-            .filter(|(_, msg)| match msg {
-                Msg::Invariant(inv) => {
-                    *known_invariant = *inv;
-                    true
-                }
-                _ => false,
-            })
-            .map(|(i, msg)| {
+
+        // Update invariant
+        bus.iter_mut().enumerate().for_each(|(_, msg)| {
+            if let Msg::Invariant(inv) = msg {
+                *known_invariant = *inv;
                 *msg = Msg::Slot;
-                i
-            })
-            .next();
+            }
+        });
 
         let (next, new_allocation) = if let Some(n) = cached_arenas.get::<T>() {
-            n
+            (n, false)
         } else if let Some(next) = bus
             .iter_mut()
-            .filter_map(|msg| match msg {
-                Msg::Next(next) => Some(*next as _),
+            .filter_map(|msg| match *msg {
+                Msg::Next(next) => {
+                    *msg = Msg::Slot;
+                    Some(next)
+                }
                 _ => None,
             })
             .next()
         {
-            (next, false)
+            (next as _, false)
         } else {
-            (Arena::alloc(), true)
+            (Arena::alloc() as _, true)
         };
 
         // send start message to gc
-        let slot = bus::send(
-            &mut bus,
-            Msg::Worker(WorkerMsg::Start {
-                next: next as *const u8,
-                invariant_id: known_invariant.id,
-            }),
+        let start = WorkerMsg::Start {
+            next: next as *const u8,
+            invariant_id: known_invariant.id,
+        };
+        log::trace!(
+            "Worker sending: {:?}, header: {:?}",
+            start,
+            HeaderUnTyped::from(next as _)
         );
+        let slot = bus::send(&mut bus, Msg::Worker(start));
 
         Arena {
             bus_idx: slot as u8,
@@ -627,6 +668,14 @@ fn low_offset_test() {
     assert_eq!(Header::<usize>::low_offset(), 160)
 }
 
+#[test]
+fn header_from_test() {
+    assert_eq!(
+        HeaderUnTyped::from(0x7fcc200dd918u64 as _),
+        HeaderUnTyped::from(0x7fcc200d7778u64 as _)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -670,7 +719,7 @@ struct CachedArenas([CachedArena; 2]);
 
 #[derive(Debug)]
 enum CacheStatus<T> {
-    Cached((*mut T, bool)),
+    Cached(*mut T),
     Stored,
     Err,
 }
@@ -678,7 +727,7 @@ enum CacheStatus<T> {
 impl CachedArenas {
     /// Try to cache an Arena.
     /// If the Cache is full and the new Arena will be cached the old Arena with the least capacity will be returned.
-    fn put<T: Trace>(&mut self, next: *mut T, new_allocation: bool) -> CacheStatus<T> {
+    fn put<T: Trace>(&mut self, next: *mut T) -> CacheStatus<T> {
         let header = HeaderUnTyped::from(next as _);
         // log::trace!(
         //     "CachedArenas::put(header: {:?}, next: {:?}, new_allocation: {:?})",
@@ -708,10 +757,10 @@ impl CachedArenas {
             let r = if cached_arena.is_null() {
                 CacheStatus::Stored
             } else {
-                CacheStatus::Cached((cached_arena.next() as _, cached_arena.new_allocation()))
+                CacheStatus::Cached(cached_arena.next() as _)
             };
 
-            *cached_arena = CachedArena::new(next as _, new_allocation);
+            *cached_arena = CachedArena::new(next as _);
             // log::trace!("CachedArenas::put modified {:?}", self);
             r
         } else {
@@ -719,7 +768,7 @@ impl CachedArenas {
         }
     }
 
-    fn get<T: Trace>(&mut self) -> Option<(*mut T, bool)> {
+    fn get<T: Trace>(&mut self) -> Option<*mut T> {
         self.0
             .iter_mut()
             .filter(|a| !CachedArena::is_null(**a))
@@ -730,16 +779,16 @@ impl CachedArenas {
             .max_by(|(_, ac), (_, bc)| ac.cmp(bc))
             .map(|(a, _)| {
                 let next = a.next() as _;
-                let new_allocation = a.new_allocation();
                 *a = CachedArena::null();
-                (next, new_allocation)
+                next
             })
     }
 }
 
 #[derive(Copy, Clone)]
 struct CachedArena {
-    tagged_next: usize,
+    /// May be null.
+    next: *const u8,
 }
 
 impl Debug for CachedArena {
@@ -747,35 +796,24 @@ impl Debug for CachedArena {
         f.debug_struct("CachedArena")
             .field("header", &HeaderUnTyped::from(self.next()))
             .field("next", &self.next())
-            .field("new_allocation", &self.new_allocation())
             .finish()
     }
 }
 
 impl CachedArena {
-    fn new(next: *mut u8, new_allocation: bool) -> CachedArena {
-        CachedArena {
-            tagged_next: if new_allocation {
-                next as usize | 1
-            } else {
-                next as usize
-            },
-        }
+    fn new(next: *mut u8) -> CachedArena {
+        CachedArena { next }
     }
 
     fn next(self) -> *mut u8 {
-        (self.tagged_next & !1) as _
-    }
-
-    fn new_allocation(self) -> bool {
-        self.tagged_next & 1 == 1
+        self.next as _
     }
 
     fn null() -> CachedArena {
-        CachedArena { tagged_next: 0 }
+        CachedArena { next: ptr::null() }
     }
     fn is_null(self) -> bool {
-        self.tagged_next == 0
+        self.next == ptr::null()
     }
 }
 

@@ -49,9 +49,10 @@ pub(crate) struct TypeState {
 impl Debug for TypeState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct(&format!("TypeState::{}", self.type_info.type_name))
-            .field("arenas", unsafe { &*self.arenas.get() })
+            .field("invariant_id", &self.invariant_id.get())
             .field("pending", unsafe { &*self.pending.get() })
             .field("collection", unsafe { &*self.state.get() })
+            .field("arenas", unsafe { &*self.arenas.get() })
             .finish()
     }
 }
@@ -85,25 +86,28 @@ impl TypeState {
             grey.extend(msgs.into_iter().filter_map(|msg| match msg {
                 WorkerMsg::Start { invariant_id, next } => {
                     log::info!(
-                        "GC received from thread: {:?}: {:?}",
+                        "GC received from thread: {:?}: {:?}, header: {:?}",
                         thread_id,
-                        WorkerMsg::Start { invariant_id, next }
+                        WorkerMsg::Start { invariant_id, next },
+                        HeaderUnTyped::from(next),
                     );
+
+                    // If a collection is in progress, we keep track of pending arenas.
                     if let Some(cycle) = state {
-                        if cycle.handler.invariant.id == invariant_id {
+                        debug_assert_eq!(cycle.handler.invariant.id, cycle.handler.invariant.id);
+                        if invariant_id == cycle.handler.invariant.id {
                             pending
                                 .arenas
                                 .insert(HeaderUnTyped::from(next), pending.epoch);
                         } else {
+                            // Arena was started prior to the worker hearing about the new invariant.
                             cycle.latest_grey = pending.epoch;
-                            pending.known_grey += 1;
                         }
-                    } else {
-                        if invariant_id != 0 {
-                            pending.arenas.insert(HeaderUnTyped::from(next), 0);
-                        } else {
-                            pending.known_grey += 1;
-                        };
+                    };
+
+                    if invariant_id != self.invariant_id.get() {
+                        pending.known_grey += 1;
+                        log::trace!("Added to pending.known_grey: {}", pending.known_grey);
                     };
 
                     None
@@ -151,7 +155,7 @@ impl TypeState {
                     // Option::map makes the borrow checker unhappy.
                     let ret = if let Some(cycle) = state {
                         debug_assert_eq!(cycle.handler.invariant.id, self.invariant_id.get());
-                        if cycle.handler.invariant.id == invariant_id || invariant_id == 0 {
+                        if cycle.handler.invariant.id == invariant_id {
                             if !new_allocation {
                                 pending.arenas.remove(&header);
                             };
@@ -170,13 +174,9 @@ impl TypeState {
                         None
                     };
 
-                    if !new_allocation
-                        && !transient
-                        && invariant_id != self.invariant_id.get()
-                        && invariant_id != 0
-                        && arenas.worker.contains_key(&header)
-                    {
+                    if !transient && invariant_id != self.invariant_id.get() {
                         pending.known_grey -= 1;
+                        log::trace!("Subtracted from pending.known_grey: {}", pending.known_grey);
                     };
 
                     if release_to_gc {
@@ -185,7 +185,7 @@ impl TypeState {
                             .remove(&header)
                             .map(|(_, t)| t)
                             .unwrap_or_else(|| {
-                                debug_assert!(new_allocation);
+                                debug_assert!(transient);
                                 (header as usize
                                     + HeaderUnTyped::high_offset(
                                         self.type_info.align,
@@ -230,6 +230,19 @@ impl TypeState {
 
                     ret
                 }
+                // These are formerly cached arenas.
+                WorkerMsg::Release(next) => {
+                    let header = HeaderUnTyped::from(next);
+                    let (nxt, top) = arenas.worker.remove(&header).unwrap_or_else(|| {
+                        panic!("Cached Arena: {:?} not found in arenas.worker", next)
+                    });
+                    debug_assert_eq!(next, nxt as _);
+
+                    let p = arenas.partial.insert(header, (nxt, top));
+                    debug_assert!(p.is_none());
+
+                    None
+                }
             }));
 
             log::trace!("Messages handled");
@@ -237,8 +250,11 @@ impl TypeState {
             if !self.sent_invariant.get() {
                 let inv = Msg::Invariant(
                     state
-                        .as_ref()
-                        .map(|cycle| cycle.handler.invariant)
+                        .as_mut()
+                        .map(|cycle| {
+                            cycle.latest_grey = pending.epoch;
+                            cycle.handler.invariant
+                        })
                         .unwrap_or_else(|| Invariant::none(self.invariant_id.get())),
                 );
 
@@ -461,7 +477,6 @@ struct Pending {
     /// Known grey do not uphold any `Collection` variant.
     known_grey: usize,
     /// `Arena.Header` started after `epoch`.
-    /// `pending` is mutually exclusive with `pending_known_grey`.
     /// A arena `*const u8` cannot have a entry in `pending` and `pending_known_grey`.
     arenas: HashMap<*const HeaderUnTyped, usize>,
 }
