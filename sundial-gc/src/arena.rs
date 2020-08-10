@@ -648,7 +648,7 @@ fn low_offset_test() {
 
 #[test]
 fn header_from_test() {
-    assert_eq!(
+    assert_ne!(
         HeaderUnTyped::from(0x7fcc200dd918u64 as _),
         HeaderUnTyped::from(0x7fcc200d7778u64 as _)
     )
