@@ -27,9 +27,6 @@ pub fn reduce(bus: &mut SmallVec<[Msg; 8]>) -> SmallVec<[WorkerMsg; 8]> {
         })
         .collect();
 
-    bus.sort();
-    wms.sort();
-
     wms
 }
 

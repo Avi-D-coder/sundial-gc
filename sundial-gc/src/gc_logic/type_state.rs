@@ -35,7 +35,7 @@ pub(crate) struct TypeState {
     /// TODO(optimization) delay sending invariant.
     pub invariant_id: Cell<u8>,
     pub arenas: UnsafeCell<Arenas>,
-    pending: UnsafeCell<Pending>,
+    pub pending: UnsafeCell<Pending>,
     // TODO support multiple simultaneous cycles.
     pub state: UnsafeCell<Option<Collection>>,
     pub relations: UnsafeCell<ActiveRelations>,
@@ -80,207 +80,51 @@ impl TypeState {
 
         buses
             .iter_mut()
-            .for_each(|(thread_id, (bus, count, worker_known_invariant))| {
-                let msgs = bus::reduce(&mut bus.lock().expect("Could not unlock bus"));
-                log::trace!("Thread: {:?}, received: {:?}", thread_id, msgs);
-
-                grey.extend(msgs.into_iter().filter_map(|msg| match msg {
-                    WorkerMsg::Start { invariant_id, next } => {
-                        log::info!(
-                            "GC received from thread: {:?}: {:?}, header: {:?}",
-                            thread_id,
-                            WorkerMsg::Start { invariant_id, next },
-                            HeaderUnTyped::from(next),
-                        );
-
-                        // If a collection is in progress, we keep track of pending arenas.
-                        if let Some(cycle) = state {
-                            debug_assert_eq!(
-                                cycle.handler.invariant.id,
-                                cycle.handler.invariant.id
-                            );
-                            if invariant_id == cycle.handler.invariant.id {
-                                pending
-                                    .arenas
-                                    .insert(HeaderUnTyped::from(next), pending.epoch);
-                            } else {
-                                // Arena was started prior to the worker hearing about the new invariant.
-                                cycle.latest_grey = pending.epoch;
-                            }
-                        };
-
-                        if invariant_id != self.invariant_id.get() {
-                            pending.known_grey += 1;
-                            log::trace!("Added to pending.known_grey: {}", pending.known_grey);
-                        };
-
-                        None
-                    }
-
-                    m
-                    @
-                    WorkerMsg::End {
-                        release_to_gc,
-                        new_allocation,
-                        next,
-                        grey_fields,
-                        invariant_id,
-                        transient,
-                    } => {
-                        let header = HeaderUnTyped::from(next);
-
-                        log::info!(
-                            "GC received from thread: {:?}: {:?}, header: {:?}",
-                            thread_id,
-                            m,
-                            header
-                        );
-
-                        // fn debug() {}
-                        // #[cfg(debug)]
-                        let debug = || {
-                            let slots = &mut *self.slots.get();
-                            let lowest = if next == header as _ {
-                                header as usize
-                                    + HeaderUnTyped::low_offset(self.type_info.align) as usize
-                            } else {
-                                next as usize + self.type_info.size as usize
-                            };
-                            let high = header as usize
-                                + HeaderUnTyped::high_offset(
-                                    self.type_info.align,
-                                    self.type_info.size,
-                                ) as usize;
-                            for ptr in (lowest..=high).step_by(self.type_info.size as usize) {
-                                slots.insert(ptr as _, self.type_info.needs_drop);
-                            }
-                        };
-
-                        debug();
-
-                        // Option::map makes the borrow checker unhappy.
-                        let ret = if let Some(cycle) = state {
-                            debug_assert_eq!(cycle.handler.invariant.id, self.invariant_id.get());
-                            if cycle.handler.invariant.id == invariant_id {
-                                if !new_allocation {
-                                    pending.arenas.remove(&header);
-                                };
-
-                                // Nothing was marked.
-                                // Allocated objects contain no condemned pointers into the white set.
-                                if grey_fields == 0b0000_0000 {
-                                    None
-                                } else {
-                                    Some((next, grey_fields))
-                                }
-                            } else {
-                                Some((next, 0b1111_1111))
-                            }
-                        } else {
-                            None
-                        };
-
-                        if !transient && invariant_id != self.invariant_id.get() {
-                            pending.known_grey -= 1;
-                            log::trace!(
-                                "Subtracted from pending.known_grey: {}",
-                                pending.known_grey
-                            );
-                        };
-
-                        if release_to_gc {
-                            let top = arenas
-                                .worker
-                                .remove(&header)
-                                .map(|(_, t)| t)
-                                .unwrap_or_else(|| {
-                                    debug_assert!(transient);
-                                    (header as usize
-                                        + HeaderUnTyped::high_offset(
-                                            self.type_info.align,
-                                            self.type_info.size,
-                                        ) as usize) as _
-                                });
-
-                            if full(next, self.type_info.align) {
-                                log::trace!("Full Arena released: header: {:?}", header);
-                                arenas.full.insert(header, top);
-                            } else {
-                                log::trace!(
-                                    "Non full Arena released: header {:?}, next: {:?}",
-                                    header,
-                                    next
-                                );
-                                arenas.partial.insert(header, (next, top));
-                            };
-
-                            if !new_allocation {
-                                // FIXME this should not be needed
-                                *count = count.saturating_sub(1);
-                            };
-                        } else {
-                            // store active worker arenas
-                            arenas
-                                .worker
-                                .entry(HeaderUnTyped::from(next))
-                                .and_modify(|(n, _)| *n = next)
-                                .or_insert({
-                                    *count += 1;
-                                    (
-                                        next,
-                                        (HeaderUnTyped::from(next) as usize
-                                            + HeaderUnTyped::high_offset(
-                                                self.type_info.align,
-                                                self.type_info.size,
-                                            )
-                                                as usize)
-                                            as _,
-                                    )
-                                });
-                        };
-
-                        ret
-                    }
-                    // These are formerly cached arenas.
-                    WorkerMsg::Release(next) => {
-                        let header = HeaderUnTyped::from(next);
-                        let (nxt, top) = arenas.worker.remove(&header).unwrap_or_else(|| {
-                            panic!("Cached Arena: {:?} not found in arenas.worker", next)
-                        });
-                        debug_assert_eq!(next, nxt as _);
-
-                        let p = arenas.partial.insert(header, (nxt, top));
-                        debug_assert!(p.is_none());
-
-                        None
-                    }
-                }));
-
-                log::trace!("Messages handled");
-
-                if *worker_known_invariant != self.invariant_id.get() {
-                    *worker_known_invariant = self.invariant_id.get();
-
-                    let inv = Msg::Invariant(
-                        state
-                            .as_mut()
-                            .map(|cycle| {
-                                cycle.latest_grey = pending.epoch;
-                                cycle.handler.invariant
-                            })
-                            .unwrap_or_else(|| Invariant::none(self.invariant_id.get())),
-                    );
-
+            .for_each(|(thread_id, (bus, _count, worker_known_invariant))| {
+                let msgs = {
                     let mut bus = bus.lock().expect("Could not unlock bus");
-                    // Send invariant replacing invariant currently on bus if it exists.
-                    if let Some(slot) = bus.iter_mut().find(|msg| msg.is_invariant()) {
-                        *slot = inv
-                    } else {
-                        bus.push(inv)
+                    let msgs = bus::reduce(&mut bus);
+
+                    if *worker_known_invariant != self.invariant_id.get() {
+                        *worker_known_invariant = self.invariant_id.get();
+
+                        let inv = Msg::Invariant(
+                            state
+                                .as_mut()
+                                .map(|cycle| {
+                                    cycle.latest_grey = pending.epoch;
+                                    cycle.handler.invariant
+                                })
+                                .unwrap_or_else(|| Invariant::none(self.invariant_id.get())),
+                        );
+
+                        // Send invariant replacing invariant currently on bus if it exists.
+                        if let Some(slot) = bus.iter_mut().find(|msg| msg.is_invariant()) {
+                            *slot = inv
+                        } else {
+                            bus.push(inv)
+                        };
+
+                        log::trace!("GC: sent thread {:?}, {:?}", thread_id, inv);
                     };
 
-                    log::trace!("GC sent thread {:?}, {:?}", thread_id, inv);
+                    msgs
                 };
+
+                grey.extend(
+                    msgs.iter().filter_map(|msg| {
+                        self.book_keeping(*msg, *thread_id, state, pending, arenas)
+                    }),
+                );
+
+                log::trace!("GC: Messages handled");
+
+                log::trace!(
+                    "GC: {:?}, worker_known_invariant: {}, self.invariant_id: {}",
+                    thread_id,
+                    worker_known_invariant,
+                    self.invariant_id.get()
+                );
 
                 // if *count < 2 {
                 //     *count += 1;
@@ -369,8 +213,6 @@ impl TypeState {
                 if children_complete {
                     log::trace!("Children complete Collection cleared!");
                     // This will trigger the Invariant::none to be sent to the workers.
-                    self.invariant_id
-                        .set(self.invariant_id.get().checked_add(1).unwrap_or(1));
                     log::trace!("pending.known_grey: {}", pending.known_grey);
                     debug_assert_eq!(pending.known_grey, 0);
                     log::trace!(
@@ -378,8 +220,9 @@ impl TypeState {
                         pending.arenas.len(),
                         pending.arenas
                     );
-                    pending.known_grey = pending.arenas.len();
-                    pending.arenas.clear();
+
+                    self.bump_invariant_id(pending);
+
                     log::trace!("clearing state");
                     cycle.handler.drop();
                     *state = None;
@@ -391,6 +234,249 @@ impl TypeState {
 
         log::trace!("step::done: {:?}", done);
         done
+    }
+
+    unsafe fn book_keeping(
+        &self,
+        msg: WorkerMsg,
+        thread_id: ThreadId,
+        state: &mut Option<Collection>,
+        pending: &mut Pending,
+        arenas: &mut Arenas,
+    ) -> Option<(*const u8, u8)> {
+        fn small<K, V>(s: &HashMap<K, V>) -> Option<&HashMap<K, V>> {
+            if s.len() < 20 {
+                Some(s)
+            } else {
+                None
+            }
+        }
+
+        log::trace!(
+            "GC: prior:\n
+            lastest_grey: {:?},\n
+            pending.known_grey: {},\n
+            pending.known_grey_arenas.len: {},\n
+            pending.known_grey_arenas: {:?},\n
+            pending.arenas.len: {},\n
+            pending.arenas: {:?}",
+            state.as_ref().map(|c| c.latest_grey),
+            pending.known_grey,
+            pending.known_grey_arenas.len(),
+            small(&pending.known_grey_arenas),
+            pending.arenas.len(),
+            small(&pending.arenas),
+        );
+        let ret = match msg {
+            WorkerMsg::Start { invariant_id, next } => {
+                log::info!(
+                    "GC received from thread: {:?}: {:?}, header: {:?}",
+                    thread_id,
+                    WorkerMsg::Start { invariant_id, next },
+                    HeaderUnTyped::from(next),
+                );
+
+                // If a collection is in progress, we keep track of pending arenas.
+                if let Some(cycle) = state {
+                    debug_assert_eq!(cycle.handler.invariant.id, self.invariant_id.get());
+                    if invariant_id != cycle.handler.invariant.id {
+                        // Arena was started prior to the worker hearing about the new invariant.
+                        cycle.latest_grey = pending.epoch;
+                    }
+                };
+
+                if invariant_id != self.invariant_id.get() {
+                    let epoch = pending.epoch;
+                    pending.known_grey += 1;
+                    pending
+                        .known_grey_arenas
+                        .entry(HeaderUnTyped::from(next))
+                        .and_modify(|em| {
+                            em.0 = epoch;
+                            em.1 += 1
+                        })
+                        .or_insert((epoch, 1));
+                    log::trace!("Added to pending.known_grey: {}", pending.known_grey);
+                } else if invariant_id == self.invariant_id.get() {
+                    let epoch = pending.epoch;
+                    pending
+                        .arenas
+                        .entry(HeaderUnTyped::from(next))
+                        .and_modify(|em| {
+                            em.0 = epoch;
+                            em.1 += 1
+                        })
+                        .or_insert((epoch, 1));
+                };
+
+                None
+            }
+
+            m
+            @
+            WorkerMsg::End {
+                release_to_gc,
+                next,
+                grey_fields,
+                invariant_id,
+                transient,
+                ..
+            } => {
+                let header = HeaderUnTyped::from(next);
+
+                log::info!(
+                    "GC received from thread: {:?}: {:?}, header: {:?}",
+                    thread_id,
+                    m,
+                    header
+                );
+
+                // fn debug() {}
+                // #[cfg(debug)]
+                let debug = || {
+                    let slots = &mut *self.slots.get();
+                    let lowest = if next == header as _ {
+                        header as usize + HeaderUnTyped::low_offset(self.type_info.align) as usize
+                    } else {
+                        next as usize + self.type_info.size as usize
+                    };
+                    let high = header as usize
+                        + HeaderUnTyped::high_offset(self.type_info.align, self.type_info.size)
+                            as usize;
+                    for ptr in (lowest..=high).step_by(self.type_info.size as usize) {
+                        slots.insert(ptr as _, self.type_info.needs_drop);
+                    }
+                };
+
+                debug();
+
+                // Option::map makes the borrow checker unhappy.
+                let ret = if let Some(cycle) = state {
+                    debug_assert_eq!(cycle.handler.invariant.id, self.invariant_id.get());
+                    if cycle.handler.invariant.id == invariant_id {
+                        // Nothing was marked.
+                        // Allocated objects contain no condemned pointers into the white set.
+                        if grey_fields == 0b0000_0000 {
+                            None
+                        } else {
+                            Some((next, grey_fields))
+                        }
+                    } else {
+                        Some((next, 0b1111_1111))
+                    }
+                } else {
+                    None
+                };
+
+                if !transient {
+                    if invariant_id == self.invariant_id.get() {
+                        let (_, multiplicity) = pending.arenas.get_mut(&header).unwrap();
+                        *multiplicity -= 1;
+
+                        if *multiplicity == 0 {
+                            pending.arenas.remove(&header);
+                        };
+                    } else {
+                        pending.known_grey -= 1;
+                        let (_, multiplicity) = pending.known_grey_arenas.get_mut(&header).unwrap();
+                        *multiplicity -= 1;
+
+                        log::trace!("multiplicity: {}", multiplicity);
+                        if *multiplicity == 0 {
+                            let r = pending.known_grey_arenas.remove(&header);
+                            debug_assert!(r.is_some())
+                        };
+                    };
+                };
+
+                if release_to_gc {
+                    let top = arenas
+                        .worker
+                        .remove(&header)
+                        .map(|(_, t)| t)
+                        .unwrap_or_else(|| {
+                            debug_assert!(transient);
+                            (header as usize
+                                + HeaderUnTyped::high_offset(
+                                    self.type_info.align,
+                                    self.type_info.size,
+                                ) as usize) as _
+                        });
+
+                    if full(next, self.type_info.align) {
+                        arenas.full.insert(header, top);
+                    } else {
+                        arenas.partial.insert(header, (next, top));
+                    };
+                } else {
+                    // store active worker arenas
+                    arenas
+                        .worker
+                        .entry(HeaderUnTyped::from(next))
+                        .and_modify(|(n, _)| *n = next)
+                        .or_insert({
+                            (
+                                next,
+                                (HeaderUnTyped::from(next) as usize
+                                    + HeaderUnTyped::high_offset(
+                                        self.type_info.align,
+                                        self.type_info.size,
+                                    ) as usize) as _,
+                            )
+                        });
+                };
+
+                ret
+            }
+            // These are formerly cached arenas.
+            WorkerMsg::Release(next) => {
+                let header = HeaderUnTyped::from(next);
+                let (nxt, top) = arenas.worker.remove(&header).unwrap_or_else(|| {
+                    panic!("Cached Arena: {:?} not found in arenas.worker", next)
+                });
+                debug_assert_eq!(next, nxt as _);
+
+                let p = arenas.partial.insert(header, (nxt, top));
+                debug_assert!(p.is_none());
+
+                None
+            }
+        };
+
+        log::trace!(
+            "GC: after:\n
+            lastest_grey: {:?},\n
+            pending.known_grey: {},\n
+            pending.known_grey_arenas.len: {},\n
+            pending.known_grey_arenas: {:?},\n
+            pending.arenas.len: {},\n
+            pending.arenas: {:?}",
+            state.as_ref().map(|c| c.latest_grey),
+            pending.known_grey,
+            pending.known_grey_arenas.len(),
+            small(&pending.known_grey_arenas),
+            pending.arenas.len(),
+            small(&pending.arenas),
+        );
+
+        ret
+    }
+
+    pub fn bump_invariant_id(&self, pending: &mut Pending) -> u8 {
+        let invariant_id = self.invariant_id.get().checked_add(1).unwrap_or(1);
+        self.invariant_id.set(invariant_id);
+
+        pending.known_grey = pending.arenas.len();
+        let Pending {
+            arenas,
+            known_grey_arenas,
+            ..
+        } = pending;
+        arenas.drain().for_each(|(header, em)| {
+            let had = known_grey_arenas.insert(header, em);
+            debug_assert!(had.is_none());
+        });
+        invariant_id
     }
 
     unsafe fn drop_arena(&self, next: *mut u8, top: *const u8, free: &mut FreeList) {
@@ -467,28 +553,35 @@ impl TypeState {
 
         let pending = &mut *self.pending.get();
         pending.epoch = 0;
-        pending.arenas.iter_mut().for_each(|(_, epoch)| *epoch = 1);
+        pending
+            .arenas
+            .iter_mut()
+            .for_each(|(_, em)| *em = (1, em.1));
     }
 }
 
 #[derive(Debug)]
-struct Pending {
+pub(crate) struct Pending {
     /// `epoch` is not synchronized across threads.
     /// 2 epochs delineate Arena age.
     /// 2 epoch are needed, since thread A may receive a GCed object from thread B in between the
     ///   GC reading A & B's messages.
     /// A's `Msg::Start` may be received in the next epoch after B's `Msg::End`.
     /// `epoch` counts from 1, and resets when free is accomplished.
-    epoch: usize,
+    pub epoch: usize,
     // transitive_epoch: usize,
     /// Count of Arenas started before transitive_epoch.
     // known_transitive_grey: usize,
     /// Count of Arenas that are not a part of a `Collection` cycle.
     /// Known grey do not uphold any `Collection` variant.
     known_grey: usize,
+    /// This should not be needed.
+    /// Header => (epoch, multiplicity)
+    known_grey_arenas: HashMap<*const HeaderUnTyped, (usize, usize)>,
     /// `Arena.Header` started after `epoch`.
-    /// A arena `*const u8` cannot have a entry in `pending` and `pending_known_grey`.
-    arenas: HashMap<*const HeaderUnTyped, usize>,
+    /// A arena `*const u8` cannot have a entry in `pending` and `known_grey`.
+    /// Header => (epoch, multiplicity)
+    arenas: HashMap<*const HeaderUnTyped, (usize, usize)>,
 }
 
 /// A single collection cycle.
@@ -516,6 +609,7 @@ impl Debug for Collection {
 impl Collection {
     // TODO add granular cycles.
     pub fn new(
+        epoch: usize,
         type_info: &GcTypeInfo,
         relations: &ActiveRelations,
         free: &mut FreeList,
@@ -576,7 +670,7 @@ impl Collection {
                 evacuate_fn,
                 last_nexts,
             },
-            latest_grey: 0,
+            latest_grey: epoch,
             condemned,
             waiting_transitive_parents: SmallVec::new(),
             waiting_transitive: false,
@@ -619,13 +713,13 @@ impl Collection {
             self.latest_grey,
             pending.epoch
         );
-        pending.known_grey == 0
+        pending.known_grey_arenas.is_empty()
             && self.latest_grey < pending.epoch - 2
             && pending
                 .arenas
                 .values()
                 .cloned()
-                .all(|epoch| epoch > self.latest_grey + 2)
+                .all(|(epoch, _)| epoch > self.latest_grey + 2)
     }
 
     /// Evacuate rooted objects from condemned `Arenas`.
@@ -991,6 +1085,7 @@ impl TotalRelations {
                     // transitive_epoch: 0,
                     // known_transitive_grey: 0,
                     known_grey: 0,
+                    known_grey_arenas: Default::default(),
                     arenas: Default::default(),
                 }),
                 state: UnsafeCell::new(None),

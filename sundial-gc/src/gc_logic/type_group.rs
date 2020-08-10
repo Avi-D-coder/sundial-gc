@@ -124,15 +124,14 @@ impl TypeGroup {
 
         related.iter().for_each(|ts| {
             // 0 is null.
-            ts.invariant_id
-                .set(ts.invariant_id.get().checked_add(1).unwrap_or(1));
-
             let state = unsafe { &mut *ts.state.get() };
             let arenas = unsafe { &mut *ts.arenas.get() };
             let relations = unsafe { &mut *ts.relations.get() };
+            let pending = unsafe { &mut *ts.pending.get() };
 
+            let invariant_id = ts.bump_invariant_id(pending);
             let mut collection =
-                Collection::new(&ts.type_info, relations, free, ts.invariant_id.get());
+                Collection::new(pending.epoch, &ts.type_info, relations, free, invariant_id);
             log::trace!("{:?}", collection);
 
             if let Some(Collection {
