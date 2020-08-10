@@ -239,7 +239,7 @@ impl<T: Trace> Drop for Arena<T> {
                 let last_release_to_gc = match cached_arenas.put::<T>(last_next as _) {
                     CacheStatus::Cached(cached_next) => {
                         log::trace!(
-                            "WORKER: releasing cached Arena header: {:?}, next: {:?}",
+                            "WORKER: releasing cached Arena block, header: {:?}, next: {:?}",
                             last_header,
                             last_next
                         );
@@ -249,11 +249,6 @@ impl<T: Trace> Drop for Arena<T> {
                         false
                     }
                     CacheStatus::Err => {
-                        log::trace!(
-                            "WORKER: releasing Arena header: {:?}, next: {:?}",
-                            last_header,
-                            last_next
-                        );
                         // We didn't cache it so the arena is released to the GC.
                         true
                     }
@@ -322,6 +317,7 @@ impl<T: Trace> Drop for Arena<T> {
                 match msg {
                     Some(Msg::Worker(WorkerMsg::Start { next: nxt, .. })) => {
                         if header == HeaderUnTyped::from(*nxt) {
+                            debug_assert!(next <= *nxt as _);
                             let end = end(true);
 
                             log::trace!(
