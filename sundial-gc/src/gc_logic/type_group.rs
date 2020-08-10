@@ -126,7 +126,6 @@ impl TypeGroup {
             // 0 is null.
             ts.invariant_id
                 .set(ts.invariant_id.get().checked_add(1).unwrap_or(1));
-            ts.sent_invariant.set(false);
 
             let state = unsafe { &mut *ts.state.get() };
             let arenas = unsafe { &mut *ts.arenas.get() };

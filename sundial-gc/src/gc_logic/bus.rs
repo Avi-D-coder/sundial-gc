@@ -1,4 +1,4 @@
-use crate::{arena::HeaderUnTyped, mark::Invariant};
+use crate::mark::Invariant;
 use smallvec::SmallVec;
 use std::ops::Deref;
 use std::{cmp, sync::Mutex};
@@ -12,7 +12,6 @@ pub fn send(bus: &mut SmallVec<[Msg; 8]>, msg: Msg) -> usize {
 }
 
 /// Removes `Msg::Slot`s and `Msg::Worker`s.
-/// Returns merged `WorkerMsg`s.
 pub fn reduce(bus: &mut SmallVec<[Msg; 8]>) -> SmallVec<[WorkerMsg; 8]> {
     let mut wms: SmallVec<[WorkerMsg; 8]> = SmallVec::new();
 
@@ -31,23 +30,7 @@ pub fn reduce(bus: &mut SmallVec<[Msg; 8]>) -> SmallVec<[WorkerMsg; 8]> {
     bus.sort();
     wms.sort();
 
-    log::trace!("Worker messages: {:?}", wms);
-
-    let mut v = SmallVec::new();
-    wms.iter().for_each(|b: &WorkerMsg| {
-        if let Some(Ok(m)) = v.last().map(|a: &WorkerMsg| (*a).try_merge(*b)) {
-            log::trace!(
-                "Merged:\n  a: {:?},\n  b: {:?},\n=>{:?}",
-                v.last().unwrap(),
-                b,
-                m
-            );
-            *v.last_mut().unwrap() = m;
-        } else {
-            v.push(*b)
-        }
-    });
-    v
+    wms
 }
 
 #[derive(Copy, Clone)]
@@ -154,53 +137,31 @@ impl Ord for WorkerMsg {
                 WorkerMsg::End {
                     next: a,
                     invariant_id: ai,
-                    transient: tb,
+                    transient: at,
+                    release_to_gc: ar,
                     ..
                 },
                 WorkerMsg::End {
                     next: b,
                     invariant_id: bi,
-                    transient: ta,
+                    transient: bt,
+                    release_to_gc: br,
                     ..
                 },
-            ) => match cmp::Reverse(a).cmp(&cmp::Reverse(b)) {
-                cmp::Ordering::Equal => match (ta, tb) {
-                    (true, false) => cmp::Ordering::Less,
-                    (false, true) => cmp::Ordering::Greater,
-                    _ => ai.cmp(bi),
+            ) => match ai.cmp(bi) {
+                cmp::Ordering::Equal => match (ar, br) {
+                    (true, false) => cmp::Ordering::Greater,
+                    (false, true) => cmp::Ordering::Less,
+                    _ => match (at, bt) {
+                        (true, false) => cmp::Ordering::Greater,
+                        (false, true) => cmp::Ordering::Less,
+                        _ => cmp::Reverse(a).cmp(&cmp::Reverse(b)),
+                    },
                 },
                 o => o,
             },
-            (
-                WorkerMsg::End {
-                    next: a, transient, ..
-                },
-                WorkerMsg::Start { next: b, .. },
-            ) => match cmp::Reverse(a).cmp(&cmp::Reverse(b)) {
-                cmp::Ordering::Equal => {
-                    if *transient {
-                        cmp::Ordering::Less
-                    } else {
-                        cmp::Ordering::Greater
-                    }
-                }
-                o => o,
-            },
-            (
-                WorkerMsg::Start { next: a, .. },
-                WorkerMsg::End {
-                    next: b, transient, ..
-                },
-            ) => match cmp::Reverse(a).cmp(&cmp::Reverse(b)) {
-                cmp::Ordering::Equal => {
-                    if *transient {
-                        cmp::Ordering::Greater
-                    } else {
-                        cmp::Ordering::Less
-                    }
-                }
-                o => o,
-            },
+            (WorkerMsg::End { .. }, WorkerMsg::Start { .. }) => cmp::Ordering::Greater,
+            (WorkerMsg::Start { .. }, WorkerMsg::End { .. }) => cmp::Ordering::Less,
             (
                 WorkerMsg::Start {
                     next: a,
@@ -212,51 +173,14 @@ impl Ord for WorkerMsg {
                     invariant_id: bi,
                     ..
                 },
-            ) => match cmp::Reverse(a).cmp(&cmp::Reverse(b)) {
-                cmp::Ordering::Equal => ai.cmp(bi),
+            ) => match ai.cmp(bi) {
+                cmp::Ordering::Equal => cmp::Reverse(a).cmp(&cmp::Reverse(b)),
                 o => o,
             },
 
             (WorkerMsg::Release(a), WorkerMsg::Release(b)) => cmp::Reverse(a).cmp(&cmp::Reverse(b)),
             (WorkerMsg::Release(_), _) => cmp::Ordering::Greater,
             (_, WorkerMsg::Release(_)) => cmp::Ordering::Less,
-        }
-    }
-}
-
-impl WorkerMsg {
-    pub fn try_merge(self, b: WorkerMsg) -> Result<WorkerMsg, (WorkerMsg, WorkerMsg)> {
-        match (self, b) {
-            (
-                WorkerMsg::Start {
-                    invariant_id,
-                    next: nxt,
-                },
-                WorkerMsg::End {
-                    new_allocation,
-                    release_to_gc,
-                    grey_fields,
-                    invariant_id: id,
-                    next,
-                    transient: false,
-                    ..
-                },
-            ) => {
-                if invariant_id == id && HeaderUnTyped::from(next) == HeaderUnTyped::from(nxt) {
-                    Ok(WorkerMsg::End {
-                        release_to_gc,
-                        new_allocation,
-                        next,
-                        grey_fields,
-                        invariant_id,
-                        transient: true,
-                    })
-                } else {
-                    Err((self, b))
-                }
-            }
-
-            _ => Err((self, b)),
         }
     }
 }

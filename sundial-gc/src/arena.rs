@@ -409,11 +409,12 @@ impl<T: Immutable + Trace> Arena<T> {
         let mut bus = bus.lock().expect("Could not unlock bus");
 
         // Update invariant
-        bus.iter_mut().enumerate().for_each(|(_, msg)| {
+        bus.iter_mut().for_each(|msg| {
             if let Msg::Invariant(inv) = msg {
+                log::trace!("Worker knows of {:?}", inv);
                 *known_invariant = *inv;
                 *msg = Msg::Slot;
-            }
+            };
         });
 
         let (next, new_allocation) = if let Some(n) = cached_arenas.get::<T>() {

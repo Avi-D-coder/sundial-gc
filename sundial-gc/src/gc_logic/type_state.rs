@@ -29,11 +29,10 @@ use std::{
 /// `RelatedTypeStates` will implement `Send`
 pub(crate) struct TypeState {
     pub(crate) type_info: GcTypeInfo,
-    /// Map worker thread => (Bus, worker arena count).
-    buses: UnsafeCell<HashMap<ThreadId, (BusPtr, usize)>>,
+    /// Map worker thread => (Bus, worker arena count, invariant_id).
+    buses: UnsafeCell<HashMap<ThreadId, (BusPtr, usize, u8)>>,
     /// Has the invariant be sent to workers.
     /// TODO(optimization) delay sending invariant.
-    pub sent_invariant: Cell<bool>,
     pub invariant_id: Cell<u8>,
     pub arenas: UnsafeCell<Arenas>,
     pending: UnsafeCell<Pending>,
@@ -79,211 +78,223 @@ impl TypeState {
 
         let mut grey: SmallVec<[(*const u8, u8); 16]> = SmallVec::new();
 
-        buses.iter_mut().for_each(|(thread_id, (bus, count))| {
-            let msgs = bus::reduce(&mut bus.lock().expect("Could not unlock bus"));
-            log::trace!("Thread: {:?}, received: {:?}", thread_id, msgs);
+        buses
+            .iter_mut()
+            .for_each(|(thread_id, (bus, count, worker_known_invariant))| {
+                let msgs = bus::reduce(&mut bus.lock().expect("Could not unlock bus"));
+                log::trace!("Thread: {:?}, received: {:?}", thread_id, msgs);
 
-            grey.extend(msgs.into_iter().filter_map(|msg| match msg {
-                WorkerMsg::Start { invariant_id, next } => {
-                    log::info!(
-                        "GC received from thread: {:?}: {:?}, header: {:?}",
-                        thread_id,
-                        WorkerMsg::Start { invariant_id, next },
-                        HeaderUnTyped::from(next),
-                    );
+                grey.extend(msgs.into_iter().filter_map(|msg| match msg {
+                    WorkerMsg::Start { invariant_id, next } => {
+                        log::info!(
+                            "GC received from thread: {:?}: {:?}, header: {:?}",
+                            thread_id,
+                            WorkerMsg::Start { invariant_id, next },
+                            HeaderUnTyped::from(next),
+                        );
 
-                    // If a collection is in progress, we keep track of pending arenas.
-                    if let Some(cycle) = state {
-                        debug_assert_eq!(cycle.handler.invariant.id, cycle.handler.invariant.id);
-                        if invariant_id == cycle.handler.invariant.id {
-                            pending
-                                .arenas
-                                .insert(HeaderUnTyped::from(next), pending.epoch);
-                        } else {
-                            // Arena was started prior to the worker hearing about the new invariant.
-                            cycle.latest_grey = pending.epoch;
-                        }
-                    };
-
-                    if invariant_id != self.invariant_id.get() {
-                        pending.known_grey += 1;
-                        log::trace!("Added to pending.known_grey: {}", pending.known_grey);
-                    };
-
-                    None
-                }
-
-                m
-                @
-                WorkerMsg::End {
-                    release_to_gc,
-                    new_allocation,
-                    next,
-                    grey_fields,
-                    invariant_id,
-                    transient,
-                } => {
-                    let header = HeaderUnTyped::from(next);
-
-                    log::info!(
-                        "GC received from thread: {:?}: {:?}, header: {:?}",
-                        thread_id,
-                        m,
-                        header
-                    );
-
-                    // fn debug() {}
-                    // #[cfg(debug)]
-                    let debug = || {
-                        let slots = &mut *self.slots.get();
-                        let lowest = if next == header as _ {
-                            header as usize
-                                + HeaderUnTyped::low_offset(self.type_info.align) as usize
-                        } else {
-                            next as usize + self.type_info.size as usize
-                        };
-                        let high = header as usize
-                            + HeaderUnTyped::high_offset(self.type_info.align, self.type_info.size)
-                                as usize;
-                        for ptr in (lowest..=high).step_by(self.type_info.size as usize) {
-                            slots.insert(ptr as _, self.type_info.needs_drop);
-                        }
-                    };
-
-                    debug();
-
-                    // Option::map makes the borrow checker unhappy.
-                    let ret = if let Some(cycle) = state {
-                        debug_assert_eq!(cycle.handler.invariant.id, self.invariant_id.get());
-                        if cycle.handler.invariant.id == invariant_id {
-                            if !new_allocation {
-                                pending.arenas.remove(&header);
-                            };
-
-                            // Nothing was marked.
-                            // Allocated objects contain no condemned pointers into the white set.
-                            if grey_fields == 0b0000_0000 {
-                                None
+                        // If a collection is in progress, we keep track of pending arenas.
+                        if let Some(cycle) = state {
+                            debug_assert_eq!(
+                                cycle.handler.invariant.id,
+                                cycle.handler.invariant.id
+                            );
+                            if invariant_id == cycle.handler.invariant.id {
+                                pending
+                                    .arenas
+                                    .insert(HeaderUnTyped::from(next), pending.epoch);
                             } else {
-                                Some((next, grey_fields))
+                                // Arena was started prior to the worker hearing about the new invariant.
+                                cycle.latest_grey = pending.epoch;
+                            }
+                        };
+
+                        if invariant_id != self.invariant_id.get() {
+                            pending.known_grey += 1;
+                            log::trace!("Added to pending.known_grey: {}", pending.known_grey);
+                        };
+
+                        None
+                    }
+
+                    m
+                    @
+                    WorkerMsg::End {
+                        release_to_gc,
+                        new_allocation,
+                        next,
+                        grey_fields,
+                        invariant_id,
+                        transient,
+                    } => {
+                        let header = HeaderUnTyped::from(next);
+
+                        log::info!(
+                            "GC received from thread: {:?}: {:?}, header: {:?}",
+                            thread_id,
+                            m,
+                            header
+                        );
+
+                        // fn debug() {}
+                        // #[cfg(debug)]
+                        let debug = || {
+                            let slots = &mut *self.slots.get();
+                            let lowest = if next == header as _ {
+                                header as usize
+                                    + HeaderUnTyped::low_offset(self.type_info.align) as usize
+                            } else {
+                                next as usize + self.type_info.size as usize
+                            };
+                            let high = header as usize
+                                + HeaderUnTyped::high_offset(
+                                    self.type_info.align,
+                                    self.type_info.size,
+                                ) as usize;
+                            for ptr in (lowest..=high).step_by(self.type_info.size as usize) {
+                                slots.insert(ptr as _, self.type_info.needs_drop);
+                            }
+                        };
+
+                        debug();
+
+                        // Option::map makes the borrow checker unhappy.
+                        let ret = if let Some(cycle) = state {
+                            debug_assert_eq!(cycle.handler.invariant.id, self.invariant_id.get());
+                            if cycle.handler.invariant.id == invariant_id {
+                                if !new_allocation {
+                                    pending.arenas.remove(&header);
+                                };
+
+                                // Nothing was marked.
+                                // Allocated objects contain no condemned pointers into the white set.
+                                if grey_fields == 0b0000_0000 {
+                                    None
+                                } else {
+                                    Some((next, grey_fields))
+                                }
+                            } else {
+                                Some((next, 0b1111_1111))
                             }
                         } else {
-                            Some((next, 0b1111_1111))
-                        }
-                    } else {
-                        None
-                    };
+                            None
+                        };
 
-                    if !transient && invariant_id != self.invariant_id.get() {
-                        pending.known_grey -= 1;
-                        log::trace!("Subtracted from pending.known_grey: {}", pending.known_grey);
-                    };
-
-                    if release_to_gc {
-                        let top = arenas
-                            .worker
-                            .remove(&header)
-                            .map(|(_, t)| t)
-                            .unwrap_or_else(|| {
-                                debug_assert!(transient);
-                                (header as usize
-                                    + HeaderUnTyped::high_offset(
-                                        self.type_info.align,
-                                        self.type_info.size,
-                                    ) as usize) as _
-                            });
-
-                        if full(next, self.type_info.align) {
-                            log::trace!("Full Arena released: header: {:?}", header);
-                            arenas.full.insert(header, top);
-                        } else {
+                        if !transient && invariant_id != self.invariant_id.get() {
+                            pending.known_grey -= 1;
                             log::trace!(
-                                "Non full Arena released: header {:?}, next: {:?}",
-                                header,
-                                next
+                                "Subtracted from pending.known_grey: {}",
+                                pending.known_grey
                             );
-                            arenas.partial.insert(header, (next, top));
                         };
 
-                        if !new_allocation {
-                            // FIXME this should not be needed
-                            *count = count.saturating_sub(1);
-                        };
-                    } else {
-                        // store active worker arenas
-                        arenas
-                            .worker
-                            .entry(HeaderUnTyped::from(next))
-                            .and_modify(|(n, _)| *n = next)
-                            .or_insert({
-                                *count += 1;
-                                (
-                                    next,
-                                    (HeaderUnTyped::from(next) as usize
+                        if release_to_gc {
+                            let top = arenas
+                                .worker
+                                .remove(&header)
+                                .map(|(_, t)| t)
+                                .unwrap_or_else(|| {
+                                    debug_assert!(transient);
+                                    (header as usize
                                         + HeaderUnTyped::high_offset(
                                             self.type_info.align,
                                             self.type_info.size,
-                                        ) as usize) as _,
-                                )
-                            });
+                                        ) as usize) as _
+                                });
+
+                            if full(next, self.type_info.align) {
+                                log::trace!("Full Arena released: header: {:?}", header);
+                                arenas.full.insert(header, top);
+                            } else {
+                                log::trace!(
+                                    "Non full Arena released: header {:?}, next: {:?}",
+                                    header,
+                                    next
+                                );
+                                arenas.partial.insert(header, (next, top));
+                            };
+
+                            if !new_allocation {
+                                // FIXME this should not be needed
+                                *count = count.saturating_sub(1);
+                            };
+                        } else {
+                            // store active worker arenas
+                            arenas
+                                .worker
+                                .entry(HeaderUnTyped::from(next))
+                                .and_modify(|(n, _)| *n = next)
+                                .or_insert({
+                                    *count += 1;
+                                    (
+                                        next,
+                                        (HeaderUnTyped::from(next) as usize
+                                            + HeaderUnTyped::high_offset(
+                                                self.type_info.align,
+                                                self.type_info.size,
+                                            )
+                                                as usize)
+                                            as _,
+                                    )
+                                });
+                        };
+
+                        ret
+                    }
+                    // These are formerly cached arenas.
+                    WorkerMsg::Release(next) => {
+                        let header = HeaderUnTyped::from(next);
+                        let (nxt, top) = arenas.worker.remove(&header).unwrap_or_else(|| {
+                            panic!("Cached Arena: {:?} not found in arenas.worker", next)
+                        });
+                        debug_assert_eq!(next, nxt as _);
+
+                        let p = arenas.partial.insert(header, (nxt, top));
+                        debug_assert!(p.is_none());
+
+                        None
+                    }
+                }));
+
+                log::trace!("Messages handled");
+
+                if *worker_known_invariant != self.invariant_id.get() {
+                    *worker_known_invariant = self.invariant_id.get();
+
+                    let inv = Msg::Invariant(
+                        state
+                            .as_mut()
+                            .map(|cycle| {
+                                cycle.latest_grey = pending.epoch;
+                                cycle.handler.invariant
+                            })
+                            .unwrap_or_else(|| Invariant::none(self.invariant_id.get())),
+                    );
+
+                    let mut bus = bus.lock().expect("Could not unlock bus");
+                    // Send invariant replacing invariant currently on bus if it exists.
+                    if let Some(slot) = bus.iter_mut().find(|msg| msg.is_invariant()) {
+                        *slot = inv
+                    } else {
+                        bus.push(inv)
                     };
 
-                    ret
-                }
-                // These are formerly cached arenas.
-                WorkerMsg::Release(next) => {
-                    let header = HeaderUnTyped::from(next);
-                    let (nxt, top) = arenas.worker.remove(&header).unwrap_or_else(|| {
-                        panic!("Cached Arena: {:?} not found in arenas.worker", next)
-                    });
-                    debug_assert_eq!(next, nxt as _);
-
-                    let p = arenas.partial.insert(header, (nxt, top));
-                    debug_assert!(p.is_none());
-
-                    None
-                }
-            }));
-
-            log::trace!("Messages handled");
-
-            if !self.sent_invariant.get() {
-                let inv = Msg::Invariant(
-                    state
-                        .as_mut()
-                        .map(|cycle| {
-                            cycle.latest_grey = pending.epoch;
-                            cycle.handler.invariant
-                        })
-                        .unwrap_or_else(|| Invariant::none(self.invariant_id.get())),
-                );
-
-                let mut bus = bus.lock().expect("Could not unlock bus");
-                // Send invariant replacing invariant bus if it exists.
-                if let Some(slot) = bus.iter_mut().find(|msg| msg.is_invariant()) {
-                    *slot = inv
-                } else {
-                    bus.push(inv)
+                    log::trace!("GC sent thread {:?}, {:?}", thread_id, inv);
                 };
 
-                log::trace!("GC sent thread {:?}, {:?}", thread_id, inv);
-            };
+                // if *count < 2 {
+                //     *count += 1;
+                //     let (next, top) = arenas.partial.remove_arena(&self.type_info, free);
+                //     let header = HeaderUnTyped::from(next);
 
-            if *count < 2 {
-                *count += 1;
-                let (next, top) = arenas.partial.remove_arena(&self.type_info, free);
-                let header = HeaderUnTyped::from(next);
-
-                arenas.worker.insert(header, (next, top));
-                log::trace!("GC sent header: {:?}, next: {:?}", header, next);
-                let mut bus = bus.lock().expect("Could not unlock bus");
-                bus.push(Msg::Next(next as _))
-            };
-        });
+                //     arenas.worker.insert(header, (next, top));
+                //     log::trace!("GC sent header: {:?}, next: {:?}", header, next);
+                //     let mut bus = bus.lock().expect("Could not unlock bus");
+                //     bus.push(Msg::Next(next as _))
+                // };
+            });
 
         log::trace!("grey: {:?}", grey);
-
-        self.sent_invariant.set(true);
 
         debug_assert!(if !grey.is_empty() {
             state.is_some()
@@ -358,7 +369,6 @@ impl TypeState {
                 if children_complete {
                     log::trace!("Children complete Collection cleared!");
                     // This will trigger the Invariant::none to be sent to the workers.
-                    self.sent_invariant.set(false);
                     self.invariant_id
                         .set(self.invariant_id.get().checked_add(1).unwrap_or(1));
                     log::trace!("pending.known_grey: {}", pending.known_grey);
@@ -939,7 +949,6 @@ impl HandlerManager {
         log::trace!("HandlerManager::Drop done");
     }
 }
-///
 
 /// All known relations between GCed types.
 /// New relationships are first known upon `TotalRelations::register`.
@@ -975,7 +984,6 @@ impl TotalRelations {
             let ts = Box::leak(Box::new(TypeState {
                 type_info,
                 buses: Default::default(),
-                sent_invariant: Cell::from(true),
                 invariant_id: Cell::from(1),
                 arenas: UnsafeCell::new(Arenas::default()),
                 pending: UnsafeCell::new(Pending {
@@ -1032,7 +1040,7 @@ impl TotalRelations {
         });
 
         let buses = unsafe { &mut *ts.buses.get() };
-        buses.insert(thread_id, (bus_ptr, 0));
+        buses.insert(thread_id, (bus_ptr, 0, 0));
         if active_ts.is_none() {
             Some(ts)
         } else {
