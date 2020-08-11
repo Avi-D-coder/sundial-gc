@@ -389,6 +389,10 @@ unsafe impl<'r, T: Trace> Trace for Gc<'r, T> {
     }
 
     const GC_COUNT: u8 = 1;
+    // FIXME(pre_condtion) check T::PRE_CONDTION
+    // Currently cycles prevent checking.
+    // to break the cycle we will use a UnsafePre(T) newtype in the derive macro.
+    // List = Nil | Cons(T, Gc(List T))
     const PRE_CONDTION: bool = true;
 }
 
