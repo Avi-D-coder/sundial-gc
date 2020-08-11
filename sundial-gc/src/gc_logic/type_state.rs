@@ -269,7 +269,7 @@ impl TypeState {
         );
         let ret = match msg {
             WorkerMsg::Start { invariant_id, next } => {
-                log::info!(
+                log::trace!(
                     "GC received from thread: {:?}: {:?}, header: {:?}",
                     thread_id,
                     WorkerMsg::Start { invariant_id, next },
@@ -324,7 +324,7 @@ impl TypeState {
             } => {
                 let header = HeaderUnTyped::from(next);
 
-                log::info!(
+                log::trace!(
                     "GC received from thread: {:?}: {:?}, header: {:?}",
                     thread_id,
                     m,
@@ -707,19 +707,45 @@ impl Collection {
     }
 
     fn no_grey_arenas(&self, pending: &Pending) -> bool {
-        log::trace!(
-            "pending.known_grey: {}, latest_grey: {}, pending.epoch: {}",
-            pending.known_grey,
-            self.latest_grey,
-            pending.epoch
-        );
-        pending.known_grey_arenas.is_empty()
-            && self.latest_grey < pending.epoch - 2
+        if pending.known_grey != pending.known_grey_arenas.len() {
+            log::warn!(
+                "no_grey_arenas: pending.known_grey: {} != pending.known_grey_arenas.len: {}",
+                pending.known_grey,
+                pending.known_grey_arenas.len()
+            );
+        };
+
+        let safe = self.latest_grey < pending.epoch - 2
+            && pending.known_grey_arenas.is_empty()
             && pending
                 .arenas
                 .values()
                 .cloned()
-                .all(|(epoch, _)| epoch > self.latest_grey + 2)
+                .all(|(epoch, _)| epoch > self.latest_grey + 2);
+
+        if !(self.latest_grey < pending.epoch - 2) {
+            log::info!(
+                "no_grey_arenas: latest_grey: {}, pending.epoch: {},",
+                self.latest_grey,
+                pending.epoch
+            );
+        } else if !pending.known_grey_arenas.is_empty() {
+            log::info!(
+                "no_grey_arenas: pending.known_grey_arenas: {:?}",
+                pending.known_grey_arenas
+            );
+        } else {
+            log::info!(
+                "no_grey_arenas: pending.arenas: {:?}",
+                pending
+                    .arenas
+                    .iter()
+                    .filter(|(_, (epoch, _))| *epoch > self.latest_grey + 2)
+                    .collect::<HashMap<_, _>>()
+            );
+        };
+
+        safe
     }
 
     /// Evacuate rooted objects from condemned `Arenas`.

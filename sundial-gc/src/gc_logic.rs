@@ -140,6 +140,6 @@ fn gc_loop() {
             log::trace!("step");
         });
 
-        thread::sleep(Duration::from_millis(10))
+        thread::sleep(Duration::from_millis(1))
     }
 }
