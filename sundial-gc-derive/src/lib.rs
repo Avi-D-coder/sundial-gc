@@ -223,7 +223,7 @@ fn trace_impl(input: DeriveInput) -> TokenStream {
             }
 
             default const GC_COUNT: u8 = #(<#types>::GC_COUNT)+*;
-            default const PRE_CONDTION: bool = #(<#types>::PRE_CONDTION)&&*;
+            default const PRE_CONDITION: bool = #(<#types>::PRE_CONDITION)&&*;
         }
     }
 }

@@ -372,7 +372,7 @@ unsafe impl<'o, 'n, 'r: 'n, O: NoGc + Immutable + 'o, N: NoGc + Immutable + 'r>
 
 impl<T: Immutable + Trace> Arena<T> {
     pub fn new() -> Arena<T> {
-        if !T::PRE_CONDTION {
+        if !T::PRE_CONDITION {
             panic!("You need to derive Trace for T")
         };
 

@@ -224,7 +224,7 @@ impl<'r, K: Hash + Eq + Clone + Trace, V: Clone + Trace> HashMap<'r, K, V> {
 // There is no way to derive Condemed since HashMap uses unsafe casts
 unsafe impl<'r, K: Trace + 'r, V: Trace> Trace for HashMap<'r, K, V> {
     default fn fields(x: &Self, offset: u8, grey_fields: u8, invariant: &Invariant) -> u8 {
-        assert!(Self::PRE_CONDTION);
+        assert!(Self::PRE_CONDITION);
         let mut bloom = 0b0000000;
 
         for i in 0..16 {
@@ -277,7 +277,7 @@ unsafe impl<'r, K: Trace + 'r, V: Trace> Trace for HashMap<'r, K, V> {
 
     /// 2
     default const GC_COUNT: u8 = Gc::<(K, V)>::GC_COUNT + Gc::<HashMap<K, V>>::GC_COUNT;
-    default const PRE_CONDTION: bool = if K::PRE_CONDTION && V::PRE_CONDTION {
+    default const PRE_CONDITION: bool = if K::PRE_CONDITION && V::PRE_CONDITION {
         true
     } else {
         panic!("You need to derive Condemned for your type. Required due to a direct Gc<T>");
