@@ -38,13 +38,13 @@ where
 fn churn_list() {
     log_init();
     let usizes: Arena<usize> = Arena::new();
-    let gc_one = usizes.gc_alloc(1);
+    let gc_one = usizes.gc(1);
 
     let lists: Arena<List<Gc<usize>>> = Arena::new();
-    let one_two = lists.gc_alloc(List {
+    let one_two = lists.gc(List {
         t: gc_one,
-        _next: Some(lists.gc_alloc(List {
-            t: usizes.gc_alloc(2),
+        _next: Some(lists.gc(List {
+            t: usizes.gc(2),
             _next: None,
         })),
     });
@@ -65,10 +65,10 @@ struct Foo<'r> {
 fn churn() {
     log_init();
     let usizes: Arena<usize> = Arena::new();
-    let gced_usize = usizes.gc_alloc(1);
+    let gced_usize = usizes.gc(1);
 
     let foos: Arena<Foo> = Arena::new();
-    let foo = foos.gc_alloc(Foo { _bar: gced_usize });
+    let foo = foos.gc(Foo { _bar: gced_usize });
 
     let foos2: Arena<Foo> = Arena::new();
     // mark extends foos lifetime to that of the new arena foos2

@@ -9,7 +9,7 @@ fn new_arenas() -> (u16, u16) {
 
 fn gc_alloc_empty_hamt() {
     let arena_hm = Arena::<HashMap<usize, usize>>::new();
-    arena_hm.gc_alloc(HashMap::default());
+    arena_hm.gc(HashMap::default());
 }
 
 fn gc_copy_empty_hamt() {

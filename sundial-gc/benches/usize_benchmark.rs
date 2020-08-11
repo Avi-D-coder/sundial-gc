@@ -9,7 +9,7 @@ fn new_arena() -> u16 {
 
 fn gc_alloc_usize() {
     let a = Arena::<usize>::new();
-    a.gc_alloc(1);
+    a.gc(1);
 }
 
 fn gc_copy_usize() {

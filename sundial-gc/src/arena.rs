@@ -460,7 +460,7 @@ impl<T: Immutable + Trace> Arena<T> {
 
     /// Create a new `Gc<T>`.
     /// If `T : Copy` & `size_of::<T>() > 8`, you should use `self.gc_copy(&T)` instead.
-    pub fn gc_alloc<'a, 'r: 'a>(&'a self, t: T) -> Gc<'r, T> {
+    pub fn gc<'a, 'r: 'a>(&'a self, t: T) -> Gc<'r, T> {
         unsafe {
             if self.full() {
                 self.new_block();
@@ -537,7 +537,7 @@ impl<T: Immutable + Trace + Copy> Arena<T> {
 fn gc_alloc_test() {
     let a: Arena<usize> = Arena::new();
     let n1 = a.next.get() as usize;
-    a.gc_alloc(1);
+    a.gc(1);
     let n2 = a.next.get() as usize;
     assert!(n1 == n2 + 8)
 }

@@ -44,7 +44,7 @@ fn drop_test() {
     for i in 0..10000 {
         let a = Arena::new();
         for _ in 0..1000 {
-            a.gc_alloc(Count::new());
+            a.gc(Count::new());
         }
         log::trace!("i: {}", i);
     }

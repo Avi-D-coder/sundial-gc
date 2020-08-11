@@ -118,12 +118,12 @@ impl<'r, K: Hash + Eq + Clone + Trace, V: Clone + Trace> HashMap<'r, K, V> {
             spine.has_val |= mask;
 
             spine.arr[slot as usize] =
-                arena_kv.gc_alloc((key, value)).0 as *const (K, V) as *const ();
+                arena_kv.gc((key, value)).0 as *const (K, V) as *const ();
             Gc::from(spine)
         } else if (self.has_val & mask) != 0 {
             let pre_kv @ Gc((pre_key, _), _): Gc<(K, V)> = mem::transmute(self.arr[slot as usize]);
             if key == *pre_key {
-                let new_kv = arena_kv.gc_alloc((key, value));
+                let new_kv = arena_kv.gc((key, value));
                 spine.arr[slot as usize] = new_kv.0 as *const (K, V) as *const ();
 
                 Gc::from(spine)
@@ -131,7 +131,7 @@ impl<'r, K: Hash + Eq + Clone + Trace, V: Clone + Trace> HashMap<'r, K, V> {
                 // spine.entries |= mask; // already set
                 spine.has_val ^= mask;
 
-                let new_kv = arena_kv.gc_alloc((key, value));
+                let new_kv = arena_kv.gc((key, value));
 
                 let mut hasher = FxHasher::default();
                 pre_key.hash(&mut hasher);

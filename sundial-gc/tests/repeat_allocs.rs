@@ -6,7 +6,7 @@ fn gc_allocs_test() {
     for _ in 0..arena::ARENA_SIZE {
         let a: Arena<usize> = Arena::new();
         let n1 = a.next_ptr();
-        a.gc_alloc(1);
+        a.gc(1);
         let n2 = a.next_ptr();
         if let (Some(n1), Some(n2)) = (n1, n2) {
             assert!(n1 as usize == n2 as usize + 8);
@@ -46,7 +46,7 @@ fn capacity_test() {
     let c1 = a.capacity();
     // size_of Header == 160
     assert_eq!((arena::ARENA_SIZE - 160) / 8, c1 as usize);
-    a.gc_alloc(1);
+    a.gc(1);
     let c2 = a.capacity();
     assert!(c1 - 1 == c2)
 }
@@ -62,7 +62,7 @@ fn capacitys_test() {
         let a: Arena<usize> = Arena::new();
         assert_eq!(next, a.next_ptr());
         assert!(!a.full());
-        a.gc_alloc(1);
+        a.gc(1);
         let c = a.capacity();
         assert!(cap - 1 == c);
 
