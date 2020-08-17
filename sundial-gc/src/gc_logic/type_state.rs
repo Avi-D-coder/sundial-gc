@@ -395,6 +395,7 @@ impl TypeState {
                         .remove(&header)
                         .map(|(_, t)| t)
                         .unwrap_or_else(|| {
+                            //  FIXME this failed once.
                             debug_assert!(transient);
                             (header as usize
                                 + HeaderUnTyped::high_offset(

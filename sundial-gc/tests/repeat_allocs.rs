@@ -45,7 +45,7 @@ fn capacity_test() {
     let a: Arena<u64> = Arena::new();
     let c1 = a.capacity();
     // size_of Header == 160
-    assert_eq!((arena::ARENA_SIZE - 160) / 8, c1 as usize);
+    assert_eq!((arena::ARENA_SIZE - 144) / 8, c1 as usize);
     a.gc(1);
     let c2 = a.capacity();
     assert!(c1 - 1 == c2)

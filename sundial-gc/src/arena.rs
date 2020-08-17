@@ -642,8 +642,8 @@ impl HeaderUnTyped {
 
 #[test]
 fn low_offset_test() {
-    assert_eq!(mem::size_of::<HeaderUnTyped>(), 160);
-    assert_eq!(Header::<usize>::low_offset(), 160)
+    assert_eq!(mem::size_of::<HeaderUnTyped>(), 144);
+    assert_eq!(Header::<usize>::low_offset(), 144)
 }
 
 #[test]
