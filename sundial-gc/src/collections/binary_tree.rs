@@ -1,7 +1,7 @@
 use self::sundial_gc::*;
 use crate as sundial_gc;
 use smallvec::SmallVec;
-use std::{cmp::Ordering::*, fmt::Debug};
+use std::{cmp::Ordering::*, fmt::Debug, ops::Index};
 use sundial_gc_derive::*;
 
 #[derive(Trace, Ord, PartialOrd, Eq, PartialEq)]
@@ -34,6 +34,13 @@ impl<'r, K, V> From<Gc<'r, Node<'r, K, V>>> for Map<'r, K, V> {
 impl<'r, K: Trace + Ord + Clone + Debug, V: Trace + Clone + Debug> Debug for Map<'r, K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_map().entries(self.iter()).finish()
+    }
+}
+
+impl<'r, K: Trace + Ord + Clone, V: Trace + Clone> Index<&K> for Map<'r, K, V> {
+    type Output = V;
+    fn index(&self, key: &K) -> &V {
+        self.get(key).unwrap()
     }
 }
 
@@ -778,8 +785,8 @@ mod binary_tree_tests {
         });
 
         sorted_pairs.iter().for_each(|(k, v)| {
-            assert_eq!(Some(v), map_s.get(k));
-            assert_eq!(Some(v), map_r.get(k));
+            assert_eq!(v, &map_s[k]);
+            assert_eq!(v, &map_r[k]);
         });
     }
 
