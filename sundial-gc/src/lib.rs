@@ -26,3 +26,5 @@ pub use gc::{Gc, Root};
 mod gc_logic;
 pub mod mark;
 pub use mark::{Mark, Trace};
+pub mod thunk;
+pub use thunk::Thunk;
