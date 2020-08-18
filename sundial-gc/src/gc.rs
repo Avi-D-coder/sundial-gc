@@ -3,10 +3,12 @@ use std::boxed;
 use std::ops::{Deref, DerefMut};
 use std::{
     any::type_name,
+    borrow::Borrow,
+    fmt::Debug,
     sync::atomic::{AtomicPtr, AtomicUsize, Ordering},
 };
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
 pub struct Gc<'r, T: 'r>(pub &'r T, pub P);
 
 impl<'r, T> Gc<'r, T> {
@@ -38,7 +40,25 @@ impl<'r, T> Deref for Gc<'r, T> {
 
 impl<'r, T> From<Box<'r, T>> for Gc<'r, T> {
     fn from(t: Box<'r, T>) -> Self {
-        Gc::new(t.0)
+        unsafe { Gc::new(t.0) }
+    }
+}
+
+impl<'r, T> AsRef<T> for Gc<'r, T> {
+    fn as_ref(&self) -> &T {
+        self.0
+    }
+}
+
+impl<'r, T> Borrow<T> for Gc<'r, T> {
+    fn borrow(&self) -> &T {
+        self.0
+    }
+}
+
+impl<'r, T: Debug> Debug for Gc<'r, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Gc").field(self.0).finish()
     }
 }
 
