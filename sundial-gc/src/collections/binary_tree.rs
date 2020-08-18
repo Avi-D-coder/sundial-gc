@@ -1,7 +1,7 @@
 use self::sundial_gc::*;
 use crate as sundial_gc;
 use smallvec::SmallVec;
-use std::{cmp::Ordering::*, fmt::Debug, ops::Index};
+use std::{cmp::Ordering::*, fmt::Debug, iter::FromIterator, ops::Index};
 use sundial_gc_derive::*;
 
 #[derive(Trace, Ord, PartialOrd, Eq, PartialEq)]
@@ -28,6 +28,14 @@ impl<'r, K, V> From<Gc<'r, Node<'r, K, V>>> for Map<'r, K, V> {
     #[inline(always)]
     fn from(node: Gc<'r, Node<'r, K, V>>) -> Self {
         Map(Some(node))
+    }
+}
+
+impl<'r, K: Trace + Clone + Ord, V: Trace + Clone> FromIterator<(K, V)> for Map<'r, K, V> {
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        let arena = &Arena::new();
+        iter.into_iter()
+            .fold(Map::default(), |map, (k, v)| map.insert(k, v, arena))
     }
 }
 
@@ -72,6 +80,19 @@ impl<'r, K: Trace + Ord + Clone, V: Trace + Clone> Map<'r, K, V> {
         }
     }
 
+    pub fn insert_if_empty(self, key: K, value: V, arena: &Arena<Node<'r, K, V>>) -> Map<'r, K, V> {
+        match self.0 {
+            Some(n) => Map(Some(Node::insert(n, key, value, arena))),
+            _ => Map::from(arena.gc(Node {
+                key,
+                value,
+                left: Map::default(),
+                right: Map::default(),
+                size: 1,
+            })),
+        }
+    }
+
     pub fn iter(self) -> Iter<'r, K, V> {
         let mut parents = SmallVec::new();
 
@@ -87,6 +108,22 @@ impl<'r, K: Trace + Ord + Clone, V: Trace + Clone> Map<'r, K, V> {
         };
 
         Iter { parents }
+    }
+
+    /// TODO non naive implementation.
+    pub fn union(self, right: Map<'r, K, V>, arena: &Arena<Node<'r, K, V>>) -> Map<'r, K, V> {
+        match (self, right) {
+            (Map(Some(left @ Gc(_, _))), Map(Some(Gc(_, _)))) => {
+                let left: Gc<Node<K, V>> = left;
+                let node = right.iter().fold(left, |left, (k, v)| {
+                    Node::insert_if_empty(left, k.clone(), v.clone(), arena)
+                });
+                Map::from(node)
+            }
+            (Map(Some(_)), _) => self,
+            (_, Map(Some(_))) => right,
+            _ => Map(None),
+        }
     }
 }
 
@@ -138,6 +175,31 @@ impl<'r, K: Trace + Ord + Clone, V: Trace + Clone> Node<'r, K, V> {
                 right: node.right,
                 size: node.size,
             }),
+            Less => Node::balance(
+                node.key.clone(),
+                node.value.clone(),
+                node.left.insert(key, value, arena),
+                node.right,
+                arena,
+            ),
+            Greater => Node::balance(
+                node.key.clone(),
+                node.value.clone(),
+                node.left,
+                node.right.insert(key, value, arena),
+                arena,
+            ),
+        }
+    }
+
+    pub fn insert_if_empty(
+        node: Gc<'r, Node<'r, K, V>>,
+        key: K,
+        value: V,
+        arena: &Arena<Node<'r, K, V>>,
+    ) -> Gc<'r, Node<'r, K, V>> {
+        match key.cmp(&node.key) {
+            Equal => node,
             Less => Node::balance(
                 node.key.clone(),
                 node.value.clone(),
