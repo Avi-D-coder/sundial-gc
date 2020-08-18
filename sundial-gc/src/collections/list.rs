@@ -1,20 +1,37 @@
 use self::sundial_gc::*;
 use crate as sundial_gc;
-use std::ops::Index;
+use std::{fmt::Debug, iter, ops::Index};
 use sundial_gc_derive::*;
 
-#[derive(Trace, Debug, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Trace, Ord, PartialOrd, Eq, PartialEq)]
 pub struct List<'r, T>(Option<Gc<'r, Elem<'r, T>>>)
 where
     T: 'r;
 
-#[derive(Trace, Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Trace, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub struct Elem<'r, T>
 where
     T: 'r,
 {
     pub next: List<'r, T>,
     pub value: T,
+}
+
+impl<'r, T: Debug> Debug for Elem<'r, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(iter::once(&self.value).chain(self.next.iter()))
+            .finish()
+    }
+}
+
+impl<'r, T: Debug> Debug for List<'r, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(e) => e.fmt(f),
+            None => f.write_str("[]"),
+        }
+    }
 }
 
 impl<'r, T> From<Gc<'r, Elem<'r, T>>> for List<'r, T> {
@@ -63,6 +80,8 @@ impl<'r, T> List<'r, T> {
 }
 
 impl<'r, T: Trace + Clone> List<'r, T> {
+    /// Prepend `value` to a list.
+    /// The arguments are in reverse order.
     pub fn cons(self, value: T, arena: &Arena<Elem<'r, T>>) -> List<'r, T> {
         List::from(arena.gc(Elem { value, next: self }))
     }

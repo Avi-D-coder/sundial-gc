@@ -13,7 +13,7 @@ pub struct Gc<'r, T: 'r>(pub &'r T, pub P);
 
 impl<'r, T> Gc<'r, T> {
     #[inline(always)]
-    pub(crate) fn new(t: &'r T) -> Self {
+    pub(crate) unsafe fn new(t: &'r T) -> Self {
         Gc(t, P(()))
     }
 }

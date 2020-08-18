@@ -210,7 +210,7 @@ unsafe impl<'o, 'n, 'r: 'n, O: Trace + 'o, N: Trace + 'r> Mark<'o, 'n, 'r, O, N>
                 .and_modify(|evacuated_ptr| new_ptr = *evacuated_ptr as *mut N)
                 .or_insert(next as *const u8);
 
-            Gc::new(unsafe { &*new_ptr })
+            unsafe { Gc::new(&*new_ptr) }
         } else {
             // old contains no direct condemned ptrs
             unsafe { std::mem::transmute(old) }
@@ -363,7 +363,7 @@ unsafe impl<'o, 'n, 'r: 'n, O: NoGc + Immutable + 'o, N: NoGc + Immutable + 'r>
                         .set(((next as usize) - mem::size_of::<N>()) as *mut N);
                     new_gc as *const u8
                 });
-            Gc::new(unsafe { &*new_gc })
+            unsafe { Gc::new(&*new_gc) }
         } else {
             unsafe { std::mem::transmute(o) }
         }
