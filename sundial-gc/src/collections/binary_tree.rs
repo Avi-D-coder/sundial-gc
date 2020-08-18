@@ -69,7 +69,7 @@ impl<'r, K: Trace + Ord + Clone, V: Trace + Clone> Map<'r, K, V> {
 
     pub fn insert(self, key: K, value: V, arena: &Arena<Node<'r, K, V>>) -> Map<'r, K, V> {
         match self.0 {
-            Some(n) => Map(Some(Node::insert(n, key, value, arena))),
+            Some(n) => Map::from(Node::insert(n, key, value, arena)),
             _ => Map::from(arena.gc(Node {
                 key,
                 value,
@@ -82,7 +82,7 @@ impl<'r, K: Trace + Ord + Clone, V: Trace + Clone> Map<'r, K, V> {
 
     pub fn insert_if_empty(self, key: K, value: V, arena: &Arena<Node<'r, K, V>>) -> Map<'r, K, V> {
         match self.0 {
-            Some(n) => Map(Some(Node::insert(n, key, value, arena))),
+            Some(n) => Map::from(Node::insert(n, key, value, arena)),
             _ => Map::from(arena.gc(Node {
                 key,
                 value,
