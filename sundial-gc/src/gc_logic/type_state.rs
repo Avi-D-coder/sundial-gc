@@ -716,7 +716,7 @@ impl Collection {
             );
         };
 
-        let safe = self.latest_grey < pending.epoch - 2
+        let safe = self.latest_grey + 2 < pending.epoch
             && pending.known_grey_arenas.is_empty()
             && pending
                 .arenas
@@ -724,7 +724,7 @@ impl Collection {
                 .cloned()
                 .all(|(epoch, _)| epoch > self.latest_grey + 2);
 
-        if !(self.latest_grey < pending.epoch - 2) {
+        if !(self.latest_grey + 2 < pending.epoch) {
             log::info!(
                 "no_grey_arenas: latest_grey: {}, pending.epoch: {},",
                 self.latest_grey,
