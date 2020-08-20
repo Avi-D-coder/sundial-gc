@@ -18,6 +18,7 @@ criterion = "0.3"
 quickcheck = "0.9"
 quickcheck_macros = "0.9"
 nom = "5.1.2"
+rustyline = "6.2.0"
 
 [[bench]]
 name = "hamt_benchmark"
