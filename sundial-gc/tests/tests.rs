@@ -10,15 +10,12 @@
 #![feature(trivial_bounds)]
 #![feature(associated_type_bounds)]
 #![feature(const_panic)]
+#![feature(bindings_after_at)]
+#![feature(generic_associated_types)]
 
-use std::{
-    sync::atomic::{AtomicUsize, Ordering},
-    thread,
-    time::Duration,
-};
 use sundial_gc::arena::*;
 use sundial_gc::gc::Gc;
-use sundial_gc::mark::*;
+use sundial_gc::{collections::Map, mark::*};
 use sundial_gc_derive::*;
 
 fn log_init() {
@@ -164,3 +161,132 @@ fn immutable_test() {
 
     let _mutexes: Arena<Box<std::sync::Arc<usize>>> = Arena::new();
 }
+
+#[test]
+fn use_after_free_test() {
+    // let mut foo = None;
+    let mut map: Map<'static, usize, usize> = Map::default();
+
+    {
+        // foo = Some(&Arena::new().gc(1)) //~ Err
+        // let a = Arena::new();
+        // foo = Some(&a.gc(1)) //~ Err
+
+        let arena = Arena::new();
+        map = map.insert(1, 1, &arena);
+        drop(arena)
+    }
+
+    eprintln!("{:?}", map);
+}
+
+// #[cfg(test)]
+// mod tests {
+//     use std::cell::UnsafeCell;
+//     use std::{mem, ops::Deref};
+
+//     pub trait Id {
+//         type T<'l>;
+//     }
+
+//     impl<T> Id for T {
+//         type T<'l> = T;
+//     }
+
+//     pub unsafe trait CoerceLifetime {
+//         type Type<'l>: 'l + Sized;
+//         unsafe fn coerce_lifetime<'o, 'n>(old: &'o Self::Type<'o>) -> &'n Self::Type<'n> {
+//             todo!()
+//         }
+//     }
+//     unsafe impl<'r, T: CoerceLifetime> CoerceLifetime for Gc<'r, T> {
+//         type Type<'l> = Gc<'l, T::Type<'l>>;
+//     }
+//     unsafe impl CoerceLifetime for usize {
+//         default type Type<'l> = usize;
+//     }
+
+//     pub struct Arena<T> {
+//         vec: UnsafeCell<Vec<T>>,
+//     }
+
+//     #[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
+//     pub struct Gc<'r, T>(&'r T, ());
+//     impl<'r, T> Copy for Gc<'r, T> {}
+//     impl<'r, T> Clone for Gc<'r, T> {
+//         fn clone(&self) -> Self {
+//             *self
+//         }
+//     }
+//     impl<'r, T> Deref for Gc<'r, T> {
+//         type Target = T;
+//         fn deref(&self) -> &T {
+//             self.0
+//         }
+//     }
+
+//     impl<A: CoerceLifetime> Arena<A> {
+//         fn new() -> Self {
+//             Self {
+//                 vec: UnsafeCell::new(Vec::new()),
+//             }
+//         }
+
+//         pub fn gc<'r, 'a: 'r, 'o, T: Id<T = A::Type<'r>>>(
+//             &'a self,
+//             t: T,
+//         ) -> Gc<'r, T> {
+//             let vec = unsafe { &mut *self.vec.get() };
+//             todo!()
+//         }
+//     }
+//     impl<T> Drop for Arena<T> {
+//         fn drop(&mut self) {}
+//     }
+
+//     #[test]
+//     fn use_after_free_test() {
+//         struct Foo<'r>(Gc<'r, usize>);
+//         unsafe impl<'r> CoerceLifetime for Foo<'r> {
+//             type Type<'l> = Foo<'l>;
+//         }
+
+//         let usizes: Arena<usize> = Arena::new();
+//         let foos: Arena<Foo> = Arena::new();
+
+//         let n = usizes.gc(1usize);
+//         let foo = foos.gc(Foo(n));
+//     }
+
+    //     fn foo<'r>(n: usize, usizes: &'r Arena<usize>) -> Foo<'r> {
+    //         let n = usizes.gc(n);
+    //         Foo(n)
+    //     }
+
+    //     #[derive(Copy, Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
+    //     enum List<'r, T: Copy> {
+    //         Cons(T, Gc<'r, List<'r, T>>),
+    //         Empty,
+    //     }
+
+    //     impl<'r, T: Copy> List<'r, T> {
+    //         fn cons(
+    //             head: T,
+    //             tail: Gc<'r, List<'r, T>>,
+    //             arena: &'r Arena<List<'r, T>>,
+    //         ) -> Gc<'r, List<'r, T>> {
+    //             arena.gc(List::Cons(head, tail))
+    //         }
+    //     }
+
+    //     let lists: Arena<List<u8>> = Arena::new();
+    //     // let lists: &Arena<List<u8>> = &lists;
+    //     // List::cons(1, lists.gc(List::Empty), &lists);
+    //     lists.gc(List::Cons(1, lists.gc(List::Empty)));
+
+    //     // let nodes: Arena<Node<u8, u8>> = Arena::new();
+    //     // let nodes: &Arena<Node<u8, u8>> = nodes;
+
+    //     // Map::default().insert(1, 1, &nodes);
+    // }
+// }
