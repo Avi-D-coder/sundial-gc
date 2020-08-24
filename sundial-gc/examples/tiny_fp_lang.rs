@@ -1,5 +1,6 @@
 #![allow(incomplete_features)]
 #![feature(specialization)]
+#![feature(generic_associated_types)]
 
 use rustyline::Editor;
 use sundial_gc::{collections::Map, *};

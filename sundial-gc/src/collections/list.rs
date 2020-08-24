@@ -82,7 +82,7 @@ impl<'r, T> List<'r, T> {
 impl<'r, T: Trace + Clone> List<'r, T> {
     /// Prepend `value` to a list.
     /// The arguments are in reverse order.
-    pub fn cons(self, value: T, arena: &Arena<Elem<'r, T>>) -> List<'r, T> {
+    pub fn cons(self, value: T, arena: &Arena<List<'static, T>>) -> List<'r, T> {
         List::from(arena.gc(Elem { value, next: self }))
     }
 
@@ -95,7 +95,7 @@ impl<'r, T: Trace + Clone> List<'r, T> {
     /// This function is recursive and may cause a stack overflow.
     ///
     /// TODO Replace with non recursive variant.
-    pub fn insert(self, index: usize, arena: &Arena<Elem<'r, T>>) -> List<'r, T> {
+    pub fn insert(self, index: usize, arena: &Arena<Elem<'static, T>>) -> List<'r, T> {
         // self.iter().take(index).fold(List::default(), )
         let Gc(Elem { value, next }, _) = self.0.unwrap();
         List::from(arena.gc(Elem {

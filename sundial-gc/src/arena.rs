@@ -5,7 +5,7 @@ use crate::{
         bus::{self, Bus, Msg},
         GcThreadBus,
     },
-    mark::{GcTypeInfo, Invariant, Mark, Trace},
+    mark::{CoerceLifetime, GcTypeInfo, Id, Invariant, Mark, Trace},
 };
 use bus::WorkerMsg;
 use gc::RootIntern;
@@ -25,7 +25,7 @@ pub(crate) struct Mem {
     _mem: [u8; ARENA_SIZE],
 }
 
-pub struct Arena<T: Trace> {
+pub struct Arena<T: Trace + CoerceLifetime> {
     // TODO compact representation of arenas
     // TODO make all these private by wrapping up needed functionality.
     // TODO derive header from next
@@ -54,7 +54,7 @@ impl<T: Trace> Debug for Arena<T> {
     }
 }
 
-impl<T: Immutable + Trace> Arena<T> {
+impl<T: Trace> Arena<T> {
     /// Returns the pointer of the next object to be allocated.
     /// Returns `None` when the `Arena` is full.
     pub fn next_ptr(&self) -> Option<*const T> {
@@ -173,13 +173,12 @@ pub(crate) fn index(ptr: *const u8, size: u16, align: u16) -> u16 {
     ((ptr as usize - low) / size as usize) as u16
 }
 
-unsafe impl<'o, 'n, 'r: 'n, O: Trace + 'o, N: Trace + 'r> Mark<'o, 'n, 'r, O, N> for Arena<N> {
-    default fn mark(&self, old: Gc<'o, O>) -> Gc<'r, N> {
-        if type_name::<O>() != type_name::<N>() {
-            // TODO once Eq for &str is const make this const
-            panic!("O is a different type then N, mark only changes lifetimes")
-        };
-
+unsafe impl<'o, 'n, A: Trace + CoerceLifetime, O, N> Mark<'o, 'n, A, O, N> for Arena<A>
+where
+    O: 'o + Trace + Id<T = A::Type<'o>>,
+    N: 'n + Trace + Id<T = A::Type<'n>>,
+{
+    fn mark<'a: 'n>(&'a self, old: Gc<'o, O>) -> Gc<'n, N> {
         let old_ptr = old.0 as *const O as *const N;
         let condemned_self =
             self.invariant.grey_self && self.invariant.condemned(old.0 as *const O as *const _);
@@ -197,8 +196,8 @@ unsafe impl<'o, 'n, 'r: 'n, O: Trace + 'o, N: Trace + 'r> Mark<'o, 'n, 'r, O, N>
             };
 
             unsafe {
-                self.next.set(Self::bump_down_ptr(next) as *mut N);
-                std::ptr::copy(old_ptr, next, 1);
+                self.next.set(Self::bump_down_ptr(next) as *mut A);
+                std::ptr::copy(old_ptr, next as _, 1);
             };
 
             let mut new_ptr = next;
@@ -206,11 +205,11 @@ unsafe impl<'o, 'n, 'r: 'n, O: Trace + 'o, N: Trace + 'r> Mark<'o, 'n, 'r, O, N>
             let evacuated = old_header.intern.evacuated.lock();
             evacuated
                 .unwrap()
-                .entry(Arena::index(old.0 as *const O))
-                .and_modify(|evacuated_ptr| new_ptr = *evacuated_ptr as *mut N)
+                .entry(Arena::index(old.0 as *const O as *const A))
+                .and_modify(|evacuated_ptr| new_ptr = *evacuated_ptr as _)
                 .or_insert(next as *const u8);
 
-            unsafe { Gc::new(&*new_ptr) }
+            unsafe { Gc::new(&*(new_ptr as *const _)) }
         } else {
             // old contains no direct condemned ptrs
             unsafe { std::mem::transmute(old) }
@@ -338,48 +337,18 @@ impl<T: Trace> Drop for Arena<T> {
     }
 }
 
-unsafe impl<'o, 'n, 'r: 'n, O: NoGc + Immutable + 'o, N: NoGc + Immutable + 'r>
-    Mark<'o, 'n, 'r, O, N> for Arena<N>
-{
-    #[inline(always)]
-    default fn mark(&'n self, o: Gc<'o, O>) -> Gc<'r, N> {
-        // TODO make const https://github.com/rust-lang/rfcs/pull/2632
-        assert_eq!(type_name::<O>(), type_name::<N>());
-        if self.invariant.grey_self && self.invariant.condemned(o.0) {
-            let next = self.next.get();
-            unsafe { ptr::copy(transmute(o), next, 1) };
-            let mut new_gc = next as *const N;
-            let old_addr = &*o as *const O as usize;
-            let offset = old_addr % ARENA_SIZE;
-            let old_header = unsafe { &*((old_addr - offset) as *const Header<N>) };
-            let evacuated = old_header.intern.evacuated.lock();
-            evacuated
-                .unwrap()
-                .entry((offset / mem::size_of::<N>()) as u16)
-                .and_modify(|gc| new_gc = *gc as *const N)
-                .or_insert_with(|| {
-                    // FIXME overrun
-                    self.next
-                        .set(((next as usize) - mem::size_of::<N>()) as *mut N);
-                    new_gc as *const u8
-                });
-            unsafe { Gc::new(&*new_gc) }
-        } else {
-            unsafe { std::mem::transmute(o) }
-        }
-    }
-}
+// TODO add specialized Mark impl for N: 'static.
 
-impl<T: Immutable + Trace> Arena<T> {
-    pub fn new() -> Arena<T> {
-        if !T::PRE_CONDITION {
+impl<A: Trace + CoerceLifetime> Arena<A> {
+    pub fn new() -> Arena<A> {
+        if !A::PRE_CONDITION {
             panic!("You need to derive Trace for T")
         };
 
         // Register a bus for this thread type combo.
         let bus = GC_BUS.with(|tm| {
             let tm = unsafe { &mut *tm.get() };
-            tm.entry(key::<T>()).or_insert_with(|| {
+            tm.entry(key::<A>()).or_insert_with(|| {
                 let bus = Box::leak(Box::new(BusState {
                     cached_arenas: CachedArenas([CachedArena::null(); 2]),
                     known_invariant: Invariant::none(0),
@@ -387,7 +356,7 @@ impl<T: Immutable + Trace> Arena<T> {
                 }));
 
                 let mut reg = GcThreadBus::get().lock().expect("Could not unlock RegBus");
-                reg.register::<T>(&(bus.bus));
+                reg.register::<A>(&(bus.bus));
                 bus
             })
         });
@@ -408,7 +377,7 @@ impl<T: Immutable + Trace> Arena<T> {
             };
         });
 
-        let (next, new_allocation) = if let Some(n) = cached_arenas.get::<T>() {
+        let (next, new_allocation) = if let Some(n) = cached_arenas.get::<A>() {
             (n, false)
         } else if let Some(next) = bus
             .iter_mut()
@@ -460,25 +429,25 @@ impl<T: Immutable + Trace> Arena<T> {
 
     /// Create a new `Gc<T>`.
     /// If `T : Copy` & `size_of::<T>() > 8`, you should use `self.gc_copy(&T)` instead.
-    pub fn gc<'a, 'r: 'a>(&'a self, t: T) -> Gc<'r, T> {
+    pub fn gc<'r, 'a: 'r, T: Id<T = A::Type<'r>>>(&'a self, t: T) -> Gc<'r, T> {
         unsafe {
             if self.full() {
                 self.new_block();
             };
-            let ptr = self.next.get();
-            self.next.set(self.bump_down() as *mut T);
+            let ptr = self.next.get() as *mut T;
+            self.next.set(self.bump_down() as *mut A);
             ptr::write(ptr, t);
             Gc::new(&*ptr)
         }
     }
 
-    pub fn box_alloc<'a, 'r: 'a>(&'a self, t: T) -> gc::Box<'r, T> {
+    pub fn box_alloc<'a, 'r: 'a>(&'a self, t: A) -> gc::Box<'r, A> {
         unsafe {
             if self.full() {
                 self.new_block()
             }
             let ptr = self.next.get();
-            self.next.set(self.bump_down() as *mut T);
+            self.next.set(self.bump_down() as *mut A);
             ptr::write(ptr, t);
             gc::Box::new(&mut *ptr)
         }
@@ -490,7 +459,7 @@ impl<T: Immutable + Trace> Arena<T> {
 
     /// Allocates & initializes a new Arena block.
     /// Returns highest ptr.
-    pub(crate) fn alloc() -> *mut T {
+    pub(crate) fn alloc() -> *mut A {
         // Get more memory from system allocator
         let header = unsafe { System.alloc(Layout::new::<Mem>()) };
         debug_assert!(
@@ -501,32 +470,32 @@ impl<T: Immutable + Trace> Arena<T> {
 
         HeaderUnTyped::init(header as *mut _);
 
-        (header as usize + Header::<T>::high_offset() as usize) as *mut T
+        (header as usize + Header::<A>::high_offset() as usize) as *mut A
     }
 }
 
-impl<T: Immutable + Trace + Copy> Arena<T> {
+impl<A: Trace + Copy> Arena<A> {
     /// Directly copies T instead of reading it onto the stack first.
-    pub fn gc_copy<'a, 'r: 'a>(&'a self, t: &T) -> Gc<'r, T> {
+    pub fn gc_copy<'a, 'r: 'a, T: Copy>(&'a self, t: &T) -> Gc<'r, T> {
         unsafe {
             if self.full() {
                 self.new_block()
             }
-            let ptr = self.next.get();
-            self.next.set(self.bump_down() as *mut T);
+            let ptr = self.next.get() as _;
+            self.next.set(self.bump_down() as *mut A);
             ptr::copy(t, ptr, 1);
             Gc::new(&*ptr)
         }
     }
 
     /// Directly copies T instead of reading it onto the stack first.
-    pub fn box_copy<'a, 'r: 'a>(&'a self, t: &T) -> gc::Box<'r, T> {
+    pub fn box_copy<'a, 'r: 'a, T: Copy>(&'a self, t: &T) -> gc::Box<'r, T> {
         unsafe {
             if self.full() {
                 self.new_block()
             }
-            let ptr = self.next.get();
-            self.next.set(self.bump_down() as *mut T);
+            let ptr = self.next.get() as _;
+            self.next.set(self.bump_down() as *mut A);
             ptr::copy(t, ptr, 1);
             gc::Box::new(&mut *ptr)
         }
@@ -560,26 +529,26 @@ fn gc_copy_test() {
     assert!(n1 == n2 + 8)
 }
 
-impl<T: Immutable + Trace + Clone> Arena<T> {
-    pub fn gc_clone<'a, 'r: 'a>(&'a self, t: &T) -> Gc<'r, T> {
+impl<A: Trace + Clone> Arena<A> {
+    pub fn gc_clone<'r, 'a: 'r, T: Clone>(&'a self, t: &T) -> Gc<'r, T> {
         unsafe {
             if self.full() {
                 self.new_block()
             }
-            let ptr = self.next.get();
-            self.next.set(self.bump_down() as *mut T);
+            let ptr = self.next.get() as _;
+            self.next.set(self.bump_down() as *mut A);
             ptr::write(ptr, t.clone());
             Gc::new(&*ptr)
         }
     }
 
-    pub fn box_clone<'a, 'r: 'a>(&'a self, t: &T) -> gc::Box<'r, T> {
+    pub fn box_clone<'a, 'r: 'a, T: Clone>(&'a self, t: &T) -> gc::Box<'r, T> {
         unsafe {
             if self.full() {
                 self.new_block()
             }
-            let ptr = self.next.get();
-            self.next.set(self.bump_down() as *mut T);
+            let ptr = self.next.get() as _;
+            self.next.set(self.bump_down() as *mut A);
             ptr::write(ptr, t.clone());
             gc::Box::new(&mut *ptr)
         }

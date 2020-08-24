@@ -1,5 +1,7 @@
 #![allow(incomplete_features)]
 #![feature(specialization)]
+#![feature(generic_associated_types)]
+
 use sundial_gc::*;
 use sundial_gc_derive::*;
 

@@ -1,5 +1,6 @@
 #![allow(incomplete_features)]
 #![feature(specialization)]
+#![feature(generic_associated_types)]
 #![allow(dead_code)]
 
 use collections::List;

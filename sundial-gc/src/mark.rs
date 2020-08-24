@@ -12,40 +12,52 @@ use std::{
     iter, mem, ptr,
 };
 
-pub unsafe trait MarkGat<'n, T: CoerceLifetime> {
-    fn mark_gat<'o>(&'n self, old: &'o T::Type<'o>) -> &'n T::Type<'n>;
-}
+// pub unsafe trait MarkGat<'n, T: CoerceLifetime> {
+//     fn mark_gat<'o>(&'n self, old: &'o T::Type<'o>) -> &'n T::Type<'n>;
+// }
 
-unsafe impl<'n, T: Trace + CoerceLifetime> MarkGat<'n, T> for Arena<T::Type<'n>> {
-    fn mark_gat<'o>(&'n self, old: &'o T::Type<'o>) -> &'n T::Type<'n> {
-        unsafe { T::coerce_lifetime(old) }
-    }
-}
+// unsafe impl<'n, T: Trace + CoerceLifetime> MarkGat<'n, T> for Arena<T::Type<'n>> {
+//     fn mark_gat<'o>(&'n self, old: &'o T::Type<'o>) -> &'n T::Type<'n> {
+//         unsafe { T::coerce_lifetime(old) }
+//     }
+// }
 
 pub unsafe trait CoerceLifetime {
-    type Type<'l>: 'l + Sized + Trace;
+    type Type<'l>: Immutable;
     unsafe fn coerce_lifetime<'o, 'n>(old: &'o Self::Type<'o>) -> &'n Self::Type<'n> {
         mem::transmute(old)
     }
 }
 
-unsafe impl<'r, T: Trace + CoerceLifetime> CoerceLifetime for Gc<'r, T> {
+unsafe impl<T: CoerceLifetime> CoerceLifetime for Gc<'static, T> {
     type Type<'l> = Gc<'l, T::Type<'l>>;
 }
 
-unsafe impl<'r, T: Trace + 'static> CoerceLifetime for T {
+unsafe impl<T: Immutable> CoerceLifetime for T {
     default type Type<'l> = T;
 }
 
-/// This will be sound once GAT or const Eq &str lands.
-/// The former will allow transmuting only lifetimes.
-/// The latter will make `assert_eq!(type_name::<O>(), type_name::<N>())` const.
+// This will be sound once GAT or const Eq &str lands.
+// The former will allow transmuting only lifetimes.
+// The latter will make `assert_eq!(type_name::<O>(), type_name::<N>())` const.
 // https://github.com/rust-lang/rfcs/pull/2632.
-pub unsafe trait Mark<'o, 'n, 'r: 'n, O: 'o, N: 'r> {
-    fn mark(&'n self, o: Gc<'o, O>) -> Gc<'r, N>;
+pub unsafe trait Mark<'o, 'n, A: CoerceLifetime, O, N>
+where
+    O: 'o + Trace + Id<T = A::Type<'o>>,
+    N: 'n + Trace + Id<T = A::Type<'n>>,
+{
+    fn mark<'a: 'n>(&'a self, o: Gc<'o, O>) -> Gc<'n, N>;
 }
 
-// Blanket Arena<T> impl is in src/arena.rs
+// Blanket impl Mark for Arena<T> is in src/arena.rs
+
+pub trait Id {
+    type T;
+}
+
+impl<T> Id for T {
+    type T = T;
+}
 
 pub type Offset = u8;
 
@@ -273,6 +285,16 @@ impl Invariant {
     }
 }
 
+/// Derive `Trace` when ever possible.
+/// Writing your own instance is likely to result in a use after free!
+///
+/// If you are using unions,`UnsafeCell`, etc. you will have to write your own instance.
+/// Please consult the HAMT impl for an example.
+///
+/// Your type must only have one lifetime `'r`, the life time of all transitive GCed values `Gc<'r, _>`.
+/// You must implement all methods, do not use defaults.
+///
+/// You must also implement `CoerceLifetime`.
 pub unsafe trait Trace: Immutable {
     fn fields(s: &Self, offset: u8, grey_fields: u8, invariant: &Invariant) -> u8;
     unsafe fn evacuate<'e>(

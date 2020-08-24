@@ -67,7 +67,7 @@ impl<'r, K: Trace + Ord + Clone, V: Trace + Clone> Map<'r, K, V> {
         }
     }
 
-    pub fn insert(self, key: K, value: V, arena: &Arena<Node<'r, K, V>>) -> Map<'r, K, V> {
+    pub fn insert(self, key: K, value: V, arena: &Arena<Node<'static, K, V>>) -> Map<'r, K, V> {
         match self.0 {
             Some(n) => Map::from(Node::insert(n, key, value, arena)),
             _ => Map::from(arena.gc(Node {
@@ -80,7 +80,12 @@ impl<'r, K: Trace + Ord + Clone, V: Trace + Clone> Map<'r, K, V> {
         }
     }
 
-    pub fn insert_if_empty(self, key: K, value: V, arena: &Arena<Node<'r, K, V>>) -> Map<'r, K, V> {
+    pub fn insert_if_empty(
+        self,
+        key: K,
+        value: V,
+        arena: &Arena<Node<'static, K, V>>,
+    ) -> Map<'r, K, V> {
         match self.0 {
             Some(n) => Map::from(Node::insert(n, key, value, arena)),
             _ => Map::from(arena.gc(Node {
@@ -111,7 +116,7 @@ impl<'r, K: Trace + Ord + Clone, V: Trace + Clone> Map<'r, K, V> {
     }
 
     /// TODO non naive implementation.
-    pub fn union(self, right: Map<'r, K, V>, arena: &Arena<Node<'r, K, V>>) -> Map<'r, K, V> {
+    pub fn union(self, right: Map<'r, K, V>, arena: &Arena<Node<'static, K, V>>) -> Map<'r, K, V> {
         match (self, right) {
             (Map(Some(left @ Gc(_, _))), Map(Some(Gc(_, _)))) => {
                 let left: Gc<Node<K, V>> = left;
@@ -165,7 +170,7 @@ impl<'r, K: Trace + Ord + Clone, V: Trace + Clone> Node<'r, K, V> {
         node: Gc<'r, Node<'r, K, V>>,
         key: K,
         value: V,
-        arena: &Arena<Node<'r, K, V>>,
+        arena: &Arena<Node<'static, K, V>>,
     ) -> Gc<'r, Node<'r, K, V>> {
         match key.cmp(&node.key) {
             Equal => arena.gc(Node {
@@ -196,7 +201,7 @@ impl<'r, K: Trace + Ord + Clone, V: Trace + Clone> Node<'r, K, V> {
         node: Gc<'r, Node<'r, K, V>>,
         key: K,
         value: V,
-        arena: &Arena<Node<'r, K, V>>,
+        arena: &Arena<Node<'static, K, V>>,
     ) -> Gc<'r, Node<'r, K, V>> {
         match key.cmp(&node.key) {
             Equal => node,
@@ -225,7 +230,7 @@ impl<'r, K: Trace + Ord + Clone, V: Trace + Clone> Node<'r, K, V> {
         value: V,
         left: Map<'r, K, V>,
         right: Map<'r, K, V>,
-        arena: &Arena<Self>,
+        arena: &Arena<Map<'static, K, V>>,
     ) -> Gc<'r, Self> {
         let node = |key: K, value: V, size, left, right| {
             arena.gc(Node {
