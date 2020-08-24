@@ -1,11 +1,10 @@
-use crate::auto_traits::*;
 use crate::gc::{self, Gc};
 use crate::{
     gc_logic::{
         bus::{self, Bus, Msg},
         GcThreadBus,
     },
-    mark::{CoerceLifetime, GcTypeInfo, Id, Invariant, Mark, Trace, TypeEq, ID},
+    mark::{CoerceLifetime, GcTypeInfo, Invariant, Mark, Trace, ID},
 };
 use bus::WorkerMsg;
 use gc::RootIntern;
@@ -14,7 +13,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::any::type_name;
 use std::cell::{Cell, UnsafeCell};
 use std::collections::HashMap;
-use std::mem::{self, transmute};
+use std::mem;
 use std::ptr;
 use std::sync::Mutex;
 use std::{fmt::Debug, thread_local};
@@ -342,12 +341,8 @@ impl<T: Trace> Drop for Arena<T> {
 
 // TODO add specialized Mark impl for N: 'static.
 
-impl<A: Trace + CoerceLifetime> Arena<A> {
+impl<A: Trace> Arena<A> {
     pub fn new() -> Arena<A> {
-        if !A::PRE_CONDITION {
-            panic!("You need to derive Trace for T")
-        };
-
         // Register a bus for this thread type combo.
         let bus = GC_BUS.with(|tm| {
             let tm = unsafe { &mut *tm.get() };
@@ -785,4 +780,37 @@ fn key<T: Trace>() -> (GcTypeInfo, usize) {
         GcTypeInfo::new::<T>(),
         ptr::drop_in_place::<T> as *const fn(*mut T) as usize,
     )
+}
+
+#[test]
+fn pre_condition_gc_newtype() {
+    use crate as sundial_gc;
+    use sundial_gc_derive::*;
+
+    // Without a Trace impl errors are generated.
+    // TODO can we improve the missleading error message?
+    #[derive(Trace)]
+    struct Foo<'r>(Gc<'r, usize>);
+
+    let u: Arena<usize> = Arena::new();
+
+    let a: Arena<Foo> = Arena::new();
+    let b: Arena<Foo<'static>> = Arena::new();
+
+    a.gc(Foo(u.gc(1)));
+    b.gc(Foo(u.gc(1)));
+}
+
+#[test]
+fn pre_condition_no_gc_newtype() {
+    // Without a Trace impl errors are generated.
+    struct Foo<T>(T);
+
+    // let a: Arena<Foo<Gc<usize>>> = Arena::new();
+    let b: Arena<Foo<usize>> = Arena::new();
+    let c: Arena<Foo<String>> = Arena::new();
+
+    // a.gc(Foo(u.gc(1))); //~ [rustc E0597] [E] `u` does not live long enough borrowed value does not live long enough
+    b.gc(Foo(1));
+    c.gc(Foo(String::from("foo")));
 }

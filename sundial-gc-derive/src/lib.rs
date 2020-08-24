@@ -2,8 +2,7 @@ use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use syn::{
     parse_macro_input, parse_quote, punctuated::Punctuated, token::Comma, DataEnum, DataStruct,
-    DeriveInput, Field, Fields, FieldsNamed, FieldsUnnamed, Ident, Lifetime, LifetimeDef, Type,
-    Variant,
+    DeriveInput, Field, Fields, FieldsNamed, FieldsUnnamed, Ident, Type, Variant,
 };
 
 #[proc_macro_derive(Trace)]
@@ -25,7 +24,6 @@ fn trace_impl(input: DeriveInput) -> TokenStream {
     generics.make_where_clause();
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
-    let mut generics_l = generics.clone();
     let (impl_generics_l, _, _) = generics.split_for_impl();
 
     let mut where_clause = where_clause.unwrap().clone();
@@ -202,9 +200,6 @@ fn trace_impl(input: DeriveInput) -> TokenStream {
         .map(|(i, ty)| (ty, &types[..i]))
         .map(|(ty, prior)| quote! {<#ty>::direct_gc_types(t, offset #(+ <#prior>::GC_COUNT)*);});
 
-    let lifetime_r = generics.lifetimes().next();
-    let lifetime_r = lifetime_r.iter();
-
     let lifetime = generics
         .lifetimes()
         .next()
@@ -248,7 +243,6 @@ fn trace_impl(input: DeriveInput) -> TokenStream {
             }
 
             default const GC_COUNT: u8 = #(<#types>::GC_COUNT)+*;
-            default const PRE_CONDITION: bool = #(<#types>::PRE_CONDITION)&&*;
         }
 
        unsafe impl #impl_generics_l sundial_gc::mark::CoerceLifetime for #top_name #ty_generics #where_clause_l {

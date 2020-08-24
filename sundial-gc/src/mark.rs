@@ -326,7 +326,6 @@ pub unsafe trait Trace: Immutable + CoerceLifetime {
     fn transitive_gc_types(tti: *mut Tti);
 
     const GC_COUNT: u8;
-    const PRE_CONDITION: bool;
 }
 
 unsafe impl<T: Immutable + CoerceLifetime> Trace for T {
@@ -347,14 +346,6 @@ unsafe impl<T: Immutable + CoerceLifetime> Trace for T {
     default fn transitive_gc_types(_: *mut Tti) {}
 
     default const GC_COUNT: u8 = 0;
-
-    default const PRE_CONDITION: bool = true;
-    // default const PRE_CONDITION: bool = if T::HAS_GC {
-    //     // TODO When fmt is allowed in const s/your type/type_name::<T>()
-    //     panic!("You need to derive Trace for your type. Required due to a direct Gc<T>");
-    // } else {
-    //     true
-    // };
 }
 
 unsafe impl<'r, T: Trace> Trace for Gc<'r, T> {
@@ -430,11 +421,6 @@ unsafe impl<'r, T: Trace> Trace for Gc<'r, T> {
     }
 
     const GC_COUNT: u8 = 1;
-    // FIXME(pre_condtion) check T::PRE_CONDITION
-    // Currently cycles prevent checking.
-    // to break the cycle we will use a UnsafePre(T) newtype in the derive macro.
-    // List = Nil | Cons(T, Gc(List T))
-    const PRE_CONDITION: bool = true;
 }
 
 // std impls
@@ -469,12 +455,6 @@ unsafe impl<T: Trace + CoerceLifetime> Trace for Option<T> {
     }
 
     const GC_COUNT: u8 = T::GC_COUNT;
-    default const PRE_CONDITION: bool = true;
-    // {
-    //     true
-    // } else {
-    //     panic!("You need to derive Trace for T. Required due to a direct Gc<A> in Option<T>");
-    // };
 }
 
 unsafe impl<T: CoerceLifetime> CoerceLifetime for Option<T> {
@@ -513,11 +493,6 @@ unsafe impl<A: Trace, B: Trace> Trace for (A, B) {
     }
 
     const GC_COUNT: u8 = A::GC_COUNT + B::GC_COUNT;
-    const PRE_CONDITION: bool = if A::PRE_CONDITION && B::PRE_CONDITION {
-        true
-    } else {
-        panic!("You need to derive Trace for A & B. Required due to a direct Gc<T> in (A, B)");
-    };
 }
 
 unsafe impl<A: CoerceLifetime, B: CoerceLifetime> CoerceLifetime for (A, B) {
