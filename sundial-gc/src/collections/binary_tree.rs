@@ -1,5 +1,6 @@
 use self::sundial_gc::*;
 use crate as sundial_gc;
+use mark::CoerceLifetime;
 use smallvec::SmallVec;
 use std::{cmp::Ordering::*, fmt::Debug, iter::FromIterator, ops::Index};
 use sundial_gc_derive::*;
@@ -9,6 +10,19 @@ pub struct Map<'r, K, V>(Option<Gc<'r, Node<'r, K, V>>>)
 where
     K: 'r,
     V: 'r;
+
+#[derive(Trace, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
+pub struct Node<'r, K, V>
+where
+    K: 'r,
+    V: 'r,
+{
+    key: K,
+    size: usize,
+    left: Map<'r, K, V>,
+    right: Map<'r, K, V>,
+    value: V,
+}
 
 impl<'r, K, V> Copy for Map<'r, K, V> {}
 impl<'r, K, V> Clone for Map<'r, K, V> {
@@ -31,28 +45,42 @@ impl<'r, K, V> From<Gc<'r, Node<'r, K, V>>> for Map<'r, K, V> {
     }
 }
 
-impl<'r, K: Trace + Clone + Ord, V: Trace + Clone> FromIterator<(K, V)> for Map<'r, K, V> {
-    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
-        let arena = &Arena::new();
+impl<
+        'r,
+        'a: 'r,
+        K: 'r + CoerceLifetime + Trace + Clone + Ord,
+        V: 'r + CoerceLifetime + Trace + Clone,
+    > FromIterator<(&'a Arena<Node<'a, K, V>>, K, V)> for Map<'r, K, V>
+{
+    fn from_iter<I: IntoIterator<Item = (&'a Arena<Node<'a, K, V>>, K, V)>>(iter: I) -> Self {
         iter.into_iter()
-            .fold(Map::default(), |map, (k, v)| map.insert(k, v, arena))
+            .fold(Map::default(), |map, (arena, k, v)| map.insert(k, v, arena))
     }
 }
 
-impl<'r, K: Trace + Ord + Clone + Debug, V: Trace + Clone + Debug> Debug for Map<'r, K, V> {
+impl<
+        'r,
+        K: CoerceLifetime + CoerceLifetime + Trace + Ord + Clone + Debug,
+        V: CoerceLifetime + CoerceLifetime + Trace + Clone + Debug,
+    > Debug for Map<'r, K, V>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_map().entries(self.iter()).finish()
     }
 }
 
-impl<'r, K: Trace + Ord + Clone, V: Trace + Clone> Index<&K> for Map<'r, K, V> {
+impl<'r, K: CoerceLifetime + Trace + Ord + Clone, V: CoerceLifetime + Trace + Clone> Index<&K>
+    for Map<'r, K, V>
+{
     type Output = V;
     fn index(&self, key: &K) -> &V {
         self.get(key).unwrap()
     }
 }
 
-impl<'r, K: Trace + Ord + Clone, V: Trace + Clone> Map<'r, K, V> {
+impl<'r, K: 'r + CoerceLifetime + Trace + Ord + Clone, V: 'r + CoerceLifetime + Trace + Clone>
+    Map<'r, K, V>
+{
     pub fn size(&self) -> usize {
         match self {
             Map(Some(n)) => n.size,
@@ -67,7 +95,12 @@ impl<'r, K: Trace + Ord + Clone, V: Trace + Clone> Map<'r, K, V> {
         }
     }
 
-    pub fn insert(self, key: K, value: V, arena: &Arena<Node<'static, K, V>>) -> Map<'r, K, V> {
+    pub fn insert<'l, 'a: 'r>(
+        self,
+        key: K,
+        value: V,
+        arena: &'a Arena<Node<'l, K, V>>,
+    ) -> Map<'r, K, V> {
         match self.0 {
             Some(n) => Map::from(Node::insert(n, key, value, arena)),
             _ => Map::from(arena.gc(Node {
@@ -80,11 +113,11 @@ impl<'r, K: Trace + Ord + Clone, V: Trace + Clone> Map<'r, K, V> {
         }
     }
 
-    pub fn insert_if_empty(
+    pub fn insert_if_empty<'a: 'r>(
         self,
         key: K,
         value: V,
-        arena: &Arena<Node<'static, K, V>>,
+        arena: &'a Arena<Node<K, V>>,
     ) -> Map<'r, K, V> {
         match self.0 {
             Some(n) => Map::from(Node::insert(n, key, value, arena)),
@@ -116,7 +149,11 @@ impl<'r, K: Trace + Ord + Clone, V: Trace + Clone> Map<'r, K, V> {
     }
 
     /// TODO non naive implementation.
-    pub fn union(self, right: Map<'r, K, V>, arena: &Arena<Node<'static, K, V>>) -> Map<'r, K, V> {
+    pub fn union<'a: 'r>(
+        self,
+        right: Map<'r, K, V>,
+        arena: &'a Arena<Node<K, V>>,
+    ) -> Map<'r, K, V> {
         match (self, right) {
             (Map(Some(left @ Gc(_, _))), Map(Some(Gc(_, _)))) => {
                 let left: Gc<Node<K, V>> = left;
@@ -132,20 +169,12 @@ impl<'r, K: Trace + Ord + Clone, V: Trace + Clone> Map<'r, K, V> {
     }
 }
 
-#[derive(Trace, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
-pub struct Node<'r, K, V>
-where
-    K: 'r,
-    V: 'r,
+impl<
+        'r,
+        K: CoerceLifetime + Trace + Debug + Clone + Ord,
+        V: CoerceLifetime + Trace + Debug + Clone,
+    > Debug for Node<'r, K, V>
 {
-    key: K,
-    size: usize,
-    left: Map<'r, K, V>,
-    right: Map<'r, K, V>,
-    value: V,
-}
-
-impl<'r, K: Trace + Debug + Clone + Ord, V: Trace + Debug + Clone> Debug for Node<'r, K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Node")
             .field("key", &self.key)
@@ -157,7 +186,9 @@ impl<'r, K: Trace + Debug + Clone + Ord, V: Trace + Debug + Clone> Debug for Nod
     }
 }
 
-impl<'r, K: Trace + Ord + Clone, V: Trace + Clone> Node<'r, K, V> {
+impl<'r, K: CoerceLifetime + Trace + Ord + Clone, V: CoerceLifetime + Trace + Clone>
+    Node<'r, K, V>
+{
     pub fn get(&self, key: &K) -> Option<&V> {
         match (key.cmp(&self.key), &self.left, &self.right) {
             (Equal, _, _) => Some(&self.value),
@@ -166,11 +197,11 @@ impl<'r, K: Trace + Ord + Clone, V: Trace + Clone> Node<'r, K, V> {
         }
     }
 
-    pub fn insert(
-        node: Gc<'r, Node<'r, K, V>>,
+    pub fn insert<'a: 'r>(
+        node: Gc<Node<'r, K, V>>,
         key: K,
         value: V,
-        arena: &Arena<Node<'static, K, V>>,
+        arena: &'a Arena<Node<K, V>>,
     ) -> Gc<'r, Node<'r, K, V>> {
         match key.cmp(&node.key) {
             Equal => arena.gc(Node {
@@ -197,11 +228,11 @@ impl<'r, K: Trace + Ord + Clone, V: Trace + Clone> Node<'r, K, V> {
         }
     }
 
-    pub fn insert_if_empty(
+    pub fn insert_if_empty<'a: 'r>(
         node: Gc<'r, Node<'r, K, V>>,
         key: K,
         value: V,
-        arena: &Arena<Node<'static, K, V>>,
+        arena: &'a Arena<Node<K, V>>,
     ) -> Gc<'r, Node<'r, K, V>> {
         match key.cmp(&node.key) {
             Equal => node,
@@ -225,12 +256,12 @@ impl<'r, K: Trace + Ord + Clone, V: Trace + Clone> Node<'r, K, V> {
     const DELTA: usize = 3;
     const RATIO: usize = 2;
 
-    fn balance(
+    fn balance<'a: 'r>(
         key: K,
         value: V,
         left: Map<'r, K, V>,
         right: Map<'r, K, V>,
-        arena: &Arena<Map<'static, K, V>>,
+        arena: &'a Arena<Node<K, V>>,
     ) -> Gc<'r, Self> {
         let node = |key: K, value: V, size, left, right| {
             arena.gc(Node {
@@ -798,7 +829,7 @@ impl<'r, K: Trace + Ord + Clone, V: Trace + Clone> Node<'r, K, V> {
     //  }
 }
 
-#[derive(Trace, Clone, Eq, PartialEq)]
+// #[derive(Trace, Clone, Eq, PartialEq)]
 pub struct Iter<'r, K, V>
 where
     K: 'r,
@@ -807,7 +838,7 @@ where
     parents: SmallVec<[Gc<'r, Node<'r, K, V>>; 32]>,
 }
 
-impl<'r, K: Trace, V: Trace> Iterator for Iter<'r, K, V> {
+impl<'r, K: CoerceLifetime + Trace, V: CoerceLifetime + Trace> Iterator for Iter<'r, K, V> {
     type Item = (&'r K, &'r V);
     fn next(&mut self) -> Option<Self::Item> {
         self.parents.pop().map(
@@ -836,10 +867,17 @@ impl<'r, K: Trace, V: Trace> Iterator for Iter<'r, K, V> {
 mod binary_tree_tests {
     use crate::collections::Map;
     use crate::*;
+    use collections::Node;
+    use mark::CoerceLifetime;
     use quickcheck_macros::*;
     use std::{collections::BTreeMap, fmt::Debug};
 
-    fn get_set<K: Trace + Clone + Ord + Debug, V: Trace + Clone + Eq + Debug>(pairs: Vec<(K, V)>) {
+    fn get_set<
+        K: CoerceLifetime + Trace + Clone + Ord + Debug,
+        V: CoerceLifetime + Trace + Clone + Eq + Debug,
+    >(
+        pairs: Vec<(K, V)>,
+    ) {
         let sorted_pairs: BTreeMap<K, V> = pairs.iter().cloned().collect();
 
         let arena = Arena::new();
@@ -877,7 +915,10 @@ mod binary_tree_tests {
         iter_test(pairs)
     }
 
-    fn iter_test<K: Trace + Clone + Ord + Debug, V: Trace + Clone + Eq + Debug>(
+    fn iter_test<
+        K: CoerceLifetime + Trace + Clone + Ord + Debug,
+        V: CoerceLifetime + Trace + Clone + Eq + Debug,
+    >(
         pairs: Vec<(K, V)>,
     ) {
         let sorted_pairs: BTreeMap<K, V> = pairs.iter().cloned().collect();
@@ -896,5 +937,26 @@ mod binary_tree_tests {
             assert_eq!(Some((k, v)), ri.next());
             assert_eq!(Some((k, v)), si.next());
         })
+    }
+
+    struct RecMap<'r>(Map<'r, usize, RecMap<'r>>);
+
+    fn static_arena<'r, 'a: 'r>(
+        a: &'a Arena<Node<'static, usize, RecMap<'static>>>,
+    ) -> Gc<'r, Node<'r, usize, RecMap<'r>>> {
+        let n: Gc<'r, Node<'r, usize, RecMap<'r>>> = a.gc(Node {
+            key: 1usize,
+            size: 1,
+            left: Map::default(),
+            right: Map::default(),
+            value: RecMap(Map::default()),
+        });
+        n
+    }
+
+    #[test]
+    fn static_arena_test() {
+        let a = Arena::new();
+        let _ = static_arena(&a);
     }
 }

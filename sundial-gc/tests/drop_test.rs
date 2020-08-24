@@ -42,7 +42,7 @@ impl Drop for Count {
 fn drop_test() {
     log_init();
     for i in 0..1000 {
-        let a = Arena::new();
+        let a: Arena<Count> = Arena::new();
         for _ in 0..1000 {
             a.gc(Count::new());
         }

@@ -3,7 +3,7 @@
 #![feature(generic_associated_types)]
 #![allow(dead_code)]
 
-use collections::List;
+use collections::{Elem, List};
 use sundial_gc::*;
 use sundial_gc_derive::*;
 
@@ -42,19 +42,24 @@ enum Value<'r> {
 
 type Env<'r> = List<'r, Value<'r>>;
 
-fn eval<'r>(env: Env<'r>, term: Gc<'r, Expr<'r>>) -> Value<'r> {
+fn eval<'r, 'a: 'r>(
+    env: Env<'r>,
+    term: Gc<'r, Expr<'r>>,
+    terms: &'a Arena<Expr>,
+    elms: &'a Arena<Elem<Value<'r>>>,
+) -> Value<'r> {
     match *term {
         Expr::Var(n) => env[n],
         Expr::Lam(a) => Value::Closure(a, env),
         Expr::App(a, b) => {
-            let (c, env_) = match eval(env, a) {
+            let (c, env_) = match eval(env, a, terms, elms) {
                 Value::Closure(c, env_) => (c, env_),
                 _ => panic!(),
             };
-            let v = eval(env, b);
-            eval(env_.cons(v, &Arena::new()), c)
+            let v = eval(env, b, terms, elms);
+            eval(env_.cons(v, elms), c, terms, elms)
         }
         Expr::Lit(n) => Value::Int(n),
-        Expr::Prim(op, a, b) => op.eval(eval(env, a), eval(env, b)),
+        Expr::Prim(op, a, b) => op.eval(eval(env, a, terms, elms), eval(env, b, terms, elms)),
     }
 }

@@ -9,7 +9,6 @@ use sundial_gc_derive::*;
 pub enum BinaryTree<'r, K, V>
 where
     K: 'r,
-    K: Trace,
     V: 'r,
 {
     Empty,

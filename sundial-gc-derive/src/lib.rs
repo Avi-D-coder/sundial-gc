@@ -2,7 +2,7 @@ use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use syn::{
     parse_macro_input, parse_quote, punctuated::Punctuated, token::Comma, DataEnum, DataStruct,
-    DeriveInput, Field, Fields, FieldsNamed, FieldsUnnamed, Generics, Ident, Lifetime, Type,
+    DeriveInput, Field, Fields, FieldsNamed, FieldsUnnamed, Ident, Lifetime, LifetimeDef, Type,
     Variant,
 };
 
@@ -24,8 +24,13 @@ fn trace_impl(input: DeriveInput) -> TokenStream {
 
     generics.make_where_clause();
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+
+    let mut generics_l = generics.clone();
+    let (impl_generics_l, _, _) = generics.split_for_impl();
+
     let mut where_clause = where_clause.unwrap().clone();
     let mut where_clause_l = where_clause.clone();
+
     generics.type_params().for_each(|t| {
         where_clause
             .predicates
@@ -33,7 +38,7 @@ fn trace_impl(input: DeriveInput) -> TokenStream {
 
         where_clause_l
             .predicates
-            .push(parse_quote! { #t: 'static + sundial_gc::mark::CoerceLifetime + sundial_gc::auto_traits::Immutable });
+            .push(parse_quote! { #t: sundial_gc::mark::CoerceLifetime });
     });
 
     let tuple = |unnamed: Punctuated<Field, Comma>, types: &mut Vec<Type>| {
@@ -197,20 +202,19 @@ fn trace_impl(input: DeriveInput) -> TokenStream {
         .map(|(i, ty)| (ty, &types[..i]))
         .map(|(ty, prior)| quote! {<#ty>::direct_gc_types(t, offset #(+ <#prior>::GC_COUNT)*);});
 
+    let lifetime_r = generics.lifetimes().next();
+    let lifetime_r = lifetime_r.iter();
+
     let lifetime = generics
         .lifetimes()
         .next()
         .map(|_| quote! {'coerce_lifetime,})
         .unwrap_or_default();
+
     let type_params = generics
         .type_params()
         .map(|t| t.ident.clone())
         .map(|t| quote! { #t::Type<'coerce_lifetime> });
-
-    let mut ty_generics_l: Generics = generics.clone();
-    ty_generics_l
-        .lifetimes_mut()
-        .for_each(|l| l.lifetime = Lifetime::new("'static", Span::call_site()));
 
     quote! {
         unsafe impl #impl_generics sundial_gc::Trace for #top_name #ty_generics #where_clause {
@@ -247,8 +251,8 @@ fn trace_impl(input: DeriveInput) -> TokenStream {
             default const PRE_CONDITION: bool = #(<#types>::PRE_CONDITION)&&*;
         }
 
-       unsafe impl #impl_generics sundial_gc::mark::CoerceLifetime for #top_name #ty_generics_l #where_clause_l {
-           type Type<'coerce_lifetime> = #top_name<#lifetime #(#type_params,)*>;
+       unsafe impl #impl_generics_l sundial_gc::mark::CoerceLifetime for #top_name #ty_generics #where_clause_l {
+            type Type<'coerce_lifetime> = #top_name<#lifetime #(#type_params,)*>;
        }
     }
 }

@@ -21,40 +21,59 @@ use std::{
 //         unsafe { T::coerce_lifetime(old) }
 //     }
 // }
-
-pub unsafe trait CoerceLifetime {
-    type Type<'l>: Immutable;
-    unsafe fn coerce_lifetime<'o, 'n>(old: &'o Self::Type<'o>) -> &'n Self::Type<'n> {
-        mem::transmute(old)
-    }
-}
-
-unsafe impl<T: CoerceLifetime> CoerceLifetime for Gc<'static, T> {
-    type Type<'l> = Gc<'l, T::Type<'l>>;
-}
-
-unsafe impl<T: Immutable> CoerceLifetime for T {
-    default type Type<'l> = T;
-}
-
 // This will be sound once GAT or const Eq &str lands.
 // The former will allow transmuting only lifetimes.
 // The latter will make `assert_eq!(type_name::<O>(), type_name::<N>())` const.
 // https://github.com/rust-lang/rfcs/pull/2632.
-pub unsafe trait Mark<'o, 'n, A: CoerceLifetime, O, N>
+pub unsafe trait Mark<'o, 'n, A, O, N>
 where
-    O: 'o + Trace + Id<T = A::Type<'o>>,
-    N: 'n + Trace + Id<T = A::Type<'n>>,
+    A: CoerceLifetime,
+    O: 'o + CoerceLifetime,
+    N: 'n + CoerceLifetime,
+    O::Type<'static>: ID<A::Type<'static>>,
+    N::Type<'static>: ID<A::Type<'static>> + ID<O::Type<'static>>,
 {
     fn mark<'a: 'n>(&'a self, o: Gc<'o, O>) -> Gc<'n, N>;
 }
 
 // Blanket impl Mark for Arena<T> is in src/arena.rs
 
+pub unsafe trait CoerceLifetime {
+    #[rustfmt::skip]
+    type Type<'l>: 'l;
+    unsafe fn coerce_lifetime<'o, 'n>(old: &'o Self::Type<'o>) -> &'n Self::Type<'n> {
+        mem::transmute(old)
+    }
+}
+
+unsafe impl<'r, T: CoerceLifetime> CoerceLifetime for Gc<'r, T> {
+    #[rustfmt::skip]
+    type Type<'l> = Gc<'l, T::Type<'l>>;
+}
+
+unsafe impl<T: 'static> CoerceLifetime for T {
+    #[rustfmt::skip]
+    default type Type<'l> = T;
+}
+
+/// `B: TypeEq<A>` is a marker trait.
+/// It denotes that `A` and `B` share the same type, but not necessarily lifetime.
+///
+/// For types to be compared `B` must implement `CoerceLifetime`.
+///
+/// `usize: TypeEq<usize>`
+/// `List<'static, T>: List<'r, T>`
+pub trait TypeEq<A> {}
+impl<A: CoerceLifetime, B: CoerceLifetime> TypeEq<A> for B where for<'a> A::Type<'a>: ID<B::Type<'a>>
+{}
+impl<A> TypeEq<A> for A {}
+
+pub trait ID<T> {}
+impl<T> ID<T> for T {}
+
 pub trait Id {
     type T;
 }
-
 impl<T> Id for T {
     type T = T;
 }
@@ -103,11 +122,9 @@ impl Translator {
 impl Index<Offset> for Translator {
     type Output = Offset;
     fn index(&self, i: Offset) -> &Self::Output {
-        unsafe {
-            self.offsets
-                .get(i as usize)
-                .expect("Handlers does not exist")
-        }
+        self.offsets
+            .get(i as usize)
+            .expect("Handlers does not exist")
     }
 }
 
@@ -131,7 +148,7 @@ pub struct Handlers {
 
 impl Handlers {
     /// Returns a ptr if the condemned ptr has already been evacuated.
-    unsafe fn forward<T: Immutable>(condemned: *const T, new: *const T) -> *const T {
+    unsafe fn forward<T: Trace>(condemned: *const T, new: *const T) -> *const T {
         let header = &mut *(Header::from(condemned) as *mut Header<T>);
         // This will race if multiple threads are tracing!
         let mut evacuated = header.intern.evacuated.lock().unwrap();
@@ -280,7 +297,7 @@ impl Invariant {
             && unsafe { &*HeaderUnTyped::from(ptr as *const _) }.condemned
     }
 
-    pub(crate) fn contains(&self, r: Range<usize>) -> bool {
+    pub(crate) fn _contains(&self, r: Range<usize>) -> bool {
         self.white_start <= r.start && self.white_end >= r.end
     }
 }
@@ -295,7 +312,7 @@ impl Invariant {
 /// You must implement all methods, do not use defaults.
 ///
 /// You must also implement `CoerceLifetime`.
-pub unsafe trait Trace: Immutable {
+pub unsafe trait Trace: Immutable + CoerceLifetime {
     fn fields(s: &Self, offset: u8, grey_fields: u8, invariant: &Invariant) -> u8;
     unsafe fn evacuate<'e>(
         s: &Self,
@@ -312,7 +329,7 @@ pub unsafe trait Trace: Immutable {
     const PRE_CONDITION: bool;
 }
 
-unsafe impl<T: Immutable> Trace for T {
+unsafe impl<T: Immutable + CoerceLifetime> Trace for T {
     default fn fields(_: &Self, _: u8, _: u8, _: &Invariant) -> u8 {
         // This check is superfluous
         // TODO ensure if gets optimized out
@@ -330,12 +347,14 @@ unsafe impl<T: Immutable> Trace for T {
     default fn transitive_gc_types(_: *mut Tti) {}
 
     default const GC_COUNT: u8 = 0;
-    default const PRE_CONDITION: bool = if T::HAS_GC {
-        // TODO When fmt is allowed in const s/your type/type_name::<T>()
-        panic!("You need to derive Trace for your type. Required due to a direct Gc<T>");
-    } else {
-        true
-    };
+
+    default const PRE_CONDITION: bool = true;
+    // default const PRE_CONDITION: bool = if T::HAS_GC {
+    //     // TODO When fmt is allowed in const s/your type/type_name::<T>()
+    //     panic!("You need to derive Trace for your type. Required due to a direct Gc<T>");
+    // } else {
+    //     true
+    // };
 }
 
 unsafe impl<'r, T: Trace> Trace for Gc<'r, T> {
@@ -420,7 +439,7 @@ unsafe impl<'r, T: Trace> Trace for Gc<'r, T> {
 
 // std impls
 
-unsafe impl<T: Trace> Trace for Option<T> {
+unsafe impl<T: Trace + CoerceLifetime> Trace for Option<T> {
     default fn fields(s: &Self, offset: u8, grey_fields: u8, invariant: &Invariant) -> u8 {
         match s {
             Some(t) => Trace::fields(t, offset, grey_fields, invariant),
@@ -450,14 +469,19 @@ unsafe impl<T: Trace> Trace for Option<T> {
     }
 
     const GC_COUNT: u8 = T::GC_COUNT;
-    default const PRE_CONDITION: bool = if T::PRE_CONDITION {
-        true
-    } else {
-        panic!("You need to derive Trace for T. Required due to a direct Gc<A> in Option<T>");
-    };
+    default const PRE_CONDITION: bool = true;
+    // {
+    //     true
+    // } else {
+    //     panic!("You need to derive Trace for T. Required due to a direct Gc<A> in Option<T>");
+    // };
 }
 
-unsafe impl<A: Immutable, B: Immutable> Trace for (A, B) {
+unsafe impl<T: CoerceLifetime> CoerceLifetime for Option<T> {
+    type Type<'l> = Option<T::Type<'l>>;
+}
+
+unsafe impl<A: Trace, B: Trace> Trace for (A, B) {
     fn fields((a, b): &Self, offset: u8, grey_fields: u8, invariant: &Invariant) -> u8 {
         let mut r = 0b0000_0000;
         r |= Trace::fields(a, offset, grey_fields, invariant);
@@ -494,4 +518,14 @@ unsafe impl<A: Immutable, B: Immutable> Trace for (A, B) {
     } else {
         panic!("You need to derive Trace for A & B. Required due to a direct Gc<T> in (A, B)");
     };
+}
+
+unsafe impl<A: CoerceLifetime, B: CoerceLifetime> CoerceLifetime for (A, B) {
+    type Type<'l> = (A::Type<'l>, B::Type<'l>);
+}
+
+unsafe impl<A: CoerceLifetime, B: CoerceLifetime, C: CoerceLifetime, D: CoerceLifetime>
+    CoerceLifetime for (A, B, C, D)
+{
+    type Type<'l> = (A::Type<'l>, B::Type<'l>, C::Type<'l>, D::Type<'l>);
 }

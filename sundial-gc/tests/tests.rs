@@ -38,7 +38,7 @@ fn churn_list() {
     let gc_one = usizes.gc(1);
 
     let lists: Arena<List<Gc<usize>>> = Arena::new();
-    let one_two = lists.gc(List {
+    let one_two: Gc<List<Gc<usize>>> = lists.gc(List {
         t: gc_one,
         _next: Some(lists.gc(List {
             t: usizes.gc(2),
@@ -47,7 +47,7 @@ fn churn_list() {
     });
 
     let lists2: Arena<List<Gc<usize>>> = Arena::new();
-    let one_two = lists2.mark(one_two);
+    let one_two: Gc<List<Gc<usize>>> = lists2.mark(one_two);
     drop(lists);
     drop(usizes);
     let _ = one_two.t;
@@ -75,7 +75,7 @@ fn churn() {
     // If the Gc owned foos or usizes and wanted to free it,
     // mark would copy the head of it's structure to foos2.
     // The Gc would then copy the tail of the structure into a older generation.
-    let foo2 = foos2.mark(foo);
+    let foo2: Gc<Foo> = foos2.mark(foo);
     drop(foos);
     drop(usizes);
     let _ = *foo2._bar + 1usize;
@@ -162,22 +162,24 @@ fn immutable_test() {
     let _mutexes: Arena<Box<std::sync::Arc<usize>>> = Arena::new();
 }
 
+// It generates the correct errors.
+// TODO test for errors like rustc does.
 #[test]
 fn use_after_free_test() {
     // let mut foo = None;
-    let mut map: Map<'static, usize, usize> = Map::default();
+    let mut _map: Map<usize, usize> = Map::default();
 
-    {
-        // foo = Some(&Arena::new().gc(1)) //~ Err
-        // let a = Arena::new();
-        // foo = Some(&a.gc(1)) //~ Err
+    // {
+    // foo = Some(&Arena::new().gc(1)) //~ Err
+    // let a = Arena::new();
+    // foo = Some(&a.gc(1)) //~ Err
 
-        let arena = Arena::new();
-        map = map.insert(1, 1, &arena);
-        drop(arena)
-    }
+    let arena = Arena::new();
+    _map = _map.insert(1, 1, &arena);
+    drop(arena);
+    // }
 
-    eprintln!("{:?}", map);
+    // eprintln!("{:?}", _map);
 }
 
 // #[cfg(test)]
@@ -258,35 +260,35 @@ fn use_after_free_test() {
 //         let foo = foos.gc(Foo(n));
 //     }
 
-    //     fn foo<'r>(n: usize, usizes: &'r Arena<usize>) -> Foo<'r> {
-    //         let n = usizes.gc(n);
-    //         Foo(n)
-    //     }
+//     fn foo<'r>(n: usize, usizes: &'r Arena<usize>) -> Foo<'r> {
+//         let n = usizes.gc(n);
+//         Foo(n)
+//     }
 
-    //     #[derive(Copy, Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
-    //     enum List<'r, T: Copy> {
-    //         Cons(T, Gc<'r, List<'r, T>>),
-    //         Empty,
-    //     }
+//     #[derive(Copy, Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
+//     enum List<'r, T: Copy> {
+//         Cons(T, Gc<'r, List<'r, T>>),
+//         Empty,
+//     }
 
-    //     impl<'r, T: Copy> List<'r, T> {
-    //         fn cons(
-    //             head: T,
-    //             tail: Gc<'r, List<'r, T>>,
-    //             arena: &'r Arena<List<'r, T>>,
-    //         ) -> Gc<'r, List<'r, T>> {
-    //             arena.gc(List::Cons(head, tail))
-    //         }
-    //     }
+//     impl<'r, T: Copy> List<'r, T> {
+//         fn cons(
+//             head: T,
+//             tail: Gc<'r, List<'r, T>>,
+//             arena: &'r Arena<List<'r, T>>,
+//         ) -> Gc<'r, List<'r, T>> {
+//             arena.gc(List::Cons(head, tail))
+//         }
+//     }
 
-    //     let lists: Arena<List<u8>> = Arena::new();
-    //     // let lists: &Arena<List<u8>> = &lists;
-    //     // List::cons(1, lists.gc(List::Empty), &lists);
-    //     lists.gc(List::Cons(1, lists.gc(List::Empty)));
+//     let lists: Arena<List<u8>> = Arena::new();
+//     // let lists: &Arena<List<u8>> = &lists;
+//     // List::cons(1, lists.gc(List::Empty), &lists);
+//     lists.gc(List::Cons(1, lists.gc(List::Empty)));
 
-    //     // let nodes: Arena<Node<u8, u8>> = Arena::new();
-    //     // let nodes: &Arena<Node<u8, u8>> = nodes;
+//     // let nodes: Arena<Node<u8, u8>> = Arena::new();
+//     // let nodes: &Arena<Node<u8, u8>> = nodes;
 
-    //     // Map::default().insert(1, 1, &nodes);
-    // }
+//     // Map::default().insert(1, 1, &nodes);
+// }
 // }

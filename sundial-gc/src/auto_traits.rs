@@ -3,7 +3,7 @@ use std::cell::UnsafeCell;
 
 pub unsafe auto trait NoGc {}
 impl<'r, T> !NoGc for Gc<'r, T> {}
-unsafe impl<'r, T: NoGc> NoGc for Box<T> {}
+// unsafe impl<'r, T: NoGc> NoGc for Box<T> {}
 
 pub trait HasGc {
     const HAS_GC: bool;

@@ -20,9 +20,9 @@ quickcheck_macros = "0.9"
 nom = "5.1.2"
 rustyline = "6.2.0"
 
-[[bench]]
-name = "hamt_benchmark"
-harness = false
+# [[bench]]
+# name = "hamt_benchmark"
+# harness = false
 
 [[bench]]
 name = "usize_benchmark"

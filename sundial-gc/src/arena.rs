@@ -5,7 +5,7 @@ use crate::{
         bus::{self, Bus, Msg},
         GcThreadBus,
     },
-    mark::{CoerceLifetime, GcTypeInfo, Id, Invariant, Mark, Trace},
+    mark::{CoerceLifetime, GcTypeInfo, Id, Invariant, Mark, Trace, TypeEq, ID},
 };
 use bus::WorkerMsg;
 use gc::RootIntern;
@@ -25,7 +25,7 @@ pub(crate) struct Mem {
     _mem: [u8; ARENA_SIZE],
 }
 
-pub struct Arena<T: Trace + CoerceLifetime> {
+pub struct Arena<T: Trace> {
     // TODO compact representation of arenas
     // TODO make all these private by wrapping up needed functionality.
     // TODO derive header from next
@@ -173,10 +173,13 @@ pub(crate) fn index(ptr: *const u8, size: u16, align: u16) -> u16 {
     ((ptr as usize - low) / size as usize) as u16
 }
 
-unsafe impl<'o, 'n, A: Trace + CoerceLifetime, O, N> Mark<'o, 'n, A, O, N> for Arena<A>
+unsafe impl<'o, 'n, A, O, N> Mark<'o, 'n, A, O, N> for Arena<A>
 where
-    O: 'o + Trace + Id<T = A::Type<'o>>,
-    N: 'n + Trace + Id<T = A::Type<'n>>,
+    A: Trace,
+    O: 'o + Trace,
+    N: 'n + Trace,
+    O::Type<'static>: ID<A::Type<'static>>,
+    N::Type<'static>: ID<A::Type<'static>> + ID<O::Type<'static>>,
 {
     fn mark<'a: 'n>(&'a self, old: Gc<'o, O>) -> Gc<'n, N> {
         let old_ptr = old.0 as *const O as *const N;
@@ -429,7 +432,11 @@ impl<A: Trace + CoerceLifetime> Arena<A> {
 
     /// Create a new `Gc<T>`.
     /// If `T : Copy` & `size_of::<T>() > 8`, you should use `self.gc_copy(&T)` instead.
-    pub fn gc<'r, 'a: 'r, T: Id<T = A::Type<'r>>>(&'a self, t: T) -> Gc<'r, T> {
+    pub fn gc<'r, 'a: 'r, T>(&'a self, t: T) -> Gc<'r, T>
+    where
+        T: CoerceLifetime,
+        T::Type<'static>: ID<A::Type<'static>>,
+    {
         unsafe {
             if self.full() {
                 self.new_block();
@@ -474,7 +481,7 @@ impl<A: Trace + CoerceLifetime> Arena<A> {
     }
 }
 
-impl<A: Trace + Copy> Arena<A> {
+impl<'l, A: Trace + CoerceLifetime + Copy> Arena<A> {
     /// Directly copies T instead of reading it onto the stack first.
     pub fn gc_copy<'a, 'r: 'a, T: Copy>(&'a self, t: &T) -> Gc<'r, T> {
         unsafe {
@@ -529,7 +536,7 @@ fn gc_copy_test() {
     assert!(n1 == n2 + 8)
 }
 
-impl<A: Trace + Clone> Arena<A> {
+impl<'l, A: Trace + CoerceLifetime + Clone> Arena<A> {
     pub fn gc_clone<'r, 'a: 'r, T: Clone>(&'a self, t: &T) -> Gc<'r, T> {
         unsafe {
             if self.full() {

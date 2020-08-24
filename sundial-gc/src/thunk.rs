@@ -1,4 +1,4 @@
-use crate::{Gc, Immutable, Trace};
+use crate::{Gc, Immutable, Trace, mark::CoerceLifetime};
 use std::ops::Deref;
 use std::{
     any::type_name,
@@ -155,4 +155,8 @@ unsafe impl<'r, A: Trace, T: Trace> Trace for Thunk<'r, A, T> {
     const GC_COUNT: u8 = 2;
     // FIXME
     const PRE_CONDITION: bool = true;
+}
+
+unsafe impl<'r, A: CoerceLifetime, T: CoerceLifetime> CoerceLifetime for Thunk<'r, A, T> {
+    type Type<'l> = Thunk<'l, A::Type<'l>, T::Type<'l>>;
 }
