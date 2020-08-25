@@ -68,15 +68,8 @@ impl<A: CoerceLifetime, B: CoerceLifetime> TypeEq<A> for B where for<'a> A::Type
 {}
 impl<A> TypeEq<A> for A {}
 
-pub trait ID<T> {}
-impl<T> ID<T> for T {}
-
-pub trait Id {
-    type T;
-}
-impl<T> Id for T {
-    type T = T;
-}
+pub unsafe trait ID<T> {}
+unsafe impl<T> ID<T> for T {}
 
 pub type Offset = u8;
 
