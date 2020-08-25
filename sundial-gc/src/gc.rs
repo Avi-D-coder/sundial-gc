@@ -1,10 +1,11 @@
-use crate::{arena::Header, Arena, Mark, Trace};
+use crate::{arena::Header, mark::ID, Arena, Mark, Trace};
 use std::boxed;
 use std::ops::{Deref, DerefMut};
 use std::{
-    any::type_name,
+    any::Any,
     borrow::Borrow,
     fmt::Debug,
+    marker::PhantomData,
     sync::atomic::{AtomicPtr, AtomicUsize, Ordering},
 };
 
@@ -92,53 +93,37 @@ pub struct Root<T> {
     intern: *const RootIntern<T>,
 }
 
-// impl<T: Trace> Root<T> {
-//     pub fn to_gc<'a>(&self, arena: &'a Arena<T>) -> Gc<'a, T> {
-//         let root = unsafe { &*self.intern };
-//         let t = unsafe { &*root.gc_ptr.load(Ordering::Acquire) };
-//         arena.mark(Gc(t, P(())))
-//     }
-// }
+impl<T: Trace> Root<T> {
+    pub fn into_gc<'r, 'a: 'r, N>(&self, arena: &'a Arena<T>) -> Gc<'a, N>
+    where
+        N: 'r + Trace + ID<T::Type<'r>>,
+        N::Type<'static>: ID<T::Type<'static>>,
+    {
+        let root = unsafe { &*self.intern };
+        let t = unsafe { &*root.gc_ptr.load(Ordering::Acquire) };
+        arena.mark(Gc(t, P(())))
+    }
 
-// Gc<'o, T> -> Gc<'n, T>
+    // TODO requires deep evac prior to installing new pointer.
+    // /// Block collection of `T` and it's transitive child types.
+    // fn guard(&self) -> Guard<Gc<T>> {}
+}
 
-// impl<'r, T: Condemned> From<Gc<'r, T>> for Root<T> {
-//     fn from(gc: Gc<'r, T>) -> Root<T> {
-//         let header = unsafe { &*Header::from(gc.0) };
-//         let mut roots = header.intern.roots.lock().unwrap();
-//         let root = roots.entry(Arena::<T>::index(gc.0)).or_insert_with(|| {
-//             boxed::Box::leak(boxed::Box::new(RootIntern {
-//                 ref_count: AtomicUsize::new(1),
-//                 gc_ptr: AtomicPtr::new(gc.0 as *const T as *mut u8),
-//             }))
-//         });
+impl<'r, T: Trace> From<Gc<'r, T>> for Root<T::Type<'static>> {
+    fn from(gc: Gc<'r, T>) -> Root<T::Type<'static>> {
+        todo!()
+        // let header = unsafe { &*Header::from(gc.0) };
+        // let mut roots = header.intern.roots.lock().unwrap();
+        // let root = roots.entry(Arena::<T>::index(gc.0)).or_insert_with(|| {
+        //     boxed::Box::leak(boxed::Box::new(RootIntern {
+        //         ref_count: AtomicUsize::new(1),
+        //         gc_ptr: AtomicPtr::new(gc.0 as *const T as *mut u8),
+        //     }))
+        // });
 
-//         Root {
-//             intern: *root as *const RootIntern<T>,
-//         }
-//     }
-// }
-
-impl<'r, O: Trace, N: Trace> From<Gc<'r, O>> for Root<N> {
-    fn from(gc: Gc<'r, O>) -> Self {
-        if type_name::<O>() != type_name::<N>() {
-            // TODO once Eq for &str is const make this const
-            panic!("O is a different type then N, mark only changes lifetimes")
-        };
-        let header = unsafe { &*Header::from(gc.0) };
-        let mut roots = header.intern.roots.lock().unwrap();
-        let root = roots
-            .entry(Arena::<N>::index(gc.0 as *const _ as *const _))
-            .or_insert_with(|| {
-                boxed::Box::leak(boxed::Box::new(RootIntern {
-                    ref_count: AtomicUsize::new(1),
-                    gc_ptr: AtomicPtr::new(gc.0 as *const _ as *const N as *mut u8),
-                }))
-            });
-
-        Root {
-            intern: *root as *const RootIntern<N>,
-        }
+        // Root {
+        //     intern: *root as *const RootIntern<T>,
+        // }
     }
 }
 
@@ -156,7 +141,7 @@ impl<T: Trace> Clone for Root<T> {
 impl<T> Drop for Root<T> {
     fn drop(&mut self) {
         // Relaxed is safe, since the GC frees RootIntern.
-        // Note the diffrence with Arc.
+        // Note the difference with Arc.
         unsafe { &*self.intern }
             .ref_count
             .fetch_sub(1, Ordering::Relaxed);
@@ -164,9 +149,69 @@ impl<T> Drop for Root<T> {
 }
 
 pub(crate) struct RootIntern<T> {
-    pub ref_count: AtomicUsize,
     /// Pointer is only live while an Arena<T> exists.
     pub gc_ptr: AtomicPtr<T>,
+    pub ref_count: AtomicUsize,
+    // pub guard_count: AtomicUsize,
+}
+
+/// A polymorphic GCed reference.
+/// Gc<dyn Trace>.
+pub struct Dyn<'r, D> {
+    // TODO there may be a trick to remove the box.
+    gc_ref: boxed::Box<AtomicPtr<*const D>>,
+    life: PhantomData<&'r D>,
+}
+
+#[test]
+fn function_name_test() {
+    let a: Arena<usize> = Arena::new();
+    let one = a.gc(1);
+}
+
+impl<'o, D> Dyn<'o, D> {
+    pub fn try_into_gc<'r, 'a: 'r, A, N>(&self, arena: &'a Arena<A>) -> Option<Gc<'r, N>>
+    where
+        A: Trace,
+        D: 'o + Trace + ID<A::Type<'o>>,
+        N: 'r + Trace + ID<A::Type<'r>>,
+        N::Type<'static>: ID<A::Type<'static>>,
+        D::Type<'static>: ID<A::Type<'static>>,
+    {
+        todo!()
+        // if todo!() {
+        //     None
+        // } else {
+        //     let t = unsafe { &*(self.gc_ref.load(Ordering::Acquire) as *const O) };
+        //     Some(arena.mark(Gc(t, P(()))))
+        // }
+    }
+
+    pub fn with_dyn<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(D) -> R,
+    {
+        todo!()
+    }
+}
+
+impl<'r, T: Trace> From<Gc<'r, T>> for Dyn<'r, &'r dyn Any> {
+    fn from(gc: Gc<'r, T>) -> Dyn<'r, &'r dyn Any> {
+        // let d: Dyndyn D = *gc;
+        todo!()
+        // let header = unsafe { &*Header::from(gc.0) };
+        // let mut roots = header.intern.roots.lock().unwrap();
+        // let root = roots.entry(Arena::<T>::index(gc.0)).or_insert_with(|| {
+        //     boxed::Box::leak(boxed::Box::new(RootIntern {
+        //         ref_count: AtomicUsize::new(1),
+        //         gc_ptr: AtomicPtr::new(gc.0 as *const T as *mut u8),
+        //     }))
+        // });
+
+        // Root {
+        //     intern: *root as *const RootIntern<T>,
+        // }
+    }
 }
 
 // FIXME
