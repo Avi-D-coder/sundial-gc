@@ -1,4 +1,4 @@
-use crate::{Gc, Immutable, Trace, mark::CoerceLifetime};
+use crate::{mark::CoerceLifetime, Gc, Immutable, Trace};
 use std::ops::Deref;
 use std::{
     any::type_name,
@@ -24,7 +24,10 @@ where
 {
     /// If `strict.is_null()` then the Thunk is unevaluated.
     /// If `strict == 1` then we are in a recursive initialization closure.
+    ///
+    /// `strict` is a `Gc<'r, T>`.
     strict: AtomicPtr<T>,
+    /// If `strict.is_null()` then `args` is a `Gc<'r, T>`.
     args: *const A,
     /// TODO(optimization) Small Copy structs should be unboxed, Such that `GC<T: Copy>> === T`.
     func: fn(Gc<'r, A>) -> Gc<'r, T>,
@@ -112,8 +115,25 @@ unsafe impl<'r, A: Immutable, T: Immutable> Immutable for Thunk<'r, A, T> {}
 
 unsafe impl<'r, A: Trace, T: Trace> Trace for Thunk<'r, A, T> {
     fn fields(s: &Self, offset: u8, grey_fields: u8, invariant: &crate::mark::Invariant) -> u8 {
-        todo!()
+        let strict = s.strict.load(Ordering::Relaxed);
+        if !strict.is_null() {
+            Gc::<T>::fields(
+                &unsafe { Gc::new(&*strict) },
+                offset,
+                grey_fields,
+                invariant,
+            )
+        } else {
+            Gc::<A>::fields(
+                &unsafe { Gc::new(&*s.args) },
+                offset + 1,
+                grey_fields,
+                invariant,
+            )
+        }
     }
+
+    #[allow(unused_unsafe)]
     unsafe fn evacuate<'e>(
         s: &Self,
         offset: crate::mark::Offset,
@@ -153,8 +173,6 @@ unsafe impl<'r, A: Trace, T: Trace> Trace for Thunk<'r, A, T> {
         T::transitive_gc_types(tti);
     }
     const GC_COUNT: u8 = 2;
-    // FIXME
-    const PRE_CONDITION: bool = true;
 }
 
 unsafe impl<'r, A: CoerceLifetime, T: CoerceLifetime> CoerceLifetime for Thunk<'r, A, T> {
