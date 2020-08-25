@@ -1,9 +1,10 @@
+use super::info::TypeCollectionInfo;
 use crate::mark::Invariant;
 use smallvec::SmallVec;
 use std::ops::Deref;
 use std::{cmp, sync::Mutex};
 
-pub type Bus = Mutex<SmallVec<[Msg; 8]>>;
+pub type Bus = Mutex<(Option<TypeCollectionInfo>, SmallVec<[Msg; 8]>)>;
 
 /// Returns index of sent message.
 pub fn send(bus: &mut SmallVec<[Msg; 8]>, msg: Msg) -> usize {

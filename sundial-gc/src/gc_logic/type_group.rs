@@ -72,6 +72,12 @@ impl TypeGroups {
     }
 }
 
+/// Related `TypeState`s are be bundled into a `TypeGroup`.
+/// A `TypeGroup` is the unit of GC parallelization.
+/// All related `TypeState`s are guaranteed to be on the same GC thread.
+/// `TypeGroup: Send + !Sync`.
+///
+/// As such methods on `TypeGroup` may mutate contained `TypeState`s.
 pub(crate) struct TypeGroup {
     related: Vec<&'static TypeState>,
     free: FreeList,

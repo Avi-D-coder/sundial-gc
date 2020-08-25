@@ -1,5 +1,6 @@
 pub(crate) mod bus;
 pub(crate) mod free_list;
+pub(crate) mod info;
 pub(crate) mod type_group;
 pub(crate) mod type_state;
 
@@ -12,9 +13,8 @@ use std::sync::{
 };
 
 use bus::{Bus, BusPtr};
-use std::panic;
 use std::thread::{self, ThreadId};
-use std::{mem, process, ptr, time::Duration};
+use std::{mem, ptr, time::Duration};
 use type_group::{TypeGroup, TypeGroups};
 use type_state::{TotalRelations, TypeState};
 
@@ -71,7 +71,7 @@ impl GcThreadBus {
 #[derive(Copy, Clone)]
 pub(crate) enum RegMsg {
     Reg(ThreadId, GcTypeInfo, BusPtr),
-    Un(ThreadId, GcTypeInfo),
+    // Un(ThreadId, GcTypeInfo),
 }
 
 fn gc_loop() {
@@ -125,11 +125,10 @@ fn gc_loop() {
                         type_groups.register(new_type_state);
                         log::info!("{:?}", type_groups);
                     };
-                }
-                RegMsg::Un(_thread_id, _ti) => {
-                    // The thread was dropped
-                    // TODO Currently `Un` is never sent.
-                }
+                } // RegMsg::Un(_thread_id, _ti) => {
+                  //     // The thread was dropped
+                  //     // TODO Currently `Un` is never sent.
+                  // }
             }
         }
 

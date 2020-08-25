@@ -1,13 +1,13 @@
-use crate::*;
-use arena::{bump_down, full, index, HeaderUnTyped, ARENA_SIZE};
-use bus::WorkerMsg;
-use gc::RootIntern;
-use gc_logic::{
-    bus::{self, Msg},
-    free_list::FreeList,
-    BusPtr,
+use crate::{
+    arena::{self, bump_down, full, index, HeaderUnTyped, ARENA_SIZE},
+    gc::RootIntern,
+    gc_logic::{
+        bus::{self, Msg, WorkerMsg},
+        free_list::FreeList,
+        BusPtr,
+    },
+    mark::{EffTypes, GcTypeInfo, Handlers, Invariant, Tti, TypeRow},
 };
-use mark::{EffTypes, GcTypeInfo, Handlers, Invariant, Tti, TypeRow};
 use smallvec::SmallVec;
 use std::{
     cell::{Cell, UnsafeCell},
@@ -16,19 +16,23 @@ use std::{
     fmt::Debug,
     ops::{Deref, DerefMut},
     ptr,
-    sync::atomic::Ordering,
+    sync::atomic::{AtomicUsize, Ordering},
     thread::ThreadId,
 };
 
 /// Each `Gc<T>` has a `TypeState` object.
 /// Related `TypeState`s must be owned by the same thread.
 ///
-/// Once we add multiple GC threads types,
-/// related `TypeState`s will be bundled into a `RelatedTypeStates` object.
+/// Related `TypeState`s are be bundled into a `TypeGroup`.
+/// A `TypeGroup` is the unit of GC parallelization.
+/// All related `TypeState`s are guaranteed to be on the same GC thread.
+/// `TypeGroup: Send + !Sync`.
 ///
-/// `RelatedTypeStates` will implement `Send`
+/// As such methods on `TypeState` may mutate related `TypeState`s.
 pub(crate) struct TypeState {
-    pub(crate) type_info: GcTypeInfo,
+    pub type_info: GcTypeInfo,
+    /// Wrapping
+    pub major_cycle: AtomicUsize,
     /// Map worker thread => (Bus, worker arena count, invariant_id).
     buses: UnsafeCell<HashMap<ThreadId, (BusPtr, usize, u8)>>,
     /// Has the invariant be sent to workers.
@@ -82,7 +86,7 @@ impl TypeState {
             .iter_mut()
             .for_each(|(thread_id, (bus, _count, worker_known_invariant))| {
                 let msgs = {
-                    let mut bus = bus.lock().expect("Could not unlock bus");
+                    let mut bus = &mut bus.lock().expect("Could not unlock bus").1;
                     let msgs = bus::reduce(&mut bus);
 
                     if *worker_known_invariant != self.invariant_id.get() {
@@ -203,12 +207,16 @@ impl TypeState {
                     });
                 };
 
-                let children_complete = relations.direct_children.iter().all(|(cts, _)| {
-                    { &*cts.state.get() }
-                        .as_ref()
-                        .map(|cycle| cycle.condemned.is_empty())
-                        .unwrap_or(true)
-                });
+                let children_complete = relations
+                    .direct_children
+                    .iter()
+                    .filter(|(cts, _)| *cts != self)
+                    .all(|(cts, _)| {
+                        { &*cts.state.get() }
+                            .as_ref()
+                            .map(|cycle| cycle.condemned.is_empty())
+                            .unwrap_or(true)
+                    });
 
                 if children_complete {
                     log::trace!("Children complete Collection cleared!");
@@ -228,6 +236,7 @@ impl TypeState {
                     *state = None;
                     log::trace!("state cleared");
                     done = true;
+                    self.major_cycle.fetch_add(1, Ordering::Release);
                 };
             };
         };
@@ -1104,6 +1113,7 @@ impl TotalRelations {
         let ts = active_ts.unwrap_or_else(|| {
             let ts = Box::leak(Box::new(TypeState {
                 type_info,
+                major_cycle: AtomicUsize::new(0),
                 buses: Default::default(),
                 invariant_id: Cell::from(1),
                 arenas: UnsafeCell::new(Arenas::default()),
