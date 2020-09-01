@@ -4,7 +4,8 @@ use crate::{
         bus::{self, Bus, Msg},
         GcThreadBus,
     },
-    mark::{CoerceLifetime, GcTypeInfo, Invariant, Mark, Trace, ID},
+    mark::{GcTypeInfo, Invariant, Life, Mark, Trace},
+    TyEq,
 };
 use bus::WorkerMsg;
 use gc::RootIntern;
@@ -24,7 +25,7 @@ pub(crate) struct Mem {
     _mem: [u8; ARENA_SIZE],
 }
 
-pub struct Arena<T: Trace> {
+pub struct Arena<T: Life> {
     // TODO compact representation of arenas
     // TODO make all these private by wrapping up needed functionality.
     // TODO derive header from next
@@ -57,7 +58,7 @@ pub struct ArenaDyn {
     full: UnsafeCell<SmallVec<[(*mut (), bool, u8); 2]>>,
 }
 
-impl<T: Trace> Debug for Arena<T> {
+impl<T: Life> Debug for Arena<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct(&format!("Arena<{}>", type_name::<T>()))
             .field("header", &(self.header() as *const Header<T>))
@@ -83,7 +84,7 @@ impl Debug for ArenaDyn {
     }
 }
 
-impl<T: Trace> Arena<T> {
+impl<T: Life> Arena<T> {
     /// Returns the pointer of the next object to be allocated.
     /// Returns `None` when the `Arena` is full.
     pub fn next_ptr(&self) -> Option<*const T> {
@@ -155,6 +156,19 @@ impl<T: Trace> Arena<T> {
             mem::size_of::<T>() as u16,
             mem::align_of::<T>() as u16,
         )
+    }
+
+    /// To allocate a struct `T<'l>` you should use the derived `T::gc(args, Arena<T>)`.
+    /// To allocate a struct `T: 'static` you should use the derived `Arena::gc(T)`.
+    ///
+    /// You must initialize the returned pointer!
+    pub unsafe fn alloc_unit(&self) -> *mut T {
+        if self.full() {
+            self.new_block();
+        };
+        let ptr = self.next.get() as _;
+        self.next.set(self.bump_down() as _);
+        ptr
     }
 }
 
@@ -265,18 +279,11 @@ pub(crate) fn index(ptr: *const u8, size: u16, align: u16) -> u16 {
     ((ptr as usize - low) / size as usize) as u16
 }
 
-unsafe impl<'o, 'n, A, O, N> Mark<'o, 'n, A, O, N> for Arena<A>
-where
-    A: Trace,
-    O: 'o + Trace,
-    N: 'n + Trace,
-    O::Type<'static>: ID<A::Type<'static>>,
-    N::Type<'static>: ID<A::Type<'static>> + ID<O::Type<'static>>,
-{
-    fn mark<'a: 'n>(&'a self, old: Gc<'o, O>) -> Gc<'n, N> {
-        let old_ptr = old.0 as *const O as *const N;
+unsafe impl<'o, 'n, A: Life, T: Life + TyEq<A>> Mark<'o, 'n, T> for Arena<A> {
+    fn mark<'a: 'n>(&'a self, old: Gc<'o, T>) -> Gc<'n, T::L<'n>> {
+        let old_ptr = old.0 as *const _;
         let condemned_self =
-            self.invariant.grey_self && self.invariant.condemned(old.0 as *const O as *const _);
+            self.invariant.grey_self && self.invariant.condemned(old.0 as *const _);
 
         let cf = Trace::fields(old.0, 0, self.marked_grey_fields.get(), &self.invariant);
 
@@ -300,7 +307,7 @@ where
             let evacuated = old_header.intern.evacuated.lock();
             evacuated
                 .unwrap()
-                .entry(Arena::index(old.0 as *const O as *const A))
+                .entry(Arena::index(old.0 as *const _))
                 .and_modify(|evacuated_ptr| new_ptr = *evacuated_ptr as _)
                 .or_insert(next as *const u8);
 
@@ -312,7 +319,7 @@ where
     }
 }
 
-impl<T: Trace> Drop for Arena<T> {
+impl<T: Life> Drop for Arena<T> {
     fn drop(&mut self) {
         log::trace!("WORKER: droping: {:?}", self);
 
@@ -567,7 +574,7 @@ impl Drop for ArenaDyn {
 
 // TODO add specialized Mark impl for N: 'static.
 
-impl<A: Trace> Arena<A> {
+impl<A: Life> Arena<A> {
     pub fn new() -> Arena<A> {
         // Register a bus for this thread type combo.
         let bus = GC_BUS.with(|tm| {
@@ -653,11 +660,7 @@ impl<A: Trace> Arena<A> {
 
     /// Create a new `Gc<T>`.
     /// If `T : Copy` & `size_of::<T>() > 8`, you should use `self.gc_copy(&T)` instead.
-    pub fn gc<'r, 'a: 'r, T: 'r>(&'a self, t: T) -> Gc<'r, T>
-    where
-        T: CoerceLifetime,
-        T::Type<'static>: ID<A::Type<'static>>,
-    {
+    pub fn gc<'r, 'a: 'r, T: Life + TyEq<A>>(&'a self, t: T) -> Gc<'r, T::L<'r>> {
         unsafe {
             if self.full() {
                 self.new_block();
@@ -665,7 +668,7 @@ impl<A: Trace> Arena<A> {
             let ptr = self.next.get() as *mut T;
             self.next.set(self.bump_down() as *mut A);
             ptr::write(ptr, t);
-            Gc::new(&*ptr)
+            self.mark(Gc::new(&*ptr))
         }
     }
 
@@ -702,7 +705,7 @@ impl<A: Trace> Arena<A> {
     }
 }
 
-impl<'l, A: Trace + CoerceLifetime + Copy> Arena<A> {
+impl<'l, A: Trace + Life + Copy> Arena<A> {
     /// Directly copies T instead of reading it onto the stack first.
     pub fn gc_copy<'a, 'r: 'a, T: Copy>(&'a self, t: &T) -> Gc<'r, T> {
         unsafe {
@@ -734,7 +737,7 @@ impl<'l, A: Trace + CoerceLifetime + Copy> Arena<A> {
 fn gc_alloc_test() {
     let a: Arena<usize> = Arena::new();
     let n1 = a.next.get() as usize;
-    a.gc(1);
+    a.gc::<usize>(1);
     let n2 = a.next.get() as usize;
     assert!(n1 == n2 + 8)
 }
@@ -757,7 +760,7 @@ fn gc_copy_test() {
     assert!(n1 == n2 + 8)
 }
 
-impl<'l, A: Trace + CoerceLifetime + Clone> Arena<A> {
+impl<'l, A: Trace + Life + Clone> Arena<A> {
     pub fn gc_clone<'r, 'a: 'r, T: Clone>(&'a self, t: &T) -> Gc<'r, T> {
         unsafe {
             if self.full() {
@@ -945,7 +948,7 @@ impl CachedArenas {
         }
     }
 
-    fn get<T: Trace>(&mut self) -> Option<*mut T> {
+    fn get<T: Life>(&mut self) -> Option<*mut T> {
         self.0
             .iter_mut()
             .filter(|a| !CachedArena::is_null(**a))
@@ -1003,7 +1006,7 @@ thread_local! {
     // FIXME upon drop/thread end send End for cached_next and Msg::Gc.next
 }
 
-fn key<T: Trace>() -> (GcTypeInfo, usize) {
+fn key<T: Life>() -> (GcTypeInfo, usize) {
     (GcTypeInfo::new::<T>(), ptr::drop_in_place::<T> as usize)
 }
 
@@ -1022,13 +1025,17 @@ fn pre_condition_gc_newtype() {
     let a: Arena<Foo> = Arena::new();
     let b: Arena<Foo<'static>> = Arena::new();
 
-    a.gc(Foo(u.gc(1)));
-    b.gc(Foo(u.gc(1)));
+    // a.gc::<Foo>(Foo(u.gc(1)));
+    // b.gc::<Foo>(Foo(u.gc(1)));
 }
 
 #[test]
 fn pre_condition_no_gc_newtype() {
+    use crate as sundial_gc;
+    use sundial_gc::*;
+    use sundial_gc_derive::*;
     // Without a Trace impl errors are generated.
+    #[derive(Trace)]
     struct Foo<T>(T);
 
     // let a: Arena<Foo<Gc<usize>>> = Arena::new();
@@ -1036,6 +1043,11 @@ fn pre_condition_no_gc_newtype() {
     let c: Arena<Foo<String>> = Arena::new();
 
     // a.gc(Foo(u.gc(1))); //~ [rustc E0597] [E] `u` does not live long enough borrowed value does not live long enough
-    b.gc(Foo(1));
-    c.gc(Foo(String::from("foo")));
+    b.gc::<Foo<usize>>(Foo(1));
+    c.gc::<Foo<String>>(Foo(String::from("foo")));
 }
+
+// #[test]
+// fn use_test() {
+//     let a: &'static usize = unsafe { mark::coerce_lifetime(&1usize)};
+// }

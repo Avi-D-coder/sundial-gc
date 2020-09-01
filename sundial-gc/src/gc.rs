@@ -1,4 +1,4 @@
-use crate::{arena::Header, mark::ID, Arena, Mark, Trace};
+use crate::{arena::Header, Arena, Life, Mark, Trace, GC};
 use std::boxed;
 use std::ops::{Deref, DerefMut};
 use std::{
@@ -10,11 +10,11 @@ use std::{
 };
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
-pub struct Gc<'r, T: 'r>(pub &'r T, pub P);
+pub struct Gc<'r, T>(pub &'r T, pub P);
 
 impl<'r, T> Gc<'r, T> {
     #[inline(always)]
-    pub(crate) unsafe fn new(t: &'r T) -> Self {
+    pub unsafe fn new(t: &'r T) -> Self {
         Gc(t, P(()))
     }
 }
@@ -93,12 +93,8 @@ pub struct Root<T> {
     intern: *const RootIntern<T>,
 }
 
-impl<T: Trace> Root<T> {
-    pub fn into_gc<'r, 'a: 'r, N>(&self, arena: &'a Arena<T>) -> Gc<'a, N>
-    where
-        N: 'r + Trace + ID<T::Type<'r>>,
-        N::Type<'static>: ID<T::Type<'static>>,
-    {
+impl<'l, T: Life> Root<T> {
+    pub fn into_gc<'r, 'a: 'r>(&self, arena: &'a Arena<impl GC<T>>) -> Gc<'r, T::L<'r>> {
         let root = unsafe { &*self.intern };
         let t = unsafe { &*root.gc_ptr.load(Ordering::Acquire) };
         arena.mark(Gc(t, P(())))
@@ -109,8 +105,8 @@ impl<T: Trace> Root<T> {
     // fn guard(&self) -> Guard<Gc<T>> {}
 }
 
-impl<'r, T: Trace> From<Gc<'r, T>> for Root<T::Type<'static>> {
-    fn from(gc: Gc<'r, T>) -> Root<T::Type<'static>> {
+impl<'r, T: Life> From<Gc<'r, T>> for Root<T::L<'static>> {
+    fn from(gc: Gc<'r, T>) -> Root<T::L<'static>> {
         todo!()
         // let header = unsafe { &*Header::from(gc.0) };
         // let mut roots = header.intern.roots.lock().unwrap();
@@ -170,13 +166,12 @@ fn function_name_test() {
 }
 
 impl<'o, D> Dyn<'o, D> {
-    pub fn try_into_gc<'r, 'a: 'r, A, N>(&self, arena: &'a Arena<A>) -> Option<Gc<'r, N>>
-    where
-        A: Trace,
-        D: 'o + Trace + ID<A::Type<'o>>,
-        N: 'r + Trace + ID<A::Type<'r>>,
-        N::Type<'static>: ID<A::Type<'static>>,
-        D::Type<'static>: ID<A::Type<'static>>,
+    pub fn try_into_gc<'r, 'a: 'r, T: Life>(
+        &self,
+        arena: &'a Arena<impl GC<T>>,
+    ) -> Option<Gc<'r, T::L<'r>>>
+// D: 'o + GC<A::L<'o>>,
+        // N: 'r + GC<A::L<'r>>,
     {
         todo!()
         // if todo!() {

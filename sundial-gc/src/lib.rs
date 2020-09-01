@@ -15,6 +15,8 @@
 #![feature(backtrace)]
 #![feature(arbitrary_self_types)]
 #![feature(generic_associated_types)]
+#![feature(associated_type_bounds)]
+#![feature(marker_trait_attr)]
 
 pub mod arena;
 pub use arena::Arena;
@@ -25,6 +27,6 @@ pub mod gc;
 pub use gc::{Gc, Root};
 mod gc_logic;
 pub mod mark;
-pub use mark::{Mark, Trace};
+pub use mark::{Mark, Trace, Life, TyEq, GC};
 pub mod thunk;
 pub use thunk::Thunk;

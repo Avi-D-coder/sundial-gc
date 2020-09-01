@@ -1,4 +1,4 @@
-use crate::{mark::CoerceLifetime, Gc, Immutable, Trace};
+use crate::{mark::Life, Gc, Immutable, Trace, auto_traits::NotDerived};
 use std::ops::Deref;
 use std::{
     any::type_name,
@@ -175,6 +175,8 @@ unsafe impl<'r, A: Trace, T: Trace> Trace for Thunk<'r, A, T> {
     const GC_COUNT: u8 = 2;
 }
 
-unsafe impl<'r, A: CoerceLifetime, T: CoerceLifetime> CoerceLifetime for Thunk<'r, A, T> {
-    type Type<'l> = Thunk<'l, A::Type<'l>, T::Type<'l>>;
+unsafe impl<'r, A: Life, T: Life> Life for Thunk<'r, A, T> {
+    type L<'l> = Thunk<'l, A::L<'l>, T::L<'l>>;
 }
+
+impl<'r, A: Life, T: Life> !NotDerived for Thunk<'r, A, T> {}

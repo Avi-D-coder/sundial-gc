@@ -1,6 +1,8 @@
 #![allow(incomplete_features)]
 #![feature(specialization)]
 #![feature(generic_associated_types)]
+#![feature(negative_impls)]
+#![feature(negative_impls)]
 
 use rustyline::Editor;
 use sundial_gc::{collections::Map, *};
@@ -58,14 +60,14 @@ mod parse {
     };
     use sundial_gc::{
         collections::{Map, Node},
-        Arena,
+        Arena, Gc,
     };
 
     fn parens(input: &str) -> IResult<&str, &str> {
         delimited(char('('), is_not(")"), char(')'))(input)
     }
 
-    fn ty<'l, 'r, 'a: 'r>(arena: &'a Arena<String>, input: &'l str) -> IResult<&'l str, Ty<'r>> {
+    fn ty<'i, 'r, 'a: 'r>(arena: &'a Arena<String>, input: &'i str) -> IResult<&'i str, Ty<'r>> {
         dbg!(input);
         let string = |i| {
             map!(i, delimited(char('"'), is_not("\""), char('"')), |s| {
@@ -73,10 +75,10 @@ mod parse {
             })
         };
 
-        let int = |i: &'l str| do_parse!(i, d: digit1 >> (Ty::Int(d.parse().unwrap())));
+        let int = |i: &'i str| do_parse!(i, d: digit1 >> (Ty::Int(d.parse().unwrap())));
 
-        let tru = |i: &'l str| do_parse!(i, tag!("True") >> (Ty::Bool(true)));
-        let fal = |i: &'l str| do_parse!(i, tag!("False") >> (Ty::Bool(false)));
+        let tru = |i: &'i str| do_parse!(i, tag!("True") >> (Ty::Bool(true)));
+        let fal = |i: &'i str| do_parse!(i, tag!("False") >> (Ty::Bool(false)));
 
         dbg!(branch::alt((int, tru, fal, string))(input))
     }
@@ -92,10 +94,10 @@ mod parse {
         );
     }
 
-    fn ident<'l, 'r, 'a: 'r>(
-        input: &'l str,
+    fn ident<'i, 'r, 'a: 'r>(
+        input: &'i str,
         arena: &'a Arena<String>,
-    ) -> IResult<&'l str, Ident<'r>> {
+    ) -> IResult<&'i str, Ident<'r>> {
         dbg!(input);
         // Identifiers must start with a letter.
         if let Some(c) = input.chars().next() {
@@ -107,12 +109,12 @@ mod parse {
         dbg!(map!(input, alphanumeric1, |i| arena.gc(String::from(i))))
     }
 
-    fn bind<'l, 'r, 'a: 'r>(
-        input: &'l str,
+    fn bind<'i, 'r, 'a: 'r>(
+        input: &'i str,
         strs: &'a Arena<String>,
         exprs: &'a Arena<Expr>,
-        nodes: &'a Arena<Node<'static, Ident<'static>, GcExpr<'static>>>,
-    ) -> IResult<&'l str, GcExpr<'r>> {
+        nodes: &'a Arena<Node<Ident, GcExpr>>,
+    ) -> IResult<&'i str, GcExpr<'r>> {
         dbg!(input);
         let ident = |i| ident(i, strs);
 
@@ -130,12 +132,12 @@ mod parse {
         )
     }
 
-    fn lam<'l, 'r, 'a: 'r>(
-        input: &'l str,
+    fn lam<'i, 'r, 'a: 'r>(
+        input: &'i str,
         strs: &'a Arena<String>,
         exprs: &'a Arena<Expr>,
-        nodes: &'a Arena<Node<'static, Ident<'static>, GcExpr<'static>>>,
-    ) -> IResult<&'l str, GcExpr<'r>> {
+        nodes: &'a Arena<Node<Ident, GcExpr>>,
+    ) -> IResult<&'i str, GcExpr<'r>> {
         dbg!(input);
         let expr = |i| expr(i, strs, exprs, nodes);
 
@@ -145,47 +147,19 @@ mod parse {
         )
     }
 
-    // fn app_<'l, 'r, 'a: 'r, 's: 'r>(
-    //     input: &'l str,
-    //     strs: &'s Arena<String>,
-    //     exprs: &'a Arena<Expr>,
-    //     nodes: &'a Arena<Node<'static, Ident<'static>, GcExpr<'static>>>,
-    // ) -> GcExpr<'r> {
-    //     dbg!(input);
-    //     let expr_ = |i| expr(i, strs, exprs, nodes);
+    fn function_name<'r, 'a: 'r>(strs: &'a Arena<String>) -> Gc<'r, String> {
+        strs.gc(String::from(""))
+    }
 
-    //     let (input, (func, mut args)) = do_parse!(input, e: expr_ >> p: parens >> (e, p)).unwrap();
-
-    //     let mut parms: Map<'r, Ident<'r>, GcExpr<'r>> = Map::default();
-    //     loop {
-    //         let ident = |i| ident(i, todo!());
-    //         let expr_ = |i| expr(i, todo!(), todo!(), nodes);
-    //         if args.is_empty() {
-    //             break;
-    //         }
-
-    //         let (remaining, (p, e)) = do_parse!(
-    //             args,
-    //             param: ident >> space0 >> tag!(":") >> space0 >> e: expr_ >> (param, e)
-    //         )
-    //         .unwrap();
-    //         parms = parms.insert(p, e, nodes)
-    //     }
-
-    //     exprs.gc(Expr::App(func, parms))
-    // }
-
-    fn app<'l, 'r, 'a: 'r>(
-        input: &'l str,
+    fn app<'i, 'l, 'r, 'a: 'r>(
+        input: &'i str,
         strs: &'a Arena<String>,
         exprs: &'a Arena<Expr>,
-        nodes: &'a Arena<Node<'static, Ident<'static>, GcExpr<'static>>>,
-    ) -> IResult<&'l str, GcExpr<'r>> {
+        nodes: &'a Arena<Node<'l, Ident<'l>, GcExpr<'l>>>,
+    ) -> IResult<&'i str, GcExpr<'r>> {
         dbg!(input);
-        // let expr = |i| expr(i, strs, exprs, nodes);
-        // let ident = |i| ident(i, strs);
-        let expr = |i: &'l str| -> IResult<&'l str, GcExpr<'r>> { todo!() };
-        let ident = |i: &'l str| -> IResult<&'l str, Ident<'r>> { todo!() };
+        let expr = |i| expr(i, strs, exprs, nodes);
+        let ident = |i| ident(i, strs);
 
         let (input, (func, mut args)) = do_parse!(input, e: expr >> p: parens >> (e, p))?;
 
@@ -196,53 +170,23 @@ mod parse {
                 break;
             }
 
-            // let (remaining, (p, e)) = do_parse!(
-            //     args,
-            //     param: ident >> space0 >> tag!(":") >> space0 >> e: expr >> (param, e)
-            // )?;
-            // args = remaining;
-            // parms = parms.insert(p, e, nodes)
+            let (remaining, (p, e)) = do_parse!(
+                args,
+                param: ident >> space0 >> tag!(":") >> space0 >> e: expr >> (param, e)
+            )?;
+            args = remaining;
+            parms = parms.insert(p, e, nodes)
         }
 
         Ok((input, exprs.gc(Expr::App(func, parms))))
     }
 
-    // fn app<'l, 'r, 'a: 'r>(
-    //     input: &'l str,
-    //     strs: &'a Arena<String>,
-    //     exprs: &'a Arena<Expr>,
-    //     nodes: &'a Arena<Node<'static, Ident<'static>, GcExpr<'static>>>,
-    // ) -> IResult<&'l str, GcExpr<'r>> {
-    //     dbg!(input);
-    //     let expr = |i| expr(i, strs, exprs, nodes);
-    //     let ident = |i| ident(i, strs);
-
-    //     let (input, (func, mut args)) = do_parse!(input, e: expr >> p: parens >> (e, p))?;
-
-    //     let mut parms: Map<'r, Ident<'r>, GcExpr<'r>> = Map::default();
-    //     loop {
-    //         args = space0(args)?.0;
-    //         if args.is_empty() {
-    //             break;
-    //         }
-
-    //         let (remaining, (p, e)) = do_parse!(
-    //             args,
-    //             param: ident >> space0 >> tag!(":") >> space0 >> e: expr >> (param, e)
-    //         )?;
-    //         args = remaining;
-    //         parms = parms.insert(p, e, nodes)
-    //     }
-
-    //     Ok((input, exprs.gc(Expr::App(func, parms))))
-    // }
-
-    fn prim<'l, 'r, 'a: 'r>(
-        input: &'l str,
+    fn prim<'i, 'r, 'a: 'r>(
+        input: &'i str,
         strs: &'a Arena<String>,
         exprs: &'a Arena<Expr>,
-        nodes: &'a Arena<Node<'static, Ident<'static>, GcExpr<'static>>>,
-    ) -> IResult<&'l str, GcExpr<'r>> {
+        nodes: &'a Arena<Node<Ident, GcExpr>>,
+    ) -> IResult<&'i str, GcExpr<'r>> {
         dbg!(input);
         let lit = |i| map!(i, |i| ty(strs, i), |ty| exprs.gc(Expr::Lit(ty)));
         let (input, l) = branch::alt((lit, |i| expr(i, strs, exprs, nodes)))(input)?;
@@ -270,12 +214,12 @@ mod parse {
         Ok((input, exprs.gc(Expr::Prim(op, l, r))))
     }
 
-    pub(crate) fn expr<'l, 'r, 'a: 'r>(
-        input: &'l str,
+    pub(crate) fn expr<'i, 'r, 'a: 'r>(
+        input: &'i str,
         strs: &'a Arena<String>,
         exprs: &'a Arena<Expr>,
-        nodes: &'a Arena<Node<'static, Ident<'static>, GcExpr<'static>>>,
-    ) -> IResult<&'l str, GcExpr<'r>> {
+        nodes: &'a Arena<Node<Ident, GcExpr>>,
+    ) -> IResult<&'i str, GcExpr<'r>> {
         dbg!(input);
         let lit = |i| map!(i, |i| ty(strs, i), |ty| exprs.gc(Expr::Lit(ty)));
         let var = |i| map!(i, |i| ident(i, strs), |n| exprs.gc(Expr::Var(n)));
@@ -288,14 +232,14 @@ mod parse {
         dbg!(branch::alt((bind, lam, var, prim, lit, app))(input))
     }
 
-    pub(crate) fn term<'l, 'r, 'a: 'r>(
-        input: &'l str,
+    pub(crate) fn term<'i, 'r, 'a: 'r>(
+        input: &'i str,
         strs: &'a Arena<String>,
         exprs: &'a Arena<Expr>,
-        nodes: &'a Arena<Node<'static, Ident<'static>, GcExpr<'static>>>,
-    ) -> IResult<&'l str, Term<'r>> {
+        nodes: &'a Arena<Node<Ident, GcExpr>>,
+    ) -> IResult<&'i str, Term<'r>> {
         dbg!(input);
-        let term = |i: &'l str| {
+        let term = |i: &'i str| {
             let expr = |i| expr(i, strs, exprs, nodes);
             let ident = |i| ident(i, strs);
             do_parse!(
@@ -304,7 +248,7 @@ mod parse {
             )
         };
 
-        let expr = |i: &'l str| {
+        let expr = |i: &'i str| {
             let expr = |i| expr(i, strs, exprs, nodes);
             do_parse!(i, e: expr >> (Term::Exp(e)))
         };
@@ -376,7 +320,7 @@ type Env<'r> = Map<'r, Gc<'r, String>, Value<'r>>;
 fn eval<'r, 'a: 'r>(
     env: Env<'r>,
     term: Gc<'r, Expr<'r>>,
-    nodes: &'a Arena<Node<Ident<'r>, Value<'r>>>,
+    nodes: &'a Arena<Node<Ident, Value>>,
 ) -> Value<'r> {
     match *term {
         Expr::Lit(ty) => Type(ty),
@@ -387,19 +331,20 @@ fn eval<'r, 'a: 'r>(
         Expr::App(l, args) => match eval(env, l, nodes) {
             Type(ty) => panic!("{:?} is not a function", ty),
             Closure(expr, captured_env) => {
-                let args: Map<_, _> = args
-                    .iter()
-                    .map(|(parm, arg)| (nodes, *parm, eval(env, *arg, nodes)))
-                    .collect();
+                // let args: Map<_, _> = args
+                //     .iter()
+                //     .map(|(parm, arg)| (nodes, *parm, eval(env, *arg, nodes)))
+                //     .collect();
                 // Arguments take precedence over variables in scope.
-                let env = args.union(captured_env, nodes);
+                // let env = args.union(captured_env, nodes);
 
                 eval(env, expr, nodes)
             }
         },
         Expr::Prim(op, a, b) => op.eval(eval(env, a, nodes), eval(env, b, nodes)),
         Expr::Bind(name, expr) => {
-            eval(env.insert(name, eval(env, expr, nodes), nodes), term, nodes)
+            // eval(env.insert(name, eval(env, expr, nodes), nodes), term, nodes)
+            todo!()
         }
     }
 }

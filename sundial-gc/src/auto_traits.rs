@@ -24,3 +24,7 @@ impl<'r, T> !Immutable for &'r T {}
 impl<T> !Immutable for UnsafeCell<T> {}
 unsafe impl<T> Immutable for Box<T> {}
 unsafe impl<'r, T> Immutable for Gc<'r, T> {}
+
+/// Should be implemented with each `Trace` impl.
+pub auto trait NotDerived {}
+impl<'l, T> !NotDerived for Gc<'l, T> {}

@@ -1,7 +1,7 @@
 use super::gc::*;
 use crate::{
     arena::{Arena, Header, HeaderUnTyped},
-    auto_traits::{HasGc, Immutable},
+    auto_traits::{HasGc, Immutable, NotDerived},
     gc_logic::{free_list::FreeList, type_state::TypeState},
 };
 use smallvec::SmallVec;
@@ -13,11 +13,11 @@ use std::{
 };
 
 // pub unsafe trait MarkGat<'n, T: CoerceLifetime> {
-//     fn mark_gat<'o>(&'n self, old: &'o T::Type<'o>) -> &'n T::Type<'n>;
+//     fn mark_gat<'o>(&'n self, old: &'o T::L<'o>) -> &'n T::L<'n>;
 // }
 
-// unsafe impl<'n, T: Trace + CoerceLifetime> MarkGat<'n, T> for Arena<T::Type<'n>> {
-//     fn mark_gat<'o>(&'n self, old: &'o T::Type<'o>) -> &'n T::Type<'n> {
+// unsafe impl<'n, T: Trace + CoerceLifetime> MarkGat<'n, T> for Arena<T::L<'n>> {
+//     fn mark_gat<'o>(&'n self, old: &'o T::L<'o>) -> &'n T::L<'n> {
 //         unsafe { T::coerce_lifetime(old) }
 //     }
 // }
@@ -25,48 +25,35 @@ use std::{
 // The former will allow transmuting only lifetimes.
 // The latter will make `assert_eq!(type_name::<O>(), type_name::<N>())` const.
 // https://github.com/rust-lang/rfcs/pull/2632.
-pub unsafe trait Mark<'o, 'n, A, O, N>
-where
-    A: CoerceLifetime,
-    O: 'o + CoerceLifetime,
-    N: 'n + CoerceLifetime,
-    O::Type<'static>: ID<A::Type<'static>>,
-    N::Type<'static>: ID<A::Type<'static>> + ID<O::Type<'static>>,
-{
-    fn mark<'a: 'n>(&'a self, o: Gc<'o, O>) -> Gc<'n, N>;
+pub unsafe trait Mark<'o, 'n, T: Trace + Life> {
+    fn mark<'a: 'n>(&'a self, o: Gc<'o, T>) -> Gc<'n, T::L<'n>>;
 }
 
 // Blanket impl Mark for Arena<T> is in src/arena.rs
 
-pub unsafe trait CoerceLifetime {
-    #[rustfmt::skip]
-    type Type<'l>: 'l;
-    unsafe fn coerce_lifetime<'o, 'n>(old: &'o Self::Type<'o>) -> &'n Self::Type<'n> {
-        mem::transmute(old)
-    }
+pub trait GC<T>: Trace + Life {}
+impl<'r, T: Trace + Life, S: Trace + Life + TyEq<T>> GC<T> for S {}
+
+pub unsafe trait Life {
+    type L<'l>: 'l + TyEq<Self>;
 }
 
-unsafe impl<'r, T: CoerceLifetime> CoerceLifetime for Gc<'r, T> {
-    #[rustfmt::skip]
-    type Type<'l> = Gc<'l, T::Type<'l>>;
+unsafe impl<'r, T: Life> Life for Gc<'r, T> {
+    type L<'l> = Gc<'l, T::L<'l>>;
 }
 
-unsafe impl<T: 'static> CoerceLifetime for T {
-    #[rustfmt::skip]
-    default type Type<'l> = T;
+unsafe impl<T: 'static > Life for T {
+    type L<'l> = T;
 }
 
-/// `B: TypeEq<A>` is a marker trait.
-/// It denotes that `A` and `B` share the same type, but not necessarily lifetime.
-///
-/// For types to be compared `B` must implement `CoerceLifetime`.
-///
-/// `usize: TypeEq<usize>`
-/// `List<'static, T>: List<'r, T>`
-pub trait TypeEq<A> {}
-impl<A: CoerceLifetime, B: CoerceLifetime> TypeEq<A> for B where for<'a> A::Type<'a>: ID<B::Type<'a>>
-{}
-impl<A> TypeEq<A> for A {}
+#[marker]
+pub unsafe trait TyEq<B> {}
+// unsafe impl<T> TyEq<T> for T {}
+unsafe impl<'l, T: Life> TyEq<T> for T::L<'l> {}
+unsafe impl<'l, T: Life> TyEq<T::L<'l>> for T {}
+unsafe impl<'l, A: Life, B: Life> TyEq<B> for A where A::L<'l>: ID<B::L<'l>> {}
+unsafe impl<T, S: GC<T>> TyEq<T> for S {}
+unsafe impl<S, T: GC<S>> TyEq<T> for S {}
 
 pub unsafe trait ID<T> {}
 unsafe impl<T> ID<T> for T {}
@@ -305,7 +292,8 @@ impl Invariant {
 /// You must implement all methods, do not use defaults.
 ///
 /// You must also implement `CoerceLifetime`.
-pub unsafe trait Trace: Immutable + CoerceLifetime {
+pub unsafe trait Trace: Immutable {
+    // type Arena: 'static + Sized;
     fn fields(s: &Self, offset: u8, grey_fields: u8, invariant: &Invariant) -> u8;
     unsafe fn evacuate<'e>(
         s: &Self,
@@ -321,7 +309,7 @@ pub unsafe trait Trace: Immutable + CoerceLifetime {
     const GC_COUNT: u8;
 }
 
-unsafe impl<T: Immutable + CoerceLifetime> Trace for T {
+unsafe impl<T: Immutable> Trace for T {
     default fn fields(_: &Self, _: u8, _: u8, _: &Invariant) -> u8 {
         // This check is superfluous
         // TODO ensure if gets optimized out
@@ -418,7 +406,7 @@ unsafe impl<'r, T: Trace> Trace for Gc<'r, T> {
 
 // std impls
 
-unsafe impl<T: Trace + CoerceLifetime> Trace for Option<T> {
+unsafe impl<T: Trace + Life> Trace for Option<T> {
     default fn fields(s: &Self, offset: u8, grey_fields: u8, invariant: &Invariant) -> u8 {
         match s {
             Some(t) => Trace::fields(t, offset, grey_fields, invariant),
@@ -450,11 +438,14 @@ unsafe impl<T: Trace + CoerceLifetime> Trace for Option<T> {
     const GC_COUNT: u8 = T::GC_COUNT;
 }
 
-unsafe impl<T: CoerceLifetime> CoerceLifetime for Option<T> {
-    type Type<'l> = Option<T::Type<'l>>;
+unsafe impl<T: Life> Life for Option<T> {
+    type L<'l> = Option<T::L<'l>>;
 }
 
+impl<T> !NotDerived for Option<T> {}
+
 unsafe impl<A: Trace, B: Trace> Trace for (A, B) {
+    // type Arena = Arena<(A::L<'static>, B::L<'static>)>;
     fn fields((a, b): &Self, offset: u8, grey_fields: u8, invariant: &Invariant) -> u8 {
         let mut r = 0b0000_0000;
         r |= Trace::fields(a, offset, grey_fields, invariant);
@@ -488,12 +479,15 @@ unsafe impl<A: Trace, B: Trace> Trace for (A, B) {
     const GC_COUNT: u8 = A::GC_COUNT + B::GC_COUNT;
 }
 
-unsafe impl<A: CoerceLifetime, B: CoerceLifetime> CoerceLifetime for (A, B) {
-    type Type<'l> = (A::Type<'l>, B::Type<'l>);
+unsafe impl<A: Life, B: Life> Life for (A, B) {
+    type L<'l> = (A::L<'l>, B::L<'l>);
 }
 
-unsafe impl<A: CoerceLifetime, B: CoerceLifetime, C: CoerceLifetime, D: CoerceLifetime>
-    CoerceLifetime for (A, B, C, D)
-{
-    type Type<'l> = (A::Type<'l>, B::Type<'l>, C::Type<'l>, D::Type<'l>);
+impl<A, B> !NotDerived for (A, B) {}
+
+// TODO Trace
+unsafe impl<A: Life, B: Life, C: Life, D: Life> Life for (A, B, C, D) {
+    type L<'l> = (A::L<'l>, B::L<'l>, C::L<'l>, D::L<'l>);
 }
+
+impl<A: Life, B: Life, C: Life, D: Life> !NotDerived for (A, B, C, D) {}
