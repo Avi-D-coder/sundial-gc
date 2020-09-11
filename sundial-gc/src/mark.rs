@@ -1,10 +1,10 @@
 use super::gc::*;
+pub use crate::life::*;
 use crate::{
     arena::{Arena, Header, HeaderUnTyped},
     auto_traits::{HasGc, Immutable, NotDerived},
     gc_logic::{free_list::FreeList, type_state::TypeState},
 };
-pub use crate::life::*;
 use smallvec::SmallVec;
 use std::ops::{Index, Range};
 use std::{
@@ -13,8 +13,10 @@ use std::{
     iter, mem, ptr,
 };
 
-pub unsafe trait Mark<'o, 'n, T: Trace + Life> {
-    fn mark<'a: 'n>(&'a self, o: Gc<'o, T>) -> Gc<'n, T::L<'n>>;
+pub unsafe trait Mark<'o, 'n, O: 'o, N: 'n> {
+    /// Mark extends the lifetime of a GCed object.
+    /// `O` and `N` must be the same type with diffrent lifetimes.
+    fn mark<'a: 'n>(&'a self, o: Gc<'o, O>) -> Gc<'n, N>;
 }
 
 // Blanket impl Mark for Arena<T> is in src/arena.rs
@@ -253,7 +255,7 @@ impl Invariant {
 /// You must implement all methods, do not use defaults.
 ///
 /// You must also implement `CoerceLifetime`.
-pub unsafe trait Trace: Immutable + Life {
+pub unsafe trait Trace: Immutable {
     // type Arena: 'static + Sized;
     fn fields(s: &Self, offset: u8, grey_fields: u8, invariant: &Invariant) -> u8;
     unsafe fn evacuate<'e>(
@@ -270,7 +272,7 @@ pub unsafe trait Trace: Immutable + Life {
     const GC_COUNT: u8;
 }
 
-unsafe impl<T: Immutable + Life> Trace for T {
+unsafe impl<T: Immutable> Trace for T {
     default fn fields(_: &Self, _: u8, _: u8, _: &Invariant) -> u8 {
         // This check is superfluous
         // TODO ensure if gets optimized out
@@ -367,7 +369,7 @@ unsafe impl<'r, T: Trace> Trace for Gc<'r, T> {
 
 // std impls
 
-unsafe impl<T: Trace + Life> Trace for Option<T> {
+unsafe impl<T: Trace> Trace for Option<T> {
     default fn fields(s: &Self, offset: u8, grey_fields: u8, invariant: &Invariant) -> u8 {
         match s {
             Some(t) => Trace::fields(t, offset, grey_fields, invariant),
@@ -398,12 +400,6 @@ unsafe impl<T: Trace + Life> Trace for Option<T> {
 
     const GC_COUNT: u8 = T::GC_COUNT;
 }
-
-unsafe impl<T: Life> Life for Option<T> {
-    type L<'l> = Option<T::L<'l>>;
-}
-
-impl<T> !NotDerived for Option<T> {}
 
 unsafe impl<A: Trace, B: Trace> Trace for (A, B) {
     // type Arena = Arena<(A::L<'static>, B::L<'static>)>;
@@ -439,16 +435,3 @@ unsafe impl<A: Trace, B: Trace> Trace for (A, B) {
 
     const GC_COUNT: u8 = A::GC_COUNT + B::GC_COUNT;
 }
-
-unsafe impl<A: Life, B: Life> Life for (A, B) {
-    type L<'l> = (A::L<'l>, B::L<'l>);
-}
-
-impl<A, B> !NotDerived for (A, B) {}
-
-// TODO Trace
-unsafe impl<A: Life, B: Life, C: Life, D: Life> Life for (A, B, C, D) {
-    type L<'l> = (A::L<'l>, B::L<'l>, C::L<'l>, D::L<'l>);
-}
-
-impl<A: Life, B: Life, C: Life, D: Life> !NotDerived for (A, B, C, D) {}

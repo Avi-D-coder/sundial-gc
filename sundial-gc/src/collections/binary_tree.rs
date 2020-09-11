@@ -5,16 +5,16 @@ use std::{cmp::Ordering::*, fmt::Debug, iter::FromIterator, mem, ops::Index, ptr
 use sundial_gc_derive::*;
 
 #[derive(Trace, Ord, PartialOrd, Eq, PartialEq)]
-pub struct Map<'r, K, V>(Gc<'r, Node<'r, K, V>>)
+pub struct Map<'r, K, V>(Option<Gc<'r, Node<'r, K, V>>>)
 where
-    K: Life,
-    V: Life;
+    K: 'r + Trace,
+    V: 'r + Trace;
 
 #[derive(Trace, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub struct Node<'r, K, V>
 where
-    K: Life + Trace,
-    V: Life + Trace,
+    K: 'r + Trace,
+    V: 'r + Trace,
 {
     key: K,
     size: usize,
@@ -23,50 +23,50 @@ where
     value: V,
 }
 
-impl<'r, K: Life, V: Life> Copy for Map<'r, K, V> {}
-impl<'r, K: Life, V: Life> Clone for Map<'r, K, V> {
+impl<'r, K: 'r + Trace, V: 'r + Trace> Copy for Map<'r, K, V> {}
+impl<'r, K: 'r + Trace, V: 'r + Trace> Clone for Map<'r, K, V> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<'r, K: Life, V: Life> Default for Map<'r, K, V> {
+impl<'r, K: 'r + Trace, V: 'r + Trace> Default for Map<'r, K, V> {
     #[inline(always)]
     fn default() -> Self {
         Map(None)
     }
 }
 
-impl<'r, K: Life, V: Life> From<Gc<'r, Node<'r, K, V>>> for Map<'r, K, V> {
+impl<'r, K: 'r + Trace, V: 'r + Trace> From<Gc<'r, Node<'r, K, V>>> for Map<'r, K, V> {
     #[inline(always)]
     fn from(node: Gc<'r, Node<'r, K, V>>) -> Self {
         Map(Some(node))
     }
 }
 
-impl<'r, 'a: 'r, K: Life + Clone + Ord, V: Life + Clone>
+impl<'r, 'a: 'r, K: Trace + Clone + Ord, V: Trace + Clone>
     FromIterator<(&'a Arena<Node<'static, K, V>>, K, V)> for Map<'r, K, V>
 {
     fn from_iter<I: IntoIterator<Item = (&'a Arena<Node<'static, K, V>>, K, V)>>(iter: I) -> Self {
         iter.into_iter()
-            .fold(Map::default(), |map, (arena, k, v)| map.insert(k, v, arena))
+            .fold(Map::default(), |map, (arena, k, v)| Map::corerce_life(map.insert(k, v, arena)))
     }
 }
 
-impl<'r, K: Life + Ord + Clone + Debug, V: Life + Clone + Debug> Debug for Map<'r, K, V> {
+impl<'r, K: Trace + Ord + Clone + Debug, V: Trace + Clone + Debug> Debug for Map<'r, K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_map().entries(self.iter()).finish()
     }
 }
 
-impl<'r, K: Life + Ord + Clone, V: Life + Clone> Index<&K> for Map<'r, K, V> {
+impl<'r, K: Trace + Ord + Clone, V: Trace + Clone> Index<&K> for Map<'r, K, V> {
     type Output = V;
     fn index(&self, key: &K) -> &V {
         self.get(key).unwrap()
     }
 }
 
-impl<'r, K: Life + Ord + Clone, V: Life + Clone> Map<'r, K, V> {
+impl<'r, K: Trace + Life + Ord + Clone, V: Trace + Life + Clone> Map<'r, K, V> {
     pub fn size(&self) -> usize {
         match self {
             Map(Some(n)) => n.size,
@@ -155,7 +155,7 @@ impl<'r, K: Life + Ord + Clone, V: Life + Clone> Map<'r, K, V> {
     }
 }
 
-impl<'r, K: Life + Debug + Clone + Ord, V: Life + Debug + Clone> Debug for Node<'r, K, V> {
+impl<'r, K: Trace + Debug + Clone + Ord, V: Trace + Debug + Clone> Debug for Node<'r, K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Node")
             .field("key", &self.key)
@@ -167,7 +167,7 @@ impl<'r, K: Life + Debug + Clone + Ord, V: Life + Debug + Clone> Debug for Node<
     }
 }
 
-impl<'r, K: Life + Ord + Clone, V: Life + Clone> Node<'r, K, V> {
+impl<'r, K: Trace + Life + Ord + Clone, V: Trace + Life + Clone> Node<'r, K, V> {
     pub fn get(&self, key: &K) -> Option<&V> {
         match (key.cmp(&self.key), &self.left, &self.right) {
             (Equal, _, _) => Some(&self.value),
@@ -811,13 +811,13 @@ impl<'r, K: Life + Ord + Clone, V: Life + Clone> Node<'r, K, V> {
 #[derive(Trace, Clone, Eq, PartialEq)]
 pub struct Iter<'r, K, V>
 where
-    K: Life,
-    V: Life,
+    K: Trace,
+    V: Trace,
 {
     parents: SmallVec<[Gc<'r, Node<'r, K, V>>; 32]>,
 }
 
-impl<'r, K: Life, V: Life> Iterator for Iter<'r, K, V> {
+impl<'r, K: 'r + Trace, V: 'r + Trace> Iterator for Iter<'r, K, V> {
     type Item = (&'r K, &'r V);
     fn next(&mut self) -> Option<Self::Item> {
         self.parents.pop().map(
@@ -850,7 +850,7 @@ impl<'r, K: Life, V: Life> Iterator for Iter<'r, K, V> {
 //     use quickcheck_macros::*;
 //     use std::{collections::BTreeMap, fmt::Debug};
 
-//     fn get_set<K: Life + Clone + Ord + Debug, V: Life + Clone + Eq + Debug>(pairs: Vec<(K, V)>) {
+//     fn get_set<K: Trace + Clone + Ord + Debug, V: Trace + Clone + Eq + Debug>(pairs: Vec<(K, V)>) {
 //         let sorted_pairs: BTreeMap<K, V> = pairs.iter().cloned().collect();
 
 //         let arena: Arena<Node<K, V>> = Arena::new();
@@ -888,7 +888,7 @@ impl<'r, K: Life, V: Life> Iterator for Iter<'r, K, V> {
 //         iter_test(pairs)
 //     }
 
-//     fn iter_test<'r, K: Life + Clone + Ord + Debug, V: Life + Clone + Eq + Debug>(
+//     fn iter_test<'r, K: Trace + Clone + Ord + Debug, V: Trace + Clone + Eq + Debug>(
 //         pairs: Vec<(K, V)>,
 //     ) {
 //         let sorted_pairs: BTreeMap<K, V> = pairs.iter().cloned().collect();

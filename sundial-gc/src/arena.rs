@@ -1,13 +1,12 @@
-use crate::{gc::{self, Gc}, life::{TyEq, Life}};
 use crate::{
+    gc::{Gc, RootIntern},
     gc_logic::{
         bus::{self, Bus, Msg},
         GcThreadBus,
     },
     mark::{GcTypeInfo, Invariant, Mark, Trace},
-};
+gc, NoGc};
 use bus::WorkerMsg;
-use gc::RootIntern;
 use smallvec::SmallVec;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::any::type_name;
@@ -24,7 +23,17 @@ pub(crate) struct Mem {
     _mem: [u8; ARENA_SIZE],
 }
 
-pub struct Arena<T> {
+/// TODO Alloc: Mark
+pub unsafe trait Alloc<'n, O, N: 'n> {
+    /// Create and allocate a new `Gc<T>`.
+    /// This has the effect of marking `T`'s decedents live for the lifetime of the Arena `'a`.
+    ///
+    /// If `T : Copy` & `size_of::<T>() > 8`, you should use `self.gc_copy(&T)` instead.
+    fn gc<'a: 'n>(&'a self, t: O) -> Gc<'n, N>;
+    // TODO gc_*
+}
+
+pub struct Arena<T: Trace> {
     // TODO compact representation of arenas
     // TODO make all these private by wrapping up needed functionality.
     // TODO derive header from next
@@ -57,7 +66,7 @@ pub struct ArenaDyn {
     full: UnsafeCell<SmallVec<[(*mut (), bool, u8); 2]>>,
 }
 
-impl<T: Life> Debug for Arena<T> {
+impl<T: Trace> Debug for Arena<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct(&format!("Arena<{}>", type_name::<T>()))
             .field("header", &(self.header() as *const Header<T>))
@@ -83,7 +92,7 @@ impl Debug for ArenaDyn {
     }
 }
 
-impl<T: Life> Arena<T> {
+impl<T: Trace> Arena<T> {
     /// Returns the pointer of the next object to be allocated.
     /// Returns `None` when the `Arena` is full.
     pub fn next_ptr(&self) -> Option<*const T> {
@@ -278,7 +287,7 @@ pub(crate) fn index(ptr: *const u8, size: u16, align: u16) -> u16 {
     ((ptr as usize - low) / size as usize) as u16
 }
 
-// unsafe impl<'o, 'n, A: Life, T: Life + TyEq<A>> Mark<'o, 'n, T> for Arena<A> {
+// unsafe impl<'o, 'n, A: Trace, T: Trace + TyEq<A>> Mark<'o, 'n, T> for Arena<A> {
 //     fn mark<'a: 'n>(&'a self, old: Gc<'o, T>) -> Gc<'n, T::L<'n>> {
 //         let old_ptr = old.0 as *const _;
 //         let condemned_self =
@@ -318,7 +327,7 @@ pub(crate) fn index(ptr: *const u8, size: u16, align: u16) -> u16 {
 //     }
 // }
 
-impl<T: Life> Drop for Arena<T> {
+impl<T: Trace> Drop for Arena<T> {
     fn drop(&mut self) {
         log::trace!("WORKER: droping: {:?}", self);
 
@@ -573,7 +582,7 @@ impl Drop for ArenaDyn {
 
 // TODO add specialized Mark impl for N: 'static.
 
-impl<A: Life> Arena<A> {
+impl<A: Trace> Arena<A> {
     pub fn new() -> Arena<A> {
         // Register a bus for this thread type combo.
         let bus = GC_BUS.with(|tm| {
@@ -657,20 +666,6 @@ impl<A: Life> Arena<A> {
         self.new_allocation.set(true);
     }
 
-    /// Create a new `Gc<T>`.
-    /// If `T : Copy` & `size_of::<T>() > 8`, you should use `self.gc_copy(&T)` instead.
-    pub fn gc<'r, 'a: 'r, T: Life + TyEq<A>>(&'a self, t: T) -> Gc<'r, T::L<'r>> {
-        unsafe {
-            if self.full() {
-                self.new_block();
-            };
-            let ptr = self.next.get() as *mut T;
-            self.next.set(self.bump_down() as *mut A);
-            ptr::write(ptr, t);
-            self.mark(Gc::new(&*ptr))
-        }
-    }
-
     pub fn box_alloc<'a, 'r: 'a>(&'a self, t: A) -> gc::Box<'r, A> {
         unsafe {
             if self.full() {
@@ -704,7 +699,19 @@ impl<A: Life> Arena<A> {
     }
 }
 
-impl<'l, A: Trace + Life + Copy> Arena<A> {
+unsafe impl<'n, A: Trace + NoGc + 'static> Alloc<'n, A, A> for Arena<A> {
+    fn gc<'a: 'n>(&'a self, t: A) -> Gc<'n, A> {
+        todo!()
+    }
+}
+
+unsafe impl<'n, A: Trace, O, N: 'n> Alloc<'n, O, N> for Arena<A> {
+    default fn gc<'a: 'n>(&'a self, t: O) -> Gc<'n, N> {
+        todo!()
+    }
+}
+
+impl<'l, A: Trace + Trace + Copy> Arena<A> {
     /// Directly copies T instead of reading it onto the stack first.
     pub fn gc_copy<'a, 'r: 'a, T: Copy>(&'a self, t: &T) -> Gc<'r, T> {
         unsafe {
@@ -736,7 +743,7 @@ impl<'l, A: Trace + Life + Copy> Arena<A> {
 fn gc_alloc_test() {
     let a: Arena<usize> = Arena::new();
     let n1 = a.next.get() as usize;
-    a.gc::<usize>(1);
+    a.gc(1);
     let n2 = a.next.get() as usize;
     assert!(n1 == n2 + 8)
 }
@@ -759,7 +766,7 @@ fn gc_copy_test() {
     assert!(n1 == n2 + 8)
 }
 
-impl<'l, A: Trace + Life + Clone> Arena<A> {
+impl<'l, A: Trace + Trace + Clone> Arena<A> {
     pub fn gc_clone<'r, 'a: 'r, T: Clone>(&'a self, t: &T) -> Gc<'r, T> {
         unsafe {
             if self.full() {
@@ -947,7 +954,7 @@ impl CachedArenas {
         }
     }
 
-    fn get<T: Life>(&mut self) -> Option<*mut T> {
+    fn get<T: Trace>(&mut self) -> Option<*mut T> {
         self.0
             .iter_mut()
             .filter(|a| !CachedArena::is_null(**a))
@@ -1005,7 +1012,7 @@ thread_local! {
     // FIXME upon drop/thread end send End for cached_next and Msg::Gc.next
 }
 
-fn key<T: Life>() -> (GcTypeInfo, usize) {
+fn key<T: Trace>() -> (GcTypeInfo, usize) {
     (GcTypeInfo::new::<T>(), ptr::drop_in_place::<T> as usize)
 }
 
@@ -1035,15 +1042,15 @@ fn pre_condition_no_gc_newtype() {
     use sundial_gc_derive::*;
     // Without a Trace impl errors are generated.
     #[derive(Trace)]
-    struct Foo<T>(T);
+    struct Foo<T>(T) where T: Trace;
 
     // let a: Arena<Foo<Gc<usize>>> = Arena::new();
     let b: Arena<Foo<usize>> = Arena::new();
     let c: Arena<Foo<String>> = Arena::new();
 
     // a.gc(Foo(u.gc(1))); //~ [rustc E0597] [E] `u` does not live long enough borrowed value does not live long enough
-    b.gc::<Foo<usize>>(Foo(1));
-    c.gc::<Foo<String>>(Foo(String::from("foo")));
+    b.gc(Foo(1));
+    c.gc(Foo(String::from("foo")));
 }
 
 // #[test]
