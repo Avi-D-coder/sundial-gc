@@ -20,7 +20,7 @@
 #![feature(dropck_eyepatch)]
 
 pub mod arena;
-pub use arena::{Arena, Alloc};
+pub use arena::{Alloc, Arena};
 pub mod auto_traits;
 pub use auto_traits::{Immutable, NoGc};
 pub mod collections;

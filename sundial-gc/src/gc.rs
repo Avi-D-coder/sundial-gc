@@ -105,8 +105,8 @@ pub struct Root<T> {
 //     // fn guard(&self) -> Guard<Gc<T>> {}
 // }
 
-impl<'r, T: Life> From<Gc<'r, T>> for Root<T::L<'static>> {
-    fn from(gc: Gc<'r, T>) -> Root<T::L<'static>> {
+impl<'r, T: GC> From<Gc<'r, T>> for Root<Of<T>> {
+    fn from(gc: Gc<'r, T>) -> Root<Of<T>> {
         todo!()
         // let header = unsafe { &*Header::from(gc.0) };
         // let mut roots = header.intern.roots.lock().unwrap();

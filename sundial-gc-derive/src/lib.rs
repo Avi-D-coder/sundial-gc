@@ -36,7 +36,7 @@ fn trace_impl(input: DeriveInput) -> TokenStream {
 
         where_clause_l
             .predicates
-            .push(parse_quote! { #t: sundial_gc::mark::Life });
+            .push(parse_quote! { #t: sundial_gc::life::GC });
     });
 
     let tuple = |unnamed: Punctuated<Field, Comma>, types: &mut Vec<Type>| {
@@ -200,16 +200,10 @@ fn trace_impl(input: DeriveInput) -> TokenStream {
         .map(|(i, ty)| (ty, &types[..i]))
         .map(|(ty, prior)| quote! {<#ty>::direct_gc_types(t, offset #(+ <#prior>::GC_COUNT)*);});
 
-    let lifetime = generics
-        .lifetimes()
-        .next()
-        .map(|_| quote! {'coerce_lifetime,})
-        .unwrap_or_default();
-
     let type_params: Vec<_> = generics
         .type_params()
         .map(|t| t.ident.clone())
-        .map(|t| quote! { #t::L<'coerce_lifetime> })
+        .map(|t| quote! { #t::Static })
         .collect();
 
     quote! {
@@ -246,8 +240,8 @@ fn trace_impl(input: DeriveInput) -> TokenStream {
             default const GC_COUNT: u8 = #(<#types>::GC_COUNT)+*;
         }
 
-       unsafe impl #impl_generics_l sundial_gc::mark::Life for #top_name #ty_generics #where_clause_l {
-            type L<'coerce_lifetime> = #top_name<#lifetime #(#type_params,)*>;
+       unsafe impl #impl_generics_l sundial_gc::life::GC for #top_name #ty_generics #where_clause_l {
+            type Static = #top_name<'static, #(#type_params,)*>;
        }
 
        impl #impl_generics_l !sundial_gc::auto_traits::NotDerived for #top_name #ty_generics #where_clause_l {}

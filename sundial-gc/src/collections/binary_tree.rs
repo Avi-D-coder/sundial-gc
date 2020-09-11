@@ -1,5 +1,5 @@
 use self::sundial_gc::*;
-use crate as sundial_gc;
+use crate::{self as sundial_gc, Of};
 use smallvec::SmallVec;
 use std::{cmp::Ordering::*, fmt::Debug, iter::FromIterator, mem, ops::Index, ptr};
 use sundial_gc_derive::*;
@@ -7,14 +7,14 @@ use sundial_gc_derive::*;
 #[derive(Trace, Ord, PartialOrd, Eq, PartialEq)]
 pub struct Map<'r, K, V>(Option<Gc<'r, Node<'r, K, V>>>)
 where
-    K: 'r + Trace,
-    V: 'r + Trace;
+    K: 'r + GC,
+    V: 'r + GC;
 
 #[derive(Trace, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub struct Node<'r, K, V>
 where
-    K: 'r + Trace,
-    V: 'r + Trace,
+    K: 'r + GC,
+    V: 'r + GC,
 {
     key: K,
     size: usize,
@@ -23,50 +23,51 @@ where
     value: V,
 }
 
-impl<'r, K: 'r + Trace, V: 'r + Trace> Copy for Map<'r, K, V> {}
-impl<'r, K: 'r + Trace, V: 'r + Trace> Clone for Map<'r, K, V> {
+impl<'r, K: GC, V: GC> Copy for Map<'r, K, V> {}
+impl<'r, K: GC, V: GC> Clone for Map<'r, K, V> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<'r, K: 'r + Trace, V: 'r + Trace> Default for Map<'r, K, V> {
+impl<'r, K: GC, V: GC> Default for Map<'r, K, V> {
     #[inline(always)]
     fn default() -> Self {
         Map(None)
     }
 }
 
-impl<'r, K: 'r + Trace, V: 'r + Trace> From<Gc<'r, Node<'r, K, V>>> for Map<'r, K, V> {
+impl<'r, K: GC, V: GC> From<Gc<'r, Node<'r, K, V>>> for Map<'r, K, V> {
     #[inline(always)]
     fn from(node: Gc<'r, Node<'r, K, V>>) -> Self {
         Map(Some(node))
     }
 }
 
-impl<'r, 'a: 'r, K: Trace + Clone + Ord, V: Trace + Clone>
-    FromIterator<(&'a Arena<Node<'static, K, V>>, K, V)> for Map<'r, K, V>
-{
-    fn from_iter<I: IntoIterator<Item = (&'a Arena<Node<'static, K, V>>, K, V)>>(iter: I) -> Self {
-        iter.into_iter()
-            .fold(Map::default(), |map, (arena, k, v)| Map::corerce_life(map.insert(k, v, arena)))
-    }
-}
+// impl<'r, 'a: 'r, K: GC + Clone + Ord, Kr:  'r + GC + Clone + Ord, V: GC + Clone, Vr: 'r + GC + Clone>
+//     FromIterator<(&'a Arena<Of<Node<'a, K, V>>>, K, V)> for Map<'r, Kr, Vr>
+// {
+//     fn from_iter<I: IntoIterator<Item = (&'a Arena<Node<'a, K, V>>, K, V)>>(iter: I) -> Self {
+//         iter.into_iter()
+//             .fold(Map::default(), |map, (arena, k, v)| map.insert(k, v, arena))
+//     }
+// }
 
-impl<'r, K: Trace + Ord + Clone + Debug, V: Trace + Clone + Debug> Debug for Map<'r, K, V> {
+impl<'r, K: GC + Ord + Clone + Debug, V: GC + Clone + Debug> Debug for Map<'r, K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_map().entries(self.iter()).finish()
+        todo!()
+        // f.debug_map().entries(self.iter()).finish()
     }
 }
 
-impl<'r, K: Trace + Ord + Clone, V: Trace + Clone> Index<&K> for Map<'r, K, V> {
+impl<'r, K: GC + Ord + Clone, V: GC + Clone> Index<&K> for Map<'r, K, V> {
     type Output = V;
     fn index(&self, key: &K) -> &V {
         self.get(key).unwrap()
     }
 }
 
-impl<'r, K: Trace + Life + Ord + Clone, V: Trace + Life + Clone> Map<'r, K, V> {
+impl<'l, K: 'l + GC + Ord + Clone, V: 'l + GC + Clone> Map<'l, K, V> {
     pub fn size(&self) -> usize {
         match self {
             Map(Some(n)) => n.size,
@@ -81,25 +82,26 @@ impl<'r, K: Trace + Life + Ord + Clone, V: Trace + Life + Clone> Map<'r, K, V> {
         }
     }
 
-    pub fn insert<'a: 'r>(
-        self,
-        key: K,
-        value: V,
-        arena: &'a Arena<Node<'static, K, V>>,
-    ) -> Map<'r, K::L<'r>, V::L<'r>> {
-        match self.0 {
-            Some(n) => Map::from(Node::insert(n, key, value, arena)),
-            _ => Map::from(arena.gc(Node {
-                key,
-                value,
-                left: Map::default(),
-                right: Map::default(),
-                size: 1,
-            })),
-        }
-    }
+    // pub fn insert<'r, 'a: 'r, Kr: 'r + GC + Ord + Clone, Vr: 'r + GC + Clone>(
+    //     self,
+    //     key: K,
+    //     value: V,
+    //     arena: &'a Arena<Of<Node<Kr, Vr>>>,
+    // ) -> Map<'r, Kr, Vr> {
+    //     todo!()
+    // match self.0 {
+    //     Some(n) => Map::from(Node::insert(n, key, value, arena)),
+    //     _ => Map::from(arena.gc(Node {
+    //         key,
+    //         value,
+    //         left: Map::default(),
+    //         right: Map::default(),
+    //         size: 1,
+    //     })),
+    // }
+    // }
 
-    // pub fn insert_if_empty<'a: 'r>(
+    // pub fn insert_if_empty<'a: 'r, Kr: GC, Vr: GC>(
     //     self,
     //     key: K,
     //     value: V,
@@ -117,7 +119,7 @@ impl<'r, K: Trace + Life + Ord + Clone, V: Trace + Life + Clone> Map<'r, K, V> {
     //     }
     // }
 
-    pub fn iter(self) -> Iter<'r, K, V> {
+    pub fn iter(self) -> Iter<'l, K, V> {
         let mut parents = SmallVec::new();
 
         if let Map(Some(mut node)) = self {
@@ -134,28 +136,28 @@ impl<'r, K: Trace + Life + Ord + Clone, V: Trace + Life + Clone> Map<'r, K, V> {
         Iter { parents }
     }
 
-    /// TODO non naive implementation.
-    pub fn union<'a: 'r>(
-        self,
-        right: Map<'r, K, V>,
-        arena: &'a Arena<Node<'static, K, V>>,
-    ) -> Map<'r, K, V> {
-        match (self, right) {
-            (Map(Some(left @ Gc(_, _))), Map(Some(Gc(_, _)))) => {
-                let left: Gc<Node<K, V>> = left;
-                let node = right.iter().fold(left, |left, (k, v)| {
-                    Node::insert_if_empty(left, k.clone(), v.clone(), arena)
-                });
-                Map::from(node)
-            }
-            (Map(Some(_)), _) => self,
-            (_, Map(Some(_))) => right,
-            _ => Map(None),
-        }
-    }
+    // /// TODO non naive implementation.
+    // pub fn union<'r, 'a: 'r, Kr: GC, Vr: GC>(
+    //     self,
+    //     right: Map<'r, K, V>,
+    //     arena: &'a Arena<Of<Node<K, V>>>,
+    // ) -> Map<'r, K, V> {
+    //     match (self, right) {
+    //         (Map(Some(left @ Gc(_, _))), Map(Some(Gc(_, _)))) => {
+    //             let left: Gc<Node<K, V>> = left;
+    //             let node = right.iter().fold(left, |left, (k, v)| {
+    //                 Node::insert_if_empty(left, k.clone(), v.clone(), arena)
+    //             });
+    //             Map::from(node)
+    //         }
+    //         (Map(Some(_)), _) => self,
+    //         (_, Map(Some(_))) => right,
+    //         _ => Map(None),
+    //     }
+    // }
 }
 
-impl<'r, K: Trace + Debug + Clone + Ord, V: Trace + Debug + Clone> Debug for Node<'r, K, V> {
+impl<'r, K: GC + Debug + Clone + Ord, V: GC + Debug + Clone> Debug for Node<'r, K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Node")
             .field("key", &self.key)
@@ -167,7 +169,7 @@ impl<'r, K: Trace + Debug + Clone + Ord, V: Trace + Debug + Clone> Debug for Nod
     }
 }
 
-impl<'r, K: Trace + Life + Ord + Clone, V: Trace + Life + Clone> Node<'r, K, V> {
+impl<'r, K: GC + Ord + Clone, V: GC + Clone> Node<'r, K, V> {
     pub fn get(&self, key: &K) -> Option<&V> {
         match (key.cmp(&self.key), &self.left, &self.right) {
             (Equal, _, _) => Some(&self.value),
@@ -176,45 +178,45 @@ impl<'r, K: Trace + Life + Ord + Clone, V: Trace + Life + Clone> Node<'r, K, V> 
         }
     }
 
-    pub fn insert<'a: 'r>(
-        node: Gc<Node<'r, K::L<'r>, V::L<'r>>>,
-        key: K,
-        value: V,
-        arena: &'a Arena<Node<K, V>>,
-    ) -> Gc<'r, Node<'r, K::L<'r>, V::L<'r>>> {
-        match key.cmp(&node.key) {
-            Equal => arena.gc(Node {
-                key,
-                value,
-                left: node.left,
-                right: node.right,
-                size: node.size,
-            }),
-            Less => Node::balance(
-                node.key.clone(),
-                node.value.clone(),
-                node.left.insert(key, value, arena),
-                node.right,
-                arena,
-            ),
-            Greater => Node::balance(
-                node.key.clone(),
-                node.value.clone(),
-                node.left,
-                node.right.insert(key, value, arena),
-                arena,
-            ),
-        }
-    }
+    // pub fn insert<'a: 'r, Kr: GC, Vr: GC>(
+    //     node: Gc<Node<'r, K, V>>,
+    //     key: K,
+    //     value: V,
+    //     arena: &'a Arena<Of<Node<K, V>>>,
+    // ) -> Gc<'r, Node<'r, Kr, Vr>> {
+    //     match key.cmp(&node.key) {
+    //         Equal => arena.gc(Node {
+    //             key,
+    //             value,
+    //             left: node.left,
+    //             right: node.right,
+    //             size: node.size,
+    //         }),
+    //         Less => Node::balance(
+    //             node.key.clone(),
+    //             node.value.clone(),
+    //             node.left.insert(key, value, arena),
+    //             node.right,
+    //             arena,
+    //         ),
+    //         Greater => Node::balance(
+    //             node.key.clone(),
+    //             node.value.clone(),
+    //             node.left,
+    //             node.right.insert(key, value, arena),
+    //             arena,
+    //         ),
+    //     }
+    // }
 
-    // pub fn insert_if_empty<'a: 'r>(
+    // pub fn insert_if_empty<'a: 'r, Kr: GC, Vr: GC>(
     //     node: Gc<'r, Node<K, V>>,
     //     key: K,
     //     value: V,
-    //     arena: &'a Arena<Node<'static, K, V>>,
-    // ) -> Gc<'r, Node<'r, K::L<'r>, V::L<'r>>> {
+    //     arena: &'a Arena<Of<Node< K, V>>>,
+    // ) -> Gc<'r, Node<'r, Kr, Vr>> {
     //     match key.cmp(&node.key) {
-    //         Equal => node,
+    //         Equal => todo!(),
     //         Less => Node::balance(
     //             node.key.clone(),
     //             node.value.clone(),
@@ -235,308 +237,308 @@ impl<'r, K: Trace + Life + Ord + Clone, V: Trace + Life + Clone> Node<'r, K, V> 
     const DELTA: usize = 3;
     const RATIO: usize = 2;
 
-    fn balance<'a: 'r>(
-        key: K,
-        value: V,
-        left: Map<'r, K, V>,
-        right: Map<'r, K, V>,
-        arena: &'a Arena<Node<'static, K, V>>,
-    ) -> Gc<'r, Node<'r, K::L<'r>, V::L<'r>>> {
-        let node = |key: K, value: V, size, left, right| {
-            arena.gc(Node {
-                key,
-                value,
-                size,
-                left,
-                right,
-            })
-        };
+    // fn balance<'a: 'r, Kr: GC, Vr: GC>(
+    //     key: K,
+    //     value: V,
+    //     left: Map<'r, K, V>,
+    //     right: Map<'r, K, V>,
+    //     arena: &'a Arena<Of<Node<K, V>>>,
+    // ) -> Gc<'r, Node<'r, Kr, Vr>> {
+    //     let node = |key: K, value: V, size, left, right| {
+    //         arena.gc(Node {
+    //             key,
+    //             value,
+    //             size,
+    //             left,
+    //             right,
+    //         })
+    //     };
 
-        match left {
-            Map(None) => match right {
-                Map(None) => node(key, value, 1, Map::default(), Map::default()),
+    //     Map::coerce_life(match left {
+    //         Map(None) => match right {
+    //             Map(None) => node(key, value, 1, Map::default(), Map::default()),
 
-                Map(Some(Gc(
-                    Node {
-                        left: Map(None),
-                        right: Map(None),
-                        ..
-                    },
-                    _,
-                ))) => node(key, value, 2, Map::default(), right),
+    //             Map(Some(Gc(
+    //                 Node {
+    //                     left: Map(None),
+    //                     right: Map(None),
+    //                     ..
+    //                 },
+    //                 _,
+    //             ))) => node(key, value, 2, Map::default(), right),
 
-                Map(Some(Gc(
-                    Node {
-                        key: rk,
-                        value: rv,
-                        left: Map(None),
-                        right: rr @ Map(Some(_)),
-                        ..
-                    },
-                    _,
-                ))) => node(
-                    rk.clone(),
-                    rv.clone(),
-                    3,
-                    Map::from(node(key, value, 1, Map::default(), Map::default())),
-                    *rr,
-                ),
+    //             Map(Some(Gc(
+    //                 Node {
+    //                     key: rk,
+    //                     value: rv,
+    //                     left: Map(None),
+    //                     right: rr @ Map(Some(_)),
+    //                     ..
+    //                 },
+    //                 _,
+    //             ))) => node(
+    //                 rk.clone(),
+    //                 rv.clone(),
+    //                 3,
+    //                 Map::from(node(key, value, 1, Map::default(), Map::default())),
+    //                 *rr,
+    //             ),
 
-                Map(Some(Gc(
-                    Node {
-                        key: rk,
-                        value: rv,
-                        left:
-                            Map(Some(Gc(
-                                Node {
-                                    key: rlk,
-                                    value: rlv,
-                                    ..
-                                },
-                                _,
-                            ))),
-                        right: Map(None),
-                        ..
-                    },
-                    _,
-                ))) => node(
-                    rlk.clone(),
-                    rlv.clone(),
-                    3,
-                    Map::from(node(key, value, 1, Map::default(), Map::default())),
-                    Map::from(node(
-                        rk.clone(),
-                        rv.clone(),
-                        1,
-                        Map::default(),
-                        Map::default(),
-                    )),
-                ),
+    //             Map(Some(Gc(
+    //                 Node {
+    //                     key: rk,
+    //                     value: rv,
+    //                     left:
+    //                         Map(Some(Gc(
+    //                             Node {
+    //                                 key: rlk,
+    //                                 value: rlv,
+    //                                 ..
+    //                             },
+    //                             _,
+    //                         ))),
+    //                     right: Map(None),
+    //                     ..
+    //                 },
+    //                 _,
+    //             ))) => node(
+    //                 rlk.clone(),
+    //                 rlv.clone(),
+    //                 3,
+    //                 Map::from(node(key, value, 1, Map::default(), Map::default())),
+    //                 Map::from(node(
+    //                     rk.clone(),
+    //                     rv.clone(),
+    //                     1,
+    //                     Map::default(),
+    //                     Map::default(),
+    //                 )),
+    //             ),
 
-                Map(Some(Gc(
-                    Node {
-                        key: rk,
-                        value: rv,
-                        size: rs,
-                        left:
-                            rl
-                            @
-                            Map(Some(Gc(
-                                Node {
-                                    key: rlk,
-                                    value: rlv,
-                                    size: rls,
-                                    left: rll,
-                                    right: rlr,
-                                },
-                                _,
-                            ))),
-                        right: rr @ Map(Some(Gc(Node { size: rrs, .. }, _))),
-                        ..
-                    },
-                    _,
-                ))) => {
-                    if *rls < Self::RATIO * rrs {
-                        node(
-                            rk.clone(),
-                            rv.clone(),
-                            rs + 1,
-                            Map::from(node(key, value, rls + 1, Map::default(), *rl)),
-                            *rr,
-                        )
-                    } else {
-                        node(
-                            rlk.clone(),
-                            rlv.clone(),
-                            rs + 1,
-                            Map::from(node(key, value, 1 + rll.size(), Map::default(), *rll)),
-                            Map::from(node(
-                                rk.clone(),
-                                rv.clone(),
-                                rrs + rlr.size() + 1,
-                                *rlr,
-                                *rr,
-                            )),
-                        )
-                    }
-                }
-            },
+    //             Map(Some(Gc(
+    //                 Node {
+    //                     key: rk,
+    //                     value: rv,
+    //                     size: rs,
+    //                     left:
+    //                         rl
+    //                         @
+    //                         Map(Some(Gc(
+    //                             Node {
+    //                                 key: rlk,
+    //                                 value: rlv,
+    //                                 size: rls,
+    //                                 left: rll,
+    //                                 right: rlr,
+    //                             },
+    //                             _,
+    //                         ))),
+    //                     right: rr @ Map(Some(Gc(Node { size: rrs, .. }, _))),
+    //                     ..
+    //                 },
+    //                 _,
+    //             ))) => {
+    //                 if *rls < Self::RATIO * rrs {
+    //                     node(
+    //                         rk.clone(),
+    //                         rv.clone(),
+    //                         rs + 1,
+    //                         Map::from(node(key, value, rls + 1, Map::default(), *rl)),
+    //                         *rr,
+    //                     )
+    //                 } else {
+    //                     node(
+    //                         rlk.clone(),
+    //                         rlv.clone(),
+    //                         rs + 1,
+    //                         Map::from(node(key, value, 1 + rll.size(), Map::default(), *rll)),
+    //                         Map::from(node(
+    //                             rk.clone(),
+    //                             rv.clone(),
+    //                             rrs + rlr.size() + 1,
+    //                             *rlr,
+    //                             *rr,
+    //                         )),
+    //                     )
+    //                 }
+    //             }
+    //         },
 
-            // left is Some
-            Map(Some(Gc(
-                Node {
-                    key: lk,
-                    value: lv,
-                    size: ls,
-                    left: ll,
-                    right: lr,
-                },
-                _,
-            ))) => match right {
-                Map(None) => match (ll, lr) {
-                    (Map(None), Map(None)) => arena.gc(Node {
-                        key,
-                        value,
-                        size: 2,
-                        left,
-                        right: Map::default(),
-                    }),
+    //         // left is Some
+    //         Map(Some(Gc(
+    //             Node {
+    //                 key: lk,
+    //                 value: lv,
+    //                 size: ls,
+    //                 left: ll,
+    //                 right: lr,
+    //             },
+    //             _,
+    //         ))) => match right {
+    //             Map(None) => match (ll, lr) {
+    //                 (Map(None), Map(None)) => arena.gc(Node {
+    //                     key,
+    //                     value,
+    //                     size: 2,
+    //                     left,
+    //                     right: Map::default(),
+    //                 }),
 
-                    (
-                        Map(None),
-                        Map(Some(Gc(
-                            Node {
-                                key: lrk,
-                                value: lrv,
-                                ..
-                            },
-                            _,
-                        ))),
-                    ) => node(
-                        lrk.clone(),
-                        lrv.clone(),
-                        3,
-                        Map::from(node(
-                            lk.clone(),
-                            lv.clone(),
-                            1,
-                            Map::default(),
-                            Map::default(),
-                        )),
-                        Map::from(node(key, value, 1, Map::default(), Map::default())),
-                    ),
+    //                 (
+    //                     Map(None),
+    //                     Map(Some(Gc(
+    //                         Node {
+    //                             key: lrk,
+    //                             value: lrv,
+    //                             ..
+    //                         },
+    //                         _,
+    //                     ))),
+    //                 ) => node(
+    //                     lrk.clone(),
+    //                     lrv.clone(),
+    //                     3,
+    //                     Map::from(node(
+    //                         lk.clone(),
+    //                         lv.clone(),
+    //                         1,
+    //                         Map::default(),
+    //                         Map::default(),
+    //                     )),
+    //                     Map::from(node(key, value, 1, Map::default(), Map::default())),
+    //                 ),
 
-                    (Map(Some(_)), Map(None)) => node(
-                        lk.clone(),
-                        lv.clone(),
-                        3,
-                        *ll,
-                        Map::from(node(key, value, 1, Map::default(), Map::default())),
-                    ),
+    //                 (Map(Some(_)), Map(None)) => node(
+    //                     lk.clone(),
+    //                     lv.clone(),
+    //                     3,
+    //                     *ll,
+    //                     Map::from(node(key, value, 1, Map::default(), Map::default())),
+    //                 ),
 
-                    (
-                        Map(Some(Gc(Node { size: lls, .. }, _))),
-                        Map(Some(Gc(
-                            Node {
-                                key: lrk,
-                                value: lrv,
-                                size: lrs,
-                                left: lrl,
-                                right: lrr,
-                            },
-                            _,
-                        ))),
-                    ) => {
-                        if *lrs < Self::RATIO * lls {
-                            node(
-                                lk.clone(),
-                                lv.clone(),
-                                ls + 1,
-                                *ll,
-                                Map::from(node(key, value, 1, Map::default(), Map::default())),
-                            )
-                        } else {
-                            node(
-                                lrk.clone(),
-                                lrv.clone(),
-                                ls + 1,
-                                Map::from(node(
-                                    lk.clone(),
-                                    lv.clone(),
-                                    lls + lrl.size() + 1,
-                                    *ll,
-                                    *lrl,
-                                )),
-                                Map::from(node(key, value, lrr.size() + 1, *lrr, Map::default())),
-                            )
-                        }
-                    }
-                },
+    //                 (
+    //                     Map(Some(Gc(Node { size: lls, .. }, _))),
+    //                     Map(Some(Gc(
+    //                         Node {
+    //                             key: lrk,
+    //                             value: lrv,
+    //                             size: lrs,
+    //                             left: lrl,
+    //                             right: lrr,
+    //                         },
+    //                         _,
+    //                     ))),
+    //                 ) => {
+    //                     if *lrs < Self::RATIO * lls {
+    //                         node(
+    //                             lk.clone(),
+    //                             lv.clone(),
+    //                             ls + 1,
+    //                             *ll,
+    //                             Map::from(node(key, value, 1, Map::default(), Map::default())),
+    //                         )
+    //                     } else {
+    //                         node(
+    //                             lrk.clone(),
+    //                             lrv.clone(),
+    //                             ls + 1,
+    //                             Map::from(node(
+    //                                 lk.clone(),
+    //                                 lv.clone(),
+    //                                 lls + lrl.size() + 1,
+    //                                 *ll,
+    //                                 *lrl,
+    //                             )),
+    //                             Map::from(node(key, value, lrr.size() + 1, *lrr, Map::default())),
+    //                         )
+    //                     }
+    //                 }
+    //             },
 
-                // left and right are Some
-                Map(Some(Gc(
-                    Node {
-                        key: rk,
-                        value: rv,
-                        size: rs,
-                        left: rl,
-                        right: rr,
-                    },
-                    _,
-                ))) => {
-                    if *rs > Self::DELTA * ls {
-                        let Node {
-                            key: rlk,
-                            value: rlv,
-                            size: rls,
-                            left: rll,
-                            right: rlr,
-                        } = rl.0.unwrap().0;
-                        let Node { size: rrs, .. } = rr.0.unwrap().0;
+    //             // left and right are Some
+    //             Map(Some(Gc(
+    //                 Node {
+    //                     key: rk,
+    //                     value: rv,
+    //                     size: rs,
+    //                     left: rl,
+    //                     right: rr,
+    //                 },
+    //                 _,
+    //             ))) => {
+    //                 if *rs > Self::DELTA * ls {
+    //                     let Node {
+    //                         key: rlk,
+    //                         value: rlv,
+    //                         size: rls,
+    //                         left: rll,
+    //                         right: rlr,
+    //                     } = rl.0.unwrap().0;
+    //                     let Node { size: rrs, .. } = rr.0.unwrap().0;
 
-                        if *rls < Self::RATIO * rrs {
-                            node(
-                                rk.clone(),
-                                rv.clone(),
-                                ls + rs + 1,
-                                Map::from(node(key, value, ls + rll.size() + 1, left, *rl)),
-                                Map::from(*rr),
-                            )
-                        } else {
-                            node(
-                                rlk.clone(),
-                                rlv.clone(),
-                                ls + rs + 1,
-                                Map::from(node(key, value, ls + rll.size() + 1, left, *rll)),
-                                Map::from(node(
-                                    rk.clone(),
-                                    rv.clone(),
-                                    rrs + rlr.size() + 1,
-                                    *rlr,
-                                    *rr,
-                                )),
-                            )
-                        }
-                    } else if *ls > Self::DELTA * rs {
-                        let Node { size: lls, .. } = ll.0.unwrap().0;
-                        let Node {
-                            key: lrk,
-                            value: lrv,
-                            size: lrs,
-                            left: lrl,
-                            right: lrr,
-                        } = lr.0.unwrap().0;
+    //                     if *rls < Self::RATIO * rrs {
+    //                         node(
+    //                             rk.clone(),
+    //                             rv.clone(),
+    //                             ls + rs + 1,
+    //                             Map::from(node(key, value, ls + rll.size() + 1, left, *rl)),
+    //                             Map::from(*rr),
+    //                         )
+    //                     } else {
+    //                         node(
+    //                             rlk.clone(),
+    //                             rlv.clone(),
+    //                             ls + rs + 1,
+    //                             Map::from(node(key, value, ls + rll.size() + 1, left, *rll)),
+    //                             Map::from(node(
+    //                                 rk.clone(),
+    //                                 rv.clone(),
+    //                                 rrs + rlr.size() + 1,
+    //                                 *rlr,
+    //                                 *rr,
+    //                             )),
+    //                         )
+    //                     }
+    //                 } else if *ls > Self::DELTA * rs {
+    //                     let Node { size: lls, .. } = ll.0.unwrap().0;
+    //                     let Node {
+    //                         key: lrk,
+    //                         value: lrv,
+    //                         size: lrs,
+    //                         left: lrl,
+    //                         right: lrr,
+    //                     } = lr.0.unwrap().0;
 
-                        if *lrs < Self::RATIO * lls {
-                            node(
-                                lk.clone(),
-                                lv.clone(),
-                                ls + rs + 1,
-                                *ll,
-                                Map::from(node(key, value, rs + lrs + 1, *lr, right)),
-                            )
-                        } else {
-                            node(
-                                lrk.clone(),
-                                lrv.clone(),
-                                ls + rs + 1,
-                                Map::from(node(
-                                    lk.clone(),
-                                    lv.clone(),
-                                    lls + lrl.size() + 1,
-                                    *ll,
-                                    *lrl,
-                                )),
-                                Map::from(node(key, value, rs + lrr.size() + 1, *lrr, right)),
-                            )
-                        }
-                    } else {
-                        node(key, value, ls + rs + 1, left, right)
-                    }
-                }
-            },
-        }
-    }
+    //                     if *lrs < Self::RATIO * lls {
+    //                         node(
+    //                             lk.clone(),
+    //                             lv.clone(),
+    //                             ls + rs + 1,
+    //                             *ll,
+    //                             Map::from(node(key, value, rs + lrs + 1, *lr, right)),
+    //                         )
+    //                     } else {
+    //                         node(
+    //                             lrk.clone(),
+    //                             lrv.clone(),
+    //                             ls + rs + 1,
+    //                             Map::from(node(
+    //                                 lk.clone(),
+    //                                 lv.clone(),
+    //                                 lls + lrl.size() + 1,
+    //                                 *ll,
+    //                                 *lrl,
+    //                             )),
+    //                             Map::from(node(key, value, rs + lrr.size() + 1, *lrr, right)),
+    //                         )
+    //                     }
+    //                 } else {
+    //                     node(key, value, ls + rs + 1, left, right)
+    //                 }
+    //             }
+    //         },
+    //     })
+    // }
 
     // This is supposed to be equivalent but it's not.
     // fn balance(
@@ -811,13 +813,13 @@ impl<'r, K: Trace + Life + Ord + Clone, V: Trace + Life + Clone> Node<'r, K, V> 
 #[derive(Trace, Clone, Eq, PartialEq)]
 pub struct Iter<'r, K, V>
 where
-    K: Trace,
-    V: Trace,
+    K: 'r + GC,
+    V: 'r + GC,
 {
     parents: SmallVec<[Gc<'r, Node<'r, K, V>>; 32]>,
 }
 
-impl<'r, K: 'r + Trace, V: 'r + Trace> Iterator for Iter<'r, K, V> {
+impl<'r, K: GC, V: GC> Iterator for Iter<'r, K, V> {
     type Item = (&'r K, &'r V);
     fn next(&mut self) -> Option<Self::Item> {
         self.parents.pop().map(
@@ -850,7 +852,7 @@ impl<'r, K: 'r + Trace, V: 'r + Trace> Iterator for Iter<'r, K, V> {
 //     use quickcheck_macros::*;
 //     use std::{collections::BTreeMap, fmt::Debug};
 
-//     fn get_set<K: Trace + Clone + Ord + Debug, V: Trace + Clone + Eq + Debug>(pairs: Vec<(K, V)>) {
+//     fn get_set<K: GC + Clone + Ord + Debug, V: GC + Clone + Eq + Debug>(pairs: Vec<(K, V)>) {
 //         let sorted_pairs: BTreeMap<K, V> = pairs.iter().cloned().collect();
 
 //         let arena: Arena<Node<K, V>> = Arena::new();
@@ -888,7 +890,7 @@ impl<'r, K: 'r + Trace, V: 'r + Trace> Iterator for Iter<'r, K, V> {
 //         iter_test(pairs)
 //     }
 
-//     fn iter_test<'r, K: Trace + Clone + Ord + Debug, V: Trace + Clone + Eq + Debug>(
+//     fn iter_test<'r, K: GC + Clone + Ord + Debug, V: GC + Clone + Eq + Debug>(
 //         pairs: Vec<(K, V)>,
 //     ) {
 //         let sorted_pairs: BTreeMap<K, V> = pairs.iter().cloned().collect();

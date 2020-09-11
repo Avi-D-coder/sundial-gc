@@ -1,11 +1,13 @@
 use crate::{
+    gc,
     gc::{Gc, RootIntern},
     gc_logic::{
         bus::{self, Bus, Msg},
         GcThreadBus,
     },
     mark::{GcTypeInfo, Invariant, Mark, Trace},
-gc, NoGc};
+    NoGc,
+};
 use bus::WorkerMsg;
 use smallvec::SmallVec;
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -1041,8 +1043,10 @@ fn pre_condition_no_gc_newtype() {
     use sundial_gc::*;
     use sundial_gc_derive::*;
     // Without a Trace impl errors are generated.
-    #[derive(Trace)]
-    struct Foo<T>(T) where T: Trace;
+    // #[derive(Trace)]
+    struct Foo<T>(T)
+    where
+        T: Trace;
 
     // let a: Arena<Foo<Gc<usize>>> = Arena::new();
     let b: Arena<Foo<usize>> = Arena::new();

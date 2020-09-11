@@ -1,7 +1,4 @@
-use self::sundial_gc::{
-    mark::{ID},
-    *,
-};
+use self::sundial_gc::*;
 use crate as sundial_gc;
 use std::{fmt::Debug, iter, ops::Index};
 use sundial_gc_derive::*;
@@ -9,17 +6,18 @@ use sundial_gc_derive::*;
 #[derive(Trace, Ord, PartialOrd, Eq, PartialEq)]
 struct List<'r, T>(Option<Gc<'r, Elem<'r, T>>>)
 where
-    T: Trace;
+    T: 'r + GC;
 
-#[derive(Trace, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Trace, Clone, Ord, PartialOrd, Eq, PartialEq)]
 struct Elem<'r, T>
-where T: Trace,
+where
+    T: 'r + GC,
 {
     next: List<'r, T>,
     value: T,
 }
 
-impl<'r, T: Trace + Debug> Debug for Elem<'r, T> {
+impl<'r, T: GC + Debug> Debug for Elem<'r, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_list()
             .entries(iter::once(&self.value).chain(self.next.iter()))
@@ -27,7 +25,7 @@ impl<'r, T: Trace + Debug> Debug for Elem<'r, T> {
     }
 }
 
-impl<'r, T: Trace + Debug> Debug for List<'r, T> {
+impl<'r, T: GC + Debug> Debug for List<'r, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.0 {
             Some(e) => e.fmt(f),
@@ -36,34 +34,28 @@ impl<'r, T: Trace + Debug> Debug for List<'r, T> {
     }
 }
 
-impl<'r, T: Trace> From<Gc<'r, Elem<'r, T>>> for List<'r, T> {
+impl<'r, T: GC> From<Gc<'r, Elem<'r, T>>> for List<'r, T> {
     fn from(e: Gc<'r, Elem<'r, T>>) -> Self {
         List(Some(e))
     }
 }
 
-impl<'r, T: Trace+ Copy> Copy for Elem<'r, T> {}
-impl<'r, T: Trace> Clone for Elem<'r, T> {
+impl<'r, T: GC + Copy> Copy for Elem<'r, T> {}
+
+impl<'r, T: GC> Copy for List<'r, T> {}
+impl<'r, T: GC> Clone for List<'r, T> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-
-impl<'r, T: Trace +  Copy> Copy for List<'r, T> {}
-impl<'r, T: Trace> Clone for List<'r, T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<'r, T: Trace> Default for List<'r, T> {
+impl<'r, T: GC> Default for List<'r, T> {
     fn default() -> Self {
         List(None)
     }
 }
 
-impl<'r, T: Trace> Index<usize> for List<'r, T> {
+impl<'r, T: GC> Index<usize> for List<'r, T> {
     type Output = T;
     fn index(&self, index: usize) -> &Self::Output {
         self.iter().nth(index).unwrap()
@@ -83,7 +75,7 @@ impl<'r, T: Trace> Index<usize> for List<'r, T> {
 //     }
 // }
 
-impl<'r, T: Trace> List<'r, T> {
+impl<'r, T: GC> List<'r, T> {
     pub fn iter(self) -> Iter<'r, T> {
         Iter { cursor: self }
     }
@@ -127,12 +119,14 @@ impl<'r, T: Trace> List<'r, T> {
 // }
 
 #[derive(Trace, Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
-pub struct Iter<'r, T> where T: Trace
+pub struct Iter<'r, T>
+where
+    T: 'r + GC,
 {
     cursor: List<'r, T>,
 }
 
-impl<'r, T: Trace> Iterator for Iter<'r, T> {
+impl<'r, T: GC> Iterator for Iter<'r, T> {
     type Item = &'r T;
     fn next(&mut self) -> Option<Self::Item> {
         match self.cursor.0 {
