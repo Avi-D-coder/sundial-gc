@@ -4,6 +4,7 @@ use crate::{
     auto_traits::{HasGc, Immutable, NotDerived},
     gc_logic::{free_list::FreeList, type_state::TypeState},
 };
+pub use crate::life::*;
 use smallvec::SmallVec;
 use std::ops::{Index, Range};
 use std::{
@@ -12,51 +13,11 @@ use std::{
     iter, mem, ptr,
 };
 
-// pub unsafe trait MarkGat<'n, T: CoerceLifetime> {
-//     fn mark_gat<'o>(&'n self, old: &'o T::L<'o>) -> &'n T::L<'n>;
-// }
-
-// unsafe impl<'n, T: Trace + CoerceLifetime> MarkGat<'n, T> for Arena<T::L<'n>> {
-//     fn mark_gat<'o>(&'n self, old: &'o T::L<'o>) -> &'n T::L<'n> {
-//         unsafe { T::coerce_lifetime(old) }
-//     }
-// }
-// This will be sound once GAT or const Eq &str lands.
-// The former will allow transmuting only lifetimes.
-// The latter will make `assert_eq!(type_name::<O>(), type_name::<N>())` const.
-// https://github.com/rust-lang/rfcs/pull/2632.
 pub unsafe trait Mark<'o, 'n, T: Trace + Life> {
     fn mark<'a: 'n>(&'a self, o: Gc<'o, T>) -> Gc<'n, T::L<'n>>;
 }
 
 // Blanket impl Mark for Arena<T> is in src/arena.rs
-
-pub trait GC<T>: Trace + Life {}
-impl<'r, T: Trace + Life, S: Trace + Life + TyEq<T>> GC<T> for S {}
-
-pub unsafe trait Life {
-    type L<'l>: 'l + TyEq<Self>;
-}
-
-unsafe impl<'r, T: Life> Life for Gc<'r, T> {
-    type L<'l> = Gc<'l, T::L<'l>>;
-}
-
-unsafe impl<T: 'static > Life for T {
-    type L<'l> = T;
-}
-
-#[marker]
-pub unsafe trait TyEq<B> {}
-// unsafe impl<T> TyEq<T> for T {}
-unsafe impl<'l, T: Life> TyEq<T> for T::L<'l> {}
-unsafe impl<'l, T: Life> TyEq<T::L<'l>> for T {}
-unsafe impl<'l, A: Life, B: Life> TyEq<B> for A where A::L<'l>: ID<B::L<'l>> {}
-unsafe impl<T, S: GC<T>> TyEq<T> for S {}
-unsafe impl<S, T: GC<S>> TyEq<T> for S {}
-
-pub unsafe trait ID<T> {}
-unsafe impl<T> ID<T> for T {}
 
 pub type Offset = u8;
 
@@ -292,7 +253,7 @@ impl Invariant {
 /// You must implement all methods, do not use defaults.
 ///
 /// You must also implement `CoerceLifetime`.
-pub unsafe trait Trace: Immutable {
+pub unsafe trait Trace: Immutable + Life {
     // type Arena: 'static + Sized;
     fn fields(s: &Self, offset: u8, grey_fields: u8, invariant: &Invariant) -> u8;
     unsafe fn evacuate<'e>(
@@ -309,7 +270,7 @@ pub unsafe trait Trace: Immutable {
     const GC_COUNT: u8;
 }
 
-unsafe impl<T: Immutable> Trace for T {
+unsafe impl<T: Immutable + Life> Trace for T {
     default fn fields(_: &Self, _: u8, _: u8, _: &Invariant) -> u8 {
         // This check is superfluous
         // TODO ensure if gets optimized out

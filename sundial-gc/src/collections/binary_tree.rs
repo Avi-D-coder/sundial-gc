@@ -23,31 +23,6 @@ where
     value: V,
 }
 
-impl<'r, K: Life, V: Life> Node<'r, K, V> {
-    pub fn gc<'new_root, 'arena: 'new_root, 'left, 'right>(
-        arena: &'arena Arena<Self>,
-        key: impl TyEq<K>,
-        size: usize,
-        left: impl TyEq<Map<'r, K, V>>,
-        right: impl TyEq<Map<'r, K, V>>,
-        value: impl TyEq<V>,
-    ) -> Gc<'new_root, Node<'new_root, K::L<'new_root>, V::L<'new_root>>> {
-        // This is UB, until Rust allows initializing a struct field by field.
-        unsafe {
-            let ptr = arena.alloc_unit() as *mut Node<'new_root, K::L<'new_root>, V::L<'new_root>>;
-            let unit = &mut *ptr;
-
-            ptr::copy_nonoverlapping(&key as *const _ as _, &mut unit.key, 1);
-            ptr::copy_nonoverlapping(&size as *const _ as _, &mut unit.size, 1);
-            ptr::copy_nonoverlapping(&left as *const _ as _, &mut unit.left, 1);
-            ptr::copy_nonoverlapping(&right as *const _ as _, &mut unit.right, 1);
-            ptr::copy_nonoverlapping(&value as *const _ as _, &mut unit.value, 1);
-
-            Gc::new(unit)
-        }
-    }
-}
-
 impl<'r, K: Life, V: Life> Copy for Map<'r, K, V> {}
 impl<'r, K: Life, V: Life> Clone for Map<'r, K, V> {
     fn clone(&self) -> Self {

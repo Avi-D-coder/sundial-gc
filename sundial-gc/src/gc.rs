@@ -1,4 +1,4 @@
-use crate::{arena::Header, Arena, Life, Mark, Trace, GC};
+use crate::{arena::Header, Arena, Life, Mark, Trace};
 use std::boxed;
 use std::ops::{Deref, DerefMut};
 use std::{
@@ -93,17 +93,17 @@ pub struct Root<T> {
     intern: *const RootIntern<T>,
 }
 
-impl<'l, T: Life> Root<T> {
-    pub fn into_gc<'r, 'a: 'r>(&self, arena: &'a Arena<impl GC<T>>) -> Gc<'r, T::L<'r>> {
-        let root = unsafe { &*self.intern };
-        let t = unsafe { &*root.gc_ptr.load(Ordering::Acquire) };
-        arena.mark(Gc(t, P(())))
-    }
+// impl<'l, T: Life> Root<T> {
+//     pub fn into_gc<'r, 'a: 'r>(&self, arena: &'a Arena<impl GC<T>>) -> Gc<'r, T::L<'r>> {
+//         let root = unsafe { &*self.intern };
+//         let t = unsafe { &*root.gc_ptr.load(Ordering::Acquire) };
+//         arena.mark(Gc(t, P(())))
+//     }
 
-    // TODO requires deep evac prior to installing new pointer.
-    // /// Block collection of `T` and it's transitive child types.
-    // fn guard(&self) -> Guard<Gc<T>> {}
-}
+//     // TODO requires deep evac prior to installing new pointer.
+//     // /// Block collection of `T` and it's transitive child types.
+//     // fn guard(&self) -> Guard<Gc<T>> {}
+// }
 
 impl<'r, T: Life> From<Gc<'r, T>> for Root<T::L<'static>> {
     fn from(gc: Gc<'r, T>) -> Root<T::L<'static>> {
@@ -165,30 +165,30 @@ fn function_name_test() {
     let one = a.gc(1);
 }
 
-impl<'o, D> Dyn<'o, D> {
-    pub fn try_into_gc<'r, 'a: 'r, T: Life>(
-        &self,
-        arena: &'a Arena<impl GC<T>>,
-    ) -> Option<Gc<'r, T::L<'r>>>
-// D: 'o + GC<A::L<'o>>,
-        // N: 'r + GC<A::L<'r>>,
-    {
-        todo!()
-        // if todo!() {
-        //     None
-        // } else {
-        //     let t = unsafe { &*(self.gc_ref.load(Ordering::Acquire) as *const O) };
-        //     Some(arena.mark(Gc(t, P(()))))
-        // }
-    }
+// impl<'o, D> Dyn<'o, D> {
+//     pub fn try_into_gc<'r, 'a: 'r, T: Life>(
+//         &self,
+//         arena: &'a Arena<impl GC<T>>,
+//     ) -> Option<Gc<'r, T::L<'r>>>
+// // D: 'o + GC<A::L<'o>>,
+//         // N: 'r + GC<A::L<'r>>,
+//     {
+//         todo!()
+//         // if todo!() {
+//         //     None
+//         // } else {
+//         //     let t = unsafe { &*(self.gc_ref.load(Ordering::Acquire) as *const O) };
+//         //     Some(arena.mark(Gc(t, P(()))))
+//         // }
+//     }
 
-    pub fn with_dyn<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(D) -> R,
-    {
-        todo!()
-    }
-}
+//     pub fn with_dyn<F, R>(&self, f: F) -> R
+//     where
+//         F: FnOnce(D) -> R,
+//     {
+//         todo!()
+//     }
+// }
 
 impl<'r, T: Trace> From<Gc<'r, T>> for Dyn<'r, &'r dyn Any> {
     fn from(gc: Gc<'r, T>) -> Dyn<'r, &'r dyn Any> {

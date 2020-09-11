@@ -17,16 +17,19 @@
 #![feature(generic_associated_types)]
 #![feature(associated_type_bounds)]
 #![feature(marker_trait_attr)]
+#![feature(dropck_eyepatch)]
 
 pub mod arena;
 pub use arena::Arena;
 pub mod auto_traits;
 pub use auto_traits::{Immutable, NoGc};
-pub mod collections;
+// pub mod collections;
 pub mod gc;
 pub use gc::{Gc, Root};
 mod gc_logic;
 pub mod mark;
-pub use mark::{Mark, Trace, Life, TyEq, GC};
-pub mod thunk;
-pub use thunk::Thunk;
+pub use mark::{Mark, Trace};
+pub mod life;
+pub use life::*;
+// pub mod thunk;
+// pub use thunk::Thunk;
