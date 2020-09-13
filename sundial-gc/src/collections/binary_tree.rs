@@ -43,14 +43,14 @@ impl<'r, K: GC, V: GC> From<Gc<'r, Node<'r, K, V>>> for Map<'r, K, V> {
     }
 }
 
-// impl<'r, 'a: 'r, K: GC + Clone + Ord, Kr:  'r + GC + Clone + Ord, V: GC + Clone, Vr: 'r + GC + Clone>
-//     FromIterator<(&'a Arena<Of<Node<'a, K, V>>>, K, V)> for Map<'r, Kr, Vr>
-// {
-//     fn from_iter<I: IntoIterator<Item = (&'a Arena<Node<'a, K, V>>, K, V)>>(iter: I) -> Self {
-//         iter.into_iter()
-//             .fold(Map::default(), |map, (arena, k, v)| map.insert(k, v, arena))
-//     }
-// }
+impl<'r, 'a: 'r, K: GC + Clone + Ord, Kr: 'r + GC + Clone + Ord, V: GC + Clone, Vr: 'r + GC + Clone>
+    FromIterator<(&'a Arena<Of<Node<'static, K::Static, V::Static>>>, K, V)> for Map<'r, Kr, Vr>
+{
+    fn from_iter<I: IntoIterator<Item = (&'a Arena<Of<Node<'static, K::Static, V::Static>>>, K, V)>>(iter: I) -> Self {
+        iter.into_iter()
+            .fold(Map::default(), |map, (arena, k, v)| todo!())
+    }
+}
 
 impl<'r, K: GC + Ord + Clone + Debug, V: GC + Clone + Debug> Debug for Map<'r, K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
