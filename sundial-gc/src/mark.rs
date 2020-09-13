@@ -438,6 +438,14 @@ unsafe impl<T: AsStatic> Trace for Vec<T> {
     const GC_COUNT: u8 = T::GC_COUNT;
 }
 
+unsafe impl<T: GC> AsStatic for [T; 32] {
+    type Static = [T::Static; 32];
+}
+
+unsafe impl<T: GC> Trace for [T; 32] {
+    // FIXME
+}
+
 unsafe impl<T: AsStatic> AsStatic for Option<T> {
     type Static = Option<T::Static>;
 }
