@@ -3,12 +3,12 @@ use crate as sundial_gc;
 use std::{fmt::Debug, iter, ops::Index};
 use sundial_gc_derive::*;
 
-#[derive(Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Trace, Ord, PartialOrd, Eq, PartialEq)]
 struct List<'r, T>(Option<Gc<'r, Elem<'r, T>>>)
 where
     T: 'r;
 
-#[derive(Clone, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Trace, Clone, Ord, PartialOrd, Eq, PartialEq)]
 struct Elem<'r, T>
 where
     T: 'r,
@@ -25,103 +25,103 @@ impl<'r, T> Clone for List<'r, T> {
     }
 }
 
-unsafe impl<'r, T> sundial_gc::Trace for List<'r, T>
-where
-    T: GC,
-{
-    default fn fields(
-        s: &Self,
-        offset: u8,
-        grey_fields: u8,
-        invariant: &sundial_gc::mark::Invariant,
-    ) -> u8 {
-        let mut bloom = 0b0000000;
-        let Self(f0) = s;
-        bloom |= Trace::fields(f0, offset, grey_fields, invariant);
-        bloom
-    }
-    default unsafe fn evacuate<'e>(
-        s: &Self,
-        offset: sundial_gc::mark::Offset,
-        grey_fields: u8,
-        invariant: &sundial_gc::mark::Invariant,
-        handlers: &mut sundial_gc::mark::Handlers,
-    ) {
-        let Self(f0) = s;
-        Trace::evacuate(f0, offset, grey_fields, invariant, handlers);
-    }
-    default fn direct_gc_types(
-        t: &mut std::collections::HashMap<sundial_gc::mark::GcTypeInfo, sundial_gc::mark::TypeRow>,
-        offset: u8,
-    ) {
-        <Option<Gc<'r, Elem<'r, T::Static>>>>::direct_gc_types(t, offset);
-    }
-    default fn transitive_gc_types(tti: *mut sundial_gc::mark::Tti) {
-        <Option<Gc<'r, Elem<'r, T::Static>>>>::transitive_gc_types(tti);
-    }
-    default const GC_COUNT: u8 = <Option<Gc<'r, Elem<'r, T::Static>>>>::GC_COUNT;
-}
-unsafe impl<'r, T> sundial_gc::life::GC for List<'r, T>
-where
-    T: sundial_gc::life::GC,
-{
-    type Static = List<'static, T::Static>;
-}
+// unsafe impl<'r, T> sundial_gc::Trace for List<'r, T>
+// where
+//     T: GC,
+// {
+//     default fn fields(
+//         s: &Self,
+//         offset: u8,
+//         grey_fields: u8,
+//         invariant: &sundial_gc::mark::Invariant,
+//     ) -> u8 {
+//         let mut bloom = 0b0000000;
+//         let Self(f0) = s;
+//         bloom |= Trace::fields(f0, offset, grey_fields, invariant);
+//         bloom
+//     }
+//     default unsafe fn evacuate<'e>(
+//         s: &Self,
+//         offset: sundial_gc::mark::Offset,
+//         grey_fields: u8,
+//         invariant: &sundial_gc::mark::Invariant,
+//         handlers: &mut sundial_gc::mark::Handlers,
+//     ) {
+//         let Self(f0) = s;
+//         Trace::evacuate(f0, offset, grey_fields, invariant, handlers);
+//     }
+//     default fn direct_gc_types(
+//         t: &mut std::collections::HashMap<sundial_gc::mark::GcTypeInfo, sundial_gc::mark::TypeRow>,
+//         offset: u8,
+//     ) {
+//         <Option<Gc<'r, Elem<'r, T::Static>>>>::direct_gc_types(t, offset);
+//     }
+//     default fn transitive_gc_types(tti: *mut sundial_gc::mark::Tti) {
+//         <Option<Gc<'r, Elem<'r, T::Static>>>>::transitive_gc_types(tti);
+//     }
+//     default const GC_COUNT: u8 = <Option<Gc<'r, Elem<'r, T::Static>>>>::GC_COUNT;
+// }
+// unsafe impl<'r, T> sundial_gc::life::AsStatic for List<'r, T>
+// where
+//     T: sundial_gc::life::AsStatic,
+// {
+//     type Static = List<'static, T::Static>;
+// }
 
-unsafe impl<'r, T: GC> sundial_gc::Trace for Elem<'r, T> {
-    default fn fields(
-        s: &Self,
-        offset: u8,
-        grey_fields: u8,
-        invariant: &sundial_gc::mark::Invariant,
-    ) -> u8 {
-        let mut bloom = 0b0000000;
-        let Self { next, value } = s;
-        bloom |= Trace::fields(next, offset, grey_fields, invariant);
-        bloom |= Trace::fields(
-            value,
-            offset + <List<'r, T>>::GC_COUNT,
-            grey_fields,
-            invariant,
-        );
-        bloom
-    }
-    default unsafe fn evacuate<'e>(
-        s: &Self,
-        offset: sundial_gc::mark::Offset,
-        grey_fields: u8,
-        invariant: &sundial_gc::mark::Invariant,
-        handlers: &mut sundial_gc::mark::Handlers,
-    ) {
-        let Self { next, value } = s;
-        Trace::evacuate(next, offset, grey_fields, invariant, handlers);
-        Trace::evacuate(
-            value,
-            offset + <List<'r, T>>::GC_COUNT,
-            grey_fields,
-            invariant,
-            handlers,
-        );
-    }
-    default fn direct_gc_types(
-        t: &mut std::collections::HashMap<sundial_gc::mark::GcTypeInfo, sundial_gc::mark::TypeRow>,
-        offset: u8,
-    ) {
-        <List<'r, T::Static>>::direct_gc_types(t, offset);
-        <T>::direct_gc_types(t, offset + <List<'r, T::Static>>::GC_COUNT);
-    }
-    default fn transitive_gc_types(tti: *mut sundial_gc::mark::Tti) {
-        <List<'r, T::Static>>::transitive_gc_types(tti);
-        <T::Static>::transitive_gc_types(tti);
-    }
-    default const GC_COUNT: u8 = <List<'r, T::Static>>::GC_COUNT + <T::Static>::GC_COUNT;
-}
-unsafe impl<'r, T> sundial_gc::life::GC for Elem<'r, T>
-where
-    T: sundial_gc::life::GC,
-{
-    type Static = Elem<'static, T::Static>;
-}
+// unsafe impl<'r, T: GC> sundial_gc::Trace for Elem<'r, T> {
+//     default fn fields(
+//         s: &Self,
+//         offset: u8,
+//         grey_fields: u8,
+//         invariant: &sundial_gc::mark::Invariant,
+//     ) -> u8 {
+//         let mut bloom = 0b0000000;
+//         let Self { next, value } = s;
+//         bloom |= Trace::fields(next, offset, grey_fields, invariant);
+//         bloom |= Trace::fields(
+//             value,
+//             offset + <List<'r, T>>::GC_COUNT,
+//             grey_fields,
+//             invariant,
+//         );
+//         bloom
+//     }
+//     default unsafe fn evacuate<'e>(
+//         s: &Self,
+//         offset: sundial_gc::mark::Offset,
+//         grey_fields: u8,
+//         invariant: &sundial_gc::mark::Invariant,
+//         handlers: &mut sundial_gc::mark::Handlers,
+//     ) {
+//         let Self { next, value } = s;
+//         Trace::evacuate(next, offset, grey_fields, invariant, handlers);
+//         Trace::evacuate(
+//             value,
+//             offset + <List<'r, T>>::GC_COUNT,
+//             grey_fields,
+//             invariant,
+//             handlers,
+//         );
+//     }
+//     default fn direct_gc_types(
+//         t: &mut std::collections::HashMap<sundial_gc::mark::GcTypeInfo, sundial_gc::mark::TypeRow>,
+//         offset: u8,
+//     ) {
+//         <List<'r, T::Static>>::direct_gc_types(t, offset);
+//         <T>::direct_gc_types(t, offset + <List<'r, T::Static>>::GC_COUNT);
+//     }
+//     default fn transitive_gc_types(tti: *mut sundial_gc::mark::Tti) {
+//         <List<'r, T::Static>>::transitive_gc_types(tti);
+//         <T::Static>::transitive_gc_types(tti);
+//     }
+//     default const GC_COUNT: u8 = <List<'r, T::Static>>::GC_COUNT + <T::Static>::GC_COUNT;
+// }
+// unsafe impl<'r, T> sundial_gc::life::AsStatic for Elem<'r, T>
+// where
+//     T: sundial_gc::life::GC,
+// {
+//     type Static = Elem<'static, T::Static>;
+// }
 
 impl<'r, T: Debug> Debug for Elem<'r, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -197,7 +197,12 @@ impl<'r, T: 'r + GC + Clone> List<'r, T> {
     /// This function is recursive and may cause a stack overflow.
     ///
     /// TODO Replace with non recursive variant.
-    pub fn insert<'a: 'r>(self, index: usize, t: T, arena: &'a Arena<Of<Elem<T>>>) -> List<'r, T> {
+    pub fn insert<'a: 'r>(
+        self,
+        index: usize,
+        t: T,
+        arena: &'a Arena<Of<Elem<T::Static>>>,
+    ) -> List<'r, T> {
         let Gc(Elem { next, value }, _) = self.0.unwrap();
         let value: T = value.clone();
 
@@ -210,7 +215,7 @@ impl<'r, T: 'r + GC + Clone> List<'r, T> {
         self,
         index: usize,
         t: T,
-        arena: &'a Arena<Of<Elem<T>>>,
+        arena: &'a Arena<Of<Elem<T::Static>>>,
     ) -> List<'n, N> {
         let Gc(Elem { next, value }, _) = self.0.unwrap();
         let value: T = value.clone();
@@ -224,7 +229,7 @@ impl<'r, T: 'r + GC + Clone> List<'r, T> {
 #[derive(Trace, Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub struct Iter<'r, T>
 where
-    T: 'r + GC,
+    T: 'r,
 {
     cursor: List<'r, T>,
 }

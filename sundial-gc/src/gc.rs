@@ -105,7 +105,7 @@ pub struct Root<T> {
 //     // fn guard(&self) -> Guard<Gc<T>> {}
 // }
 
-impl<'r, T: GC> From<Gc<'r, T>> for Root<Of<T>> {
+impl<'r, T: AsStatic> From<Gc<'r, T>> for Root<Of<T>> {
     fn from(gc: Gc<'r, T>) -> Root<Of<T>> {
         todo!()
         // let header = unsafe { &*Header::from(gc.0) };

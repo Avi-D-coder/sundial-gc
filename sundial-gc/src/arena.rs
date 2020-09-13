@@ -6,7 +6,7 @@ use crate::{
         GcThreadBus,
     },
     mark::{GcTypeInfo, Invariant, Mark, Trace},
-    NoGc, GC,
+    AsStatic, NoGc,
 };
 use bus::WorkerMsg;
 use smallvec::SmallVec;
@@ -713,7 +713,7 @@ impl<A: Trace> Arena<A> {
     }
 }
 
-impl<'l, A: GC + Copy> Arena<A> {
+impl<'l, A: AsStatic + Copy> Arena<A> {
     /// Directly copies T instead of reading it onto the stack first.
     pub fn gc_copy<'a, 'r: 'a, T: Copy>(&'a self, t: &T) -> Gc<'r, T> {
         unsafe {

@@ -5,7 +5,7 @@ use crate::{
     auto_traits::{HasGc, Immutable, NotDerived},
     gc_logic::{free_list::FreeList, type_state::TypeState},
 };
-use smallvec::SmallVec;
+use smallvec::{Array, SmallVec};
 use std::ops::{Index, Range};
 use std::{
     any,
@@ -369,18 +369,47 @@ unsafe impl<'r, T: Trace> Trace for Gc<'r, T> {
 
 // std impls
 
-// unsafe impl<A: GC> GC for SmallVec<A> {
-//     type Static = SmallVec<A::Static>;
-// }
+unsafe impl<A: AsStatic + smallvec::Array> AsStatic for SmallVec<A>
+where
+    <A as AsStatic>::Static: Array,
+{
+    type Static = SmallVec<A::Static>;
+}
 
-// unsafe impl<A: GC> Trace for SmallVec<A> {
-// }
+unsafe impl<A: GC + smallvec::Array> Trace for SmallVec<A> {
+    default fn fields(s: &Self, offset: u8, grey_fields: u8, invariant: &Invariant) -> u8 {
+        s.iter().fold(0b0000_0000, |b, t| {
+            b | Trace::fields(t, offset, grey_fields, invariant)
+        })
+    }
 
-unsafe impl<T: GC> GC for Vec<T> {
+    unsafe fn evacuate<'e>(
+        s: &Self,
+        offset: u8,
+        grey_fields: u8,
+        invariant: &Invariant,
+        handlers: &mut Handlers,
+    ) {
+        s.iter()
+            .for_each(|t| Trace::evacuate(t, offset, grey_fields, invariant, handlers))
+    }
+
+    fn direct_gc_types(t: &mut HashMap<GcTypeInfo, TypeRow>, offset: u8) {
+        A::direct_gc_types(t, offset)
+    }
+
+    fn transitive_gc_types(tti: *mut Tti) {
+        unsafe { Tti::add_trans::<A>(tti) }
+    }
+
+    const GC_COUNT: u8 = A::GC_COUNT;
+}
+
+unsafe impl<T: AsStatic> AsStatic for Vec<T> {
     type Static = Vec<T::Static>;
 }
 
-unsafe impl<T: GC> Trace for Vec<T> {
+unsafe impl<T: AsStatic> Trace for Vec<T> {
     default fn fields(s: &Self, offset: u8, grey_fields: u8, invariant: &Invariant) -> u8 {
         s.iter().fold(0b0000_0000, |b, t| {
             b | Trace::fields(t, offset, grey_fields, invariant)
@@ -409,11 +438,11 @@ unsafe impl<T: GC> Trace for Vec<T> {
     const GC_COUNT: u8 = T::GC_COUNT;
 }
 
-unsafe impl<T: GC> GC for Option<T> {
+unsafe impl<T: AsStatic> AsStatic for Option<T> {
     type Static = Option<T::Static>;
 }
 
-unsafe impl<T: GC> Trace for Option<T> {
+unsafe impl<T: AsStatic> Trace for Option<T> {
     default fn fields(s: &Self, offset: u8, grey_fields: u8, invariant: &Invariant) -> u8 {
         match s {
             Some(t) => Trace::fields(t, offset, grey_fields, invariant),

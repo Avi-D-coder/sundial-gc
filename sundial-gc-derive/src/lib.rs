@@ -32,11 +32,11 @@ fn trace_impl(input: DeriveInput) -> TokenStream {
     generics.type_params().for_each(|t| {
         where_clause
             .predicates
-            .push(parse_quote! { #t: sundial_gc::GC });
+            .push(parse_quote! { #t: sundial_gc::AsStatic });
 
         where_clause_l
             .predicates
-            .push(parse_quote! { #t: sundial_gc::GC });
+            .push(parse_quote! { #t: sundial_gc::AsStatic });
     });
 
     let tuple = |unnamed: Punctuated<Field, Comma>, types: &mut Vec<Type>| {
@@ -45,7 +45,8 @@ fn trace_impl(input: DeriveInput) -> TokenStream {
             .enumerate()
             .map(|(i, Field { ty, .. })| {
                 let i = Ident::new(&format!("f{}", i), Span::call_site());
-                let arg = quote! {#i, offset #( + <<#types as sundial_gc::GC>::Static>::GC_COUNT)*};
+                let arg =
+                    quote! {#i, offset #( + <<#types as sundial_gc::AsStatic>::Static>::GC_COUNT)*};
                 types.push(ty.clone());
                 arg
             })
@@ -67,7 +68,7 @@ fn trace_impl(input: DeriveInput) -> TokenStream {
             .map(|Field { ty, ident, .. }| {
                 let ident = ident.as_ref().unwrap();
                 let arg =
-                    quote! {#ident, offset #( + <<#types as sundial_gc::GC>::Static>::GC_COUNT)*};
+                    quote! {#ident, offset #( + <<#types as sundial_gc::AsStatic>::Static>::GC_COUNT)*};
                 types.push(ty.clone());
                 arg
             })
@@ -234,14 +235,14 @@ fn trace_impl(input: DeriveInput) -> TokenStream {
             }
 
             default fn transitive_gc_types(tti: *mut sundial_gc::mark::Tti) {
-                #(<<#types as sundial_gc::GC>::Static>::transitive_gc_types(tti);
+                #(<<#types as sundial_gc::AsStatic>::Static>::transitive_gc_types(tti);
                   )*
             }
 
-            default const GC_COUNT: u8 = #(<<#types as sundial_gc::GC>::Static>::GC_COUNT)+*;
+            default const GC_COUNT: u8 = #(<<#types as sundial_gc::AsStatic>::Static>::GC_COUNT)+*;
         }
 
-       unsafe impl #impl_generics_l sundial_gc::GC for #top_name #ty_generics #where_clause_l {
+       unsafe impl #impl_generics_l sundial_gc::AsStatic for #top_name #ty_generics #where_clause_l {
             type Static = #top_name<'static, #(#type_params,)*>;
        }
 
