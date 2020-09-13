@@ -255,7 +255,7 @@ impl Invariant {
 /// You must implement all methods, do not use defaults.
 ///
 /// You must also implement `CoerceLifetime`.
-pub unsafe trait Trace: Immutable {
+pub unsafe trait Trace {
     // type Arena: 'static + Sized;
     fn fields(s: &Self, offset: u8, grey_fields: u8, invariant: &Invariant) -> u8;
     unsafe fn evacuate<'e>(
@@ -272,7 +272,7 @@ pub unsafe trait Trace: Immutable {
     const GC_COUNT: u8;
 }
 
-unsafe impl<T: Immutable> Trace for T {
+unsafe impl<T> Trace for T {
     default fn fields(_: &Self, _: u8, _: u8, _: &Invariant) -> u8 {
         // This check is superfluous
         // TODO ensure if gets optimized out

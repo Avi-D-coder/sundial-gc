@@ -6,7 +6,7 @@ use crate::{
         GcThreadBus,
     },
     mark::{GcTypeInfo, Invariant, Mark, Trace},
-    NoGc,
+    NoGc, GC,
 };
 use bus::WorkerMsg;
 use smallvec::SmallVec;
@@ -33,6 +33,18 @@ pub unsafe trait Alloc<'n, O, N: 'n> {
     /// If `T : Copy` & `size_of::<T>() > 8`, you should use `self.gc_copy(&T)` instead.
     fn gc<'a: 'n>(&'a self, t: O) -> Gc<'n, N>;
     // TODO gc_*
+}
+
+unsafe impl<'n, A: NoGc + 'static> Alloc<'n, A, A> for Arena<A> {
+    fn gc<'a: 'n>(&'a self, t: A) -> Gc<'n, A> {
+        todo!()
+    }
+}
+
+unsafe impl<'n, A, O, N: 'n> Alloc<'n, O, N> for Arena<A> {
+    default fn gc<'a: 'n>(&'a self, t: O) -> Gc<'n, N> {
+        todo!()
+    }
 }
 
 pub struct Arena<T: Trace> {
@@ -701,19 +713,7 @@ impl<A: Trace> Arena<A> {
     }
 }
 
-unsafe impl<'n, A: Trace + NoGc + 'static> Alloc<'n, A, A> for Arena<A> {
-    fn gc<'a: 'n>(&'a self, t: A) -> Gc<'n, A> {
-        todo!()
-    }
-}
-
-unsafe impl<'n, A: Trace, O, N: 'n> Alloc<'n, O, N> for Arena<A> {
-    default fn gc<'a: 'n>(&'a self, t: O) -> Gc<'n, N> {
-        todo!()
-    }
-}
-
-impl<'l, A: Trace + Trace + Copy> Arena<A> {
+impl<'l, A: GC + Copy> Arena<A> {
     /// Directly copies T instead of reading it onto the stack first.
     pub fn gc_copy<'a, 'r: 'a, T: Copy>(&'a self, t: &T) -> Gc<'r, T> {
         unsafe {

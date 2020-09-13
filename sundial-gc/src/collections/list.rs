@@ -3,29 +3,137 @@ use crate as sundial_gc;
 use std::{fmt::Debug, iter, ops::Index};
 use sundial_gc_derive::*;
 
-#[derive(Trace, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Ord, PartialOrd, Eq, PartialEq)]
 struct List<'r, T>(Option<Gc<'r, Elem<'r, T>>>)
 where
-    T: 'r + GC;
+    T: 'r;
 
-#[derive(Trace, Clone, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Clone, Ord, PartialOrd, Eq, PartialEq)]
 struct Elem<'r, T>
 where
-    T: 'r + GC,
+    T: 'r,
 {
     next: List<'r, T>,
     value: T,
 }
 
-impl<'r, T: GC + Debug> Debug for Elem<'r, T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_list()
-            .entries(iter::once(&self.value).chain(self.next.iter()))
-            .finish()
+impl<'r, T: Copy> Copy for Elem<'r, T> {}
+impl<'r, T> Copy for List<'r, T> {}
+impl<'r, T> Clone for List<'r, T> {
+    fn clone(&self) -> Self {
+        *self
     }
 }
 
-impl<'r, T: GC + Debug> Debug for List<'r, T> {
+unsafe impl<'r, T> sundial_gc::Trace for List<'r, T>
+where
+    T: GC,
+{
+    default fn fields(
+        s: &Self,
+        offset: u8,
+        grey_fields: u8,
+        invariant: &sundial_gc::mark::Invariant,
+    ) -> u8 {
+        let mut bloom = 0b0000000;
+        let Self(f0) = s;
+        bloom |= Trace::fields(f0, offset, grey_fields, invariant);
+        bloom
+    }
+    default unsafe fn evacuate<'e>(
+        s: &Self,
+        offset: sundial_gc::mark::Offset,
+        grey_fields: u8,
+        invariant: &sundial_gc::mark::Invariant,
+        handlers: &mut sundial_gc::mark::Handlers,
+    ) {
+        let Self(f0) = s;
+        Trace::evacuate(f0, offset, grey_fields, invariant, handlers);
+    }
+    default fn direct_gc_types(
+        t: &mut std::collections::HashMap<sundial_gc::mark::GcTypeInfo, sundial_gc::mark::TypeRow>,
+        offset: u8,
+    ) {
+        <Option<Gc<'r, Elem<'r, T::Static>>>>::direct_gc_types(t, offset);
+    }
+    default fn transitive_gc_types(tti: *mut sundial_gc::mark::Tti) {
+        <Option<Gc<'r, Elem<'r, T::Static>>>>::transitive_gc_types(tti);
+    }
+    default const GC_COUNT: u8 = <Option<Gc<'r, Elem<'r, T::Static>>>>::GC_COUNT;
+}
+unsafe impl<'r, T> sundial_gc::life::GC for List<'r, T>
+where
+    T: sundial_gc::life::GC,
+{
+    type Static = List<'static, T::Static>;
+}
+
+unsafe impl<'r, T: GC> sundial_gc::Trace for Elem<'r, T>
+{
+    default fn fields(
+        s: &Self,
+        offset: u8,
+        grey_fields: u8,
+        invariant: &sundial_gc::mark::Invariant,
+    ) -> u8 {
+        let mut bloom = 0b0000000;
+        let Self { next, value } = s;
+        bloom |= Trace::fields(next, offset, grey_fields, invariant);
+        bloom |= Trace::fields(
+            value,
+            offset + <List<'r, T>>::GC_COUNT,
+            grey_fields,
+            invariant,
+        );
+        bloom
+    }
+    default unsafe fn evacuate<'e>(
+        s: &Self,
+        offset: sundial_gc::mark::Offset,
+        grey_fields: u8,
+        invariant: &sundial_gc::mark::Invariant,
+        handlers: &mut sundial_gc::mark::Handlers,
+    ) {
+        let Self { next, value } = s;
+        Trace::evacuate(next, offset, grey_fields, invariant, handlers);
+        Trace::evacuate(
+            value,
+            offset + <List<'r, T>>::GC_COUNT,
+            grey_fields,
+            invariant,
+            handlers,
+        );
+    }
+    default fn direct_gc_types(
+        t: &mut std::collections::HashMap<sundial_gc::mark::GcTypeInfo, sundial_gc::mark::TypeRow>,
+        offset: u8,
+    ) {
+        <List<'r, T::Static>>::direct_gc_types(t, offset);
+        <T>::direct_gc_types(t, offset + <List<'r, T::Static>>::GC_COUNT);
+    }
+    default fn transitive_gc_types(tti: *mut sundial_gc::mark::Tti) {
+        <List<'r, T::Static>>::transitive_gc_types(tti);
+        <T::Static>::transitive_gc_types(tti);
+    }
+    default const GC_COUNT: u8 = <List<'r, T::Static>>::GC_COUNT + <T::Static>::GC_COUNT;
+}
+unsafe impl<'r, T> sundial_gc::life::GC for Elem<'r, T>
+where
+    T: sundial_gc::life::GC,
+{
+    type Static = Elem<'static, T::Static>;
+}
+
+impl<'r, T: Debug> Debug for Elem<'r, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        todo!()
+        // f.debug_list()
+        //     .entries(iter::once(&self.value).chain(self.next.iter()))
+        //     .finish()
+    }
+}
+
+impl<'r, T: Debug> Debug for List<'r, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.0 {
             Some(e) => e.fmt(f),
@@ -37,15 +145,6 @@ impl<'r, T: GC + Debug> Debug for List<'r, T> {
 impl<'r, T: GC> From<Gc<'r, Elem<'r, T>>> for List<'r, T> {
     fn from(e: Gc<'r, Elem<'r, T>>) -> Self {
         List(Some(e))
-    }
-}
-
-impl<'r, T: GC + Copy> Copy for Elem<'r, T> {}
-
-impl<'r, T: GC> Copy for List<'r, T> {}
-impl<'r, T: GC> Clone for List<'r, T> {
-    fn clone(&self) -> Self {
-        *self
     }
 }
 
@@ -89,34 +188,39 @@ impl<'r, T: GC> List<'r, T> {
 //     }
 // }
 
-/// Inserts an element at position `index`.
-/// This is equivalent `Vec::insert` not Haskell's `insert :: Ord a => a -> [a] -> [a]`.
-///
-/// # Panics
-///
-/// Panics if `index > len`.
-/// This function is recursive and may cause a stack overflow.
-///
-/// TODO Replace with non recursive variant.
-// pub fn insert<'l, 'r, 'a: 'r, T: >(
-//     list: List<'l, T>,
-//     index: usize,
-//     arena: &'a Arena<<Elem<T> as Life>::L<'a>>,
-// ) -> <List<'r, T> as Life>::L<'r>
-// where
-//     // T::L<'static>: GC + Clone + Sized + ID<<T as Life>::L<'static>>,
-//     // T::L<'a>: GC + Sized,
-//     // T::L<'r>: GC + Sized,
-// {
-//     let Gc(Elem { value, next }, _) = list.0.unwrap();
-//     let next: List<'r, <T as Life>::L<'r>> = next.insert(index - 1, arena);
-//     let next = next.insert(index - 1, arena);
+impl<'r, T: 'r + GC + Clone> List<'r, T> {
+    /// Inserts an element at position `index`.
+    /// This is equivalent `Vec::insert` not Haskell's `insert :: Ord a => a -> [a] -> [a]`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index > len`.
+    /// This function is recursive and may cause a stack overflow.
+    ///
+    /// TODO Replace with non recursive variant.
+    pub fn insert<'a: 'r>(self, index: usize, t: T, arena: &'a Arena<Of<Elem<T>>>) -> List<'r, T> {
+        let Gc(Elem { next, value }, _) = self.0.unwrap();
+        let value: T = value.clone();
 
-//     List::from(arena.gc(Elem {
-//         value: value.clone(),
-//         next,
-//     }))
-// }
+        let next: List<'r, T> = next.insert(index - 1, t, arena);
+
+        List(Some(arena.gc(Elem { next, value })))
+    }
+
+    pub fn insert_mark<'n, 'a: 'n, N>(
+        self,
+        index: usize,
+        t: T,
+        arena: &'a Arena<Of<Elem<T>>>,
+    ) -> List<'n, N> {
+        let Gc(Elem { next, value }, _) = self.0.unwrap();
+        let value: T = value.clone();
+
+        let next = next.insert(index - 1, t, arena);
+
+        List(Some(arena.gc(Elem { next, value })))
+    }
+}
 
 #[derive(Trace, Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub struct Iter<'r, T>
