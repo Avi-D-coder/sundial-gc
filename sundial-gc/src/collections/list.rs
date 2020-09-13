@@ -68,8 +68,7 @@ where
     type Static = List<'static, T::Static>;
 }
 
-unsafe impl<'r, T: GC> sundial_gc::Trace for Elem<'r, T>
-{
+unsafe impl<'r, T: GC> sundial_gc::Trace for Elem<'r, T> {
     default fn fields(
         s: &Self,
         offset: u8,

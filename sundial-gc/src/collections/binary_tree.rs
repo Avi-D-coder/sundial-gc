@@ -1,20 +1,19 @@
 use self::sundial_gc::*;
 use crate::{self as sundial_gc, Of};
-use smallvec::SmallVec;
 use std::{cmp::Ordering::*, fmt::Debug, iter::FromIterator, mem, ops::Index, ptr};
 use sundial_gc_derive::*;
 
 #[derive(Trace, Ord, PartialOrd, Eq, PartialEq)]
 pub struct Map<'r, K, V>(Option<Gc<'r, Node<'r, K, V>>>)
 where
-    K: 'r + GC,
-    V: 'r + GC;
+    K: 'r,
+    V: 'r;
 
 #[derive(Trace, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub struct Node<'r, K, V>
 where
-    K: 'r + GC,
-    V: 'r + GC,
+    K: 'r,
+    V: 'r,
 {
     key: K,
     size: usize,
@@ -23,8 +22,8 @@ where
     value: V,
 }
 
-impl<'r, K: GC, V: GC> Copy for Map<'r, K, V> {}
-impl<'r, K: GC, V: GC> Clone for Map<'r, K, V> {
+impl<'r, K, V> Copy for Map<'r, K, V> {}
+impl<'r, K, V> Clone for Map<'r, K, V> {
     fn clone(&self) -> Self {
         *self
     }
@@ -67,7 +66,7 @@ impl<'r, K: GC + Ord + Clone, V: GC + Clone> Index<&K> for Map<'r, K, V> {
     }
 }
 
-impl<'l, K: 'l + GC + Ord + Clone, V: 'l + GC + Clone> Map<'l, K, V> {
+impl<'l, K: GC + Ord + Clone, V: GC + Clone> Map<'l, K, V> {
     pub fn size(&self) -> usize {
         match self {
             Map(Some(n)) => n.size,
@@ -120,7 +119,7 @@ impl<'l, K: 'l + GC + Ord + Clone, V: 'l + GC + Clone> Map<'l, K, V> {
     // }
 
     pub fn iter(self) -> Iter<'l, K, V> {
-        let mut parents = SmallVec::new();
+        let mut parents = Vec::new();
 
         if let Map(Some(mut node)) = self {
             parents.push(node);
@@ -813,10 +812,10 @@ impl<'r, K: GC + Ord + Clone, V: GC + Clone> Node<'r, K, V> {
 #[derive(Trace, Clone, Eq, PartialEq)]
 pub struct Iter<'r, K, V>
 where
-    K: 'r + GC,
-    V: 'r + GC,
+    K: 'r,
+    V: 'r,
 {
-    parents: SmallVec<[Gc<'r, Node<'r, K, V>>; 32]>,
+    parents: Vec<Gc<'r, Node<'r, K, V>>>,
 }
 
 impl<'r, K: GC, V: GC> Iterator for Iter<'r, K, V> {
