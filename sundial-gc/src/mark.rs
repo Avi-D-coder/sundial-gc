@@ -13,7 +13,7 @@ use std::{
     iter, mem, ptr,
 };
 
-pub unsafe trait Mark<'o, 'n, O: 'o, N: 'n> {
+pub unsafe trait Mark<'o, 'n, O, N: 'n> {
     /// Mark extends the lifetime of a GCed object.
     /// `O` and `N` must be the same type with diffrent lifetimes.
     fn mark<'a: 'n>(&'a self, o: Gc<'o, O>) -> Gc<'n, N>;

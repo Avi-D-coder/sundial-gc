@@ -47,7 +47,8 @@ unsafe impl<'n, A, O, N: 'n> Alloc<'n, O, N> for Arena<A> {
     }
 }
 
-pub struct Arena<T: Trace> {
+/// `A` must be `'static`.
+pub struct Arena<A: Trace> {
     // TODO compact representation of arenas
     // TODO make all these private by wrapping up needed functionality.
     // TODO derive header from next
@@ -58,9 +59,9 @@ pub struct Arena<T: Trace> {
     invariant: Invariant,
     marked_grey_fields: Cell<u8>,
     // TODO pub(crate)
-    next: Cell<*mut T>,
+    next: Cell<*mut A>,
     /// (next, new_allocation, grey_fields)
-    full: UnsafeCell<SmallVec<[(*mut T, bool, u8); 2]>>,
+    full: UnsafeCell<SmallVec<[(*mut A, bool, u8); 2]>>,
 }
 
 pub struct ArenaDyn {
@@ -301,45 +302,45 @@ pub(crate) fn index(ptr: *const u8, size: u16, align: u16) -> u16 {
     ((ptr as usize - low) / size as usize) as u16
 }
 
-// unsafe impl<'o, 'n, A: Trace, T: Trace + TyEq<A>> Mark<'o, 'n, T> for Arena<A> {
-//     fn mark<'a: 'n>(&'a self, old: Gc<'o, T>) -> Gc<'n, T::L<'n>> {
-//         let old_ptr = old.0 as *const _;
-//         let condemned_self =
-//             self.invariant.grey_self && self.invariant.condemned(old.0 as *const _);
+unsafe impl<'o, 'n, A: 'static, O, N: 'n> Mark<'o, 'n, O, N> for Arena<A> {
+    fn mark<'a: 'n>(&'a self, old: Gc<'o, O>) -> Gc<'n, N> {
+        let old_ptr = old.0 as *const _;
+        let condemned_self =
+            self.invariant.grey_self && self.invariant.condemned(old.0 as *const _);
 
-//         let cf = Trace::fields(old.0, 0, self.marked_grey_fields.get(), &self.invariant);
+        let cf = Trace::fields(old.0, 0, self.marked_grey_fields.get(), &self.invariant);
 
-//         // Worker encountered fields marked in cf.
-//         self.marked_grey_fields
-//             .set(self.marked_grey_fields.get() | cf);
+        // Worker encountered fields marked in cf.
+        self.marked_grey_fields
+            .set(self.marked_grey_fields.get() | cf);
 
-//         if condemned_self || (0b0000_0000 != cf) {
-//             let next = self.next.get();
-//             if Self::full_ptr(next) {
-//                 self.new_block()
-//             };
+        if condemned_self || (0b0000_0000 != cf) {
+            let next = self.next.get();
+            if Self::full_ptr(next) {
+                self.new_block()
+            };
 
-//             unsafe {
-//                 self.next.set(Self::bump_down_ptr(next) as *mut A);
-//                 std::ptr::copy(old_ptr, next as _, 1);
-//             };
+            unsafe {
+                self.next.set(Self::bump_down_ptr(next) as *mut A);
+                std::ptr::copy(old_ptr, next as _, 1);
+            };
 
-//             let mut new_ptr = next;
-//             let old_header = unsafe { &*Header::from(old_ptr) };
-//             let evacuated = old_header.intern.evacuated.lock();
-//             evacuated
-//                 .unwrap()
-//                 .entry(Arena::index(old.0 as *const _))
-//                 .and_modify(|evacuated_ptr| new_ptr = *evacuated_ptr as _)
-//                 .or_insert(next as *const u8);
+            let mut new_ptr = next;
+            let old_header = unsafe { &*Header::from(old_ptr) };
+            let evacuated = old_header.intern.evacuated.lock();
+            evacuated
+                .unwrap()
+                .entry(Arena::index(old.0 as *const _))
+                .and_modify(|evacuated_ptr| new_ptr = *evacuated_ptr as _)
+                .or_insert(next as *const u8);
 
-//             unsafe { Gc::new(&*(new_ptr as *const _)) }
-//         } else {
-//             // old contains no direct condemned ptrs
-//             unsafe { std::mem::transmute(old) }
-//         }
-//     }
-// }
+            unsafe { Gc::new(&*(new_ptr as *const _)) }
+        } else {
+            // old contains no direct condemned ptrs
+            unsafe { std::mem::transmute(old) }
+        }
+    }
+}
 
 impl<T: Trace> Drop for Arena<T> {
     fn drop(&mut self) {
