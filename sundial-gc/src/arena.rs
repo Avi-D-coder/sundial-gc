@@ -35,20 +35,14 @@ pub unsafe trait Alloc<'n, O, N: 'n> {
     // TODO gc_*
 }
 
-unsafe impl<'n, A: NoGc + 'static> Alloc<'n, A, A> for Arena<A> {
-    fn gc<'a: 'n>(&'a self, t: A) -> Gc<'n, A> {
-        todo!()
-    }
-}
-
-unsafe impl<'n, A, O, N: 'n> Alloc<'n, O, N> for Arena<A> {
+unsafe impl<'n, O, N: 'n> Alloc<'n, O, N> for Arena<N> {
     default fn gc<'a: 'n>(&'a self, t: O) -> Gc<'n, N> {
         todo!()
     }
 }
 
 /// `A` must be `'static`.
-pub struct Arena<A: Trace> {
+pub struct Arena<#[may_dangle] A: Trace> {
     // TODO compact representation of arenas
     // TODO make all these private by wrapping up needed functionality.
     // TODO derive header from next
@@ -342,8 +336,8 @@ unsafe impl<'o, 'n, A: 'static, O, N: 'n> Mark<'o, 'n, O, N> for Arena<A> {
     }
 }
 
-impl<T: Trace> Drop for Arena<T> {
-    fn drop(&mut self) {
+unsafe impl<#[may_dangle] T: Trace> Drop for Arena<T> {
+    fn drop<#[may_dangle] 'a>(&'a mut self) {
         log::trace!("WORKER: droping: {:?}", self);
 
         GC_BUS.with(|tm| {

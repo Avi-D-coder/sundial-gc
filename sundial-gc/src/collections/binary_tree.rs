@@ -1,5 +1,5 @@
-use self::sundial_gc::*;
 use crate as sundial_gc;
+use crate::*;
 use smallvec::SmallVec;
 use std::{cmp::Ordering::*, fmt::Debug, iter::FromIterator, ops::Index};
 use sundial_gc_derive::*;
@@ -31,18 +31,10 @@ impl<'r, K, V> From<Gc<'r, Node<'r, K, V>>> for Map<'r, K, V> {
     }
 }
 
-impl<'r, 'a: 'r, K: 'r + GC + Clone + Ord, V: 'r + GC + Clone>
-    FromIterator<(&'a Arena<Node<'static, K::Static, V::Static>>, (K, V))> for Map<'r, K, V>
-{
-    fn from_iter<
-        I: IntoIterator<Item = (&'a Arena<Node<'static, K::Static, V::Static>>, (K, V))>,
-    >(
-        iter: I,
-    ) -> Self {
+impl<'r, 'a: 'r, K: 'r + GC + Clone + Ord, V: 'r + GC + Clone> FromIterator<(&'a Arena<Node<'r, K, V>>, (K, V))> for Map<'r, K, V> {
+    fn from_iter<I: IntoIterator<Item = (&'a Arena<Node<'r, K, V>>,(K, V))>>(iter: I) -> Self {
         iter.into_iter()
-            .fold(Map::default(), |map, (arena, (k, v))| {
-                map.insert(k, v, arena)
-            })
+            .fold(Map::default(), |map, (arena, (k, v))| map.insert(k, v, arena))
     }
 }
 
@@ -74,12 +66,7 @@ impl<'r, K: 'r + GC + AsStatic + Ord + Clone, V: 'r + AsStatic + GC + Clone> Map
         }
     }
 
-    pub fn insert<'a: 'r>(
-        self,
-        key: K,
-        value: V,
-        arena: &'a Arena<Node<'static, K::Static, V::Static>>,
-    ) -> Map<'r, K, V> {
+    pub fn insert<'a: 'r>(self, key: K, value: V, arena: &'a Arena<Node<K, V>>) -> Map<'r, K, V> {
         match self.0 {
             Some(n) => Map::from(Node::insert(n, key, value, arena)),
             _ => Map::from(arena.gc(Node {
@@ -92,12 +79,7 @@ impl<'r, K: 'r + GC + AsStatic + Ord + Clone, V: 'r + AsStatic + GC + Clone> Map
         }
     }
 
-    pub fn insert_if_empty<'a: 'r>(
-        self,
-        key: K,
-        value: V,
-        arena: &'a Arena<Node<'static, K::Static, V::Static>>,
-    ) -> Map<'r, K, V> {
+    pub fn insert_if_empty<'a: 'r>(self, key: K, value: V, arena: &'a Arena<Node<'r, K, V>>) -> Map<'r, K, V> {
         match self.0 {
             Some(n) => Map::from(Node::insert(n, key, value, arena)),
             _ => Map::from(arena.gc(Node {
@@ -128,11 +110,7 @@ impl<'r, K: 'r + GC + AsStatic + Ord + Clone, V: 'r + AsStatic + GC + Clone> Map
     }
 
     /// TODO non naive implementation.
-    pub fn union<'a: 'r>(
-        self,
-        right: Map<'r, K, V>,
-        arena: &'a Arena<Node<'static, K::Static, V::Static>>,
-    ) -> Map<'r, K, V> {
+    pub fn union<'a: 'r>(self, right: Map<'r, K, V>, arena: &'a Arena<Node<'r, K, V>>) -> Map<'r, K, V> {
         match (self, right) {
             (Map(Some(left @ Gc(_, _))), Map(Some(Gc(_, _)))) => {
                 let left: Gc<Node<K, V>> = left;
@@ -186,7 +164,7 @@ impl<'r, K: 'r + GC + Ord + Clone, V: 'r + GC + Clone> Node<'r, K, V> {
         node: Gc<'r, Node<'r, K, V>>,
         key: K,
         value: V,
-        arena: &'a Arena<Node<'static, K::Static, V::Static>>,
+        arena: &'a Arena<Node<K, V>>,
     ) -> Gc<'r, Node<'r, K, V>> {
         match key.cmp(&node.key) {
             Equal => arena.gc(Node {
@@ -217,7 +195,7 @@ impl<'r, K: 'r + GC + Ord + Clone, V: 'r + GC + Clone> Node<'r, K, V> {
         node: Gc<'r, Node<'r, K, V>>,
         key: K,
         value: V,
-        arena: &'a Arena<Node<'static, K::Static, V::Static>>,
+        arena: &'a Arena<Node<'r, K, V>>,
     ) -> Gc<'r, Node<'r, K, V>> {
         match key.cmp(&node.key) {
             Equal => node,
@@ -241,12 +219,12 @@ impl<'r, K: 'r + GC + Ord + Clone, V: 'r + GC + Clone> Node<'r, K, V> {
     const DELTA: usize = 3;
     const RATIO: usize = 2;
 
-    fn balance<'a: 'r>(
+    fn balance<'a :'r>(
         key: K,
         value: V,
         left: Map<'r, K, V>,
         right: Map<'r, K, V>,
-        arena: &'a Arena<Of<Self>>,
+        arena: &'a Arena<Node<K, V>>,
     ) -> Gc<'r, Self> {
         let node = |key: K, value: V, size, left, right| {
             arena.gc(Node {
@@ -893,7 +871,9 @@ mod binary_tree_tests {
         iter_test(pairs)
     }
 
-    fn iter_test<K: GC + Clone + Ord + Debug, V: GC + Clone + Eq + Debug>(pairs: Vec<(K, V)>) {
+    fn iter_test<K: GC + Clone + Ord + Debug, V: GC + Clone + Eq + Debug>(
+        pairs: Vec<(K, V)>,
+    ) {
         let sorted_pairs: BTreeMap<K, V> = pairs.iter().cloned().collect();
         let arena = Arena::new();
         let map_s = sorted_pairs.iter().fold(Map::default(), |map, (k, v)| {

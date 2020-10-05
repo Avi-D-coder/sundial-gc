@@ -18,6 +18,8 @@
 #![feature(associated_type_bounds)]
 #![feature(marker_trait_attr)]
 #![feature(dropck_eyepatch)]
+#![feature(const_fn_fn_ptr_basics)]
+#![feature(const_fn_transmute)]
 
 pub mod arena;
 pub use arena::{Alloc, Arena};

@@ -1,4 +1,4 @@
-use self::sundial_gc::*;
+use crate::*;
 use crate as sundial_gc;
 use std::{fmt::Debug, iter, ops::Index};
 use sundial_gc_derive::*;
@@ -201,7 +201,7 @@ impl<'r, T: 'r + GC + Clone> List<'r, T> {
         self,
         index: usize,
         t: T,
-        arena: &'a Arena<Of<Elem<T::Static>>>,
+        arena: &'a Arena<Elem<T>>,
     ) -> List<'r, T> {
         let Gc(Elem { next, value }, _) = self.0.unwrap();
         let value: T = value.clone();
@@ -215,14 +215,15 @@ impl<'r, T: 'r + GC + Clone> List<'r, T> {
         self,
         index: usize,
         t: T,
-        arena: &'a Arena<Of<Elem<T::Static>>>,
+        arena: &'a Arena<Elem<T>>,
     ) -> List<'n, N> {
         let Gc(Elem { next, value }, _) = self.0.unwrap();
         let value: T = value.clone();
 
         let next = next.insert(index - 1, t, arena);
 
-        List(Some(arena.gc(Elem { next, value })))
+        // List(Some(arena.gc(Elem { next, value })))
+        todo!()
     }
 }
 

@@ -179,7 +179,7 @@ fn use_after_free_test() {
     drop(arena);
     // }
 
-    // eprintln!("{:?}", _map);
+    // eprintln!("{:?}", _map); // ~ ^^^ cannot move out of `arena` because it is borrowed \ move out of `arena` occurs here
 }
 
 // #[cfg(test)]
